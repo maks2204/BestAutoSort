@@ -621,6 +621,13 @@ namespace BestAutoSort.Tx
             uint rev = netView.GetZDO().DataRevision;
             if (rev == state.SeenRev)
                 return;
+            if (rev < state.SeenRev)
+            {
+                // Stale ZDO packet arrived after newer state (network reorder):
+                // never roll the open GUI backwards.
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer stale rev=" + rev + " (seen " + state.SeenRev + "), skipped");
+                return;
+            }
             byte[] bytes;
             try
             {

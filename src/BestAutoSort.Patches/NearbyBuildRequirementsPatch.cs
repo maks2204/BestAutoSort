@@ -17,5 +17,9 @@ internal static class NearbyBuildRequirementsPatch
 		{
 			__result = NearbyResourceService.HasPieceRequirements(__instance, piece);
 		}
+		else if (!__result && (int)mode == 2)
+		{
+			__result = NearbyResourceService.HasPieceAlmostRequirements(__instance, piece);
+		}
 	}
 }

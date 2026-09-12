@@ -171,6 +171,28 @@ internal static class NearbyResourceService
 		return true;
 	}
 
+	/// <summary>
+	/// List-tint check (CanAlmostBuild): every requirement present at least once,
+	/// counting shared chests. Display only, never prefetches.
+	/// </summary>
+	internal static bool HasPieceAlmostRequirements(Player player, Piece piece)
+	{
+		if (!ModConfig.CraftFromNearbyChests.Value || (Object)(object)player != (Object)(object)Player.m_localPlayer)
+			return false;
+		if ((Object)(object)piece == (Object)null)
+			return false;
+		Requirement[] resources = piece.m_resources;
+		foreach (Requirement val in resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
+			{
+				if (CountAvailable(player, val.m_resItem.m_itemData.m_shared.m_name, -1, ((Component)player).transform.position) < 1)
+					return false;
+			}
+		}
+		return true;
+	}
+
 	internal static ItemData? FindFirstRequiredItem(Player player, Recipe recipe, int qualityLevel, int craftMultiplier, out int amount, out int extraAmount)
 	{
 		amount = 0;
@@ -718,7 +740,7 @@ internal static class NearbyResourceService
 		CachedContainers.Clear();
 		_cachedOrigin = origin;
 		_cacheExpiresAt = Time.time + 0.35f;
-		float rangeSquared = ModConfig.SharedResourceRange.Value * ModConfig.SharedResourceRange.Value;
+		float rangeSquared = EffectiveSharedRange() * EffectiveSharedRange();
 		CachedContainers.AddRange(Object.FindObjectsByType<Container>((FindObjectsSortMode)0).Where(delegate(Container container)
 		{
 			return IsEligible(container, origin, rangeSquared);
@@ -728,6 +750,25 @@ internal static class NearbyResourceService
 			return (val2).sqrMagnitude;
 		}));
 		return CachedContainers;
+	}
+
+	/// <summary>
+	/// Shared-resource range synchronized with building: never smaller than the
+	/// local player's placement reach, so reachable chests are always shared.
+	/// </summary>
+	internal static float EffectiveSharedRange()
+	{
+		float range = ModConfig.SharedResourceRange.Value;
+		try
+		{
+			Player localPlayer = Player.m_localPlayer;
+			if ((Object)(object)localPlayer != (Object)null && localPlayer.m_maxPlaceDistance > range)
+				range = localPlayer.m_maxPlaceDistance;
+		}
+		catch
+		{
+		}
+		return range;
 	}
 
 	private static bool IsEligible(Container container, Vector3 origin, float rangeSquared)

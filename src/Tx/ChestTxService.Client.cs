@@ -213,6 +213,23 @@ namespace BestAutoSort.Tx
 
         private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone)
         {
+            CompleteAdd(srcInv, itemRef, sent, accepted, status, rev, container, onDone, false);
+        }
+
+        private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, bool alreadyRemoved)
+        {
+            if (alreadyRemoved)
+            {
+                // Drag-deposit: the stack already left the inventory when the drag started
+                // (vanilla), and itemRef is the abandoned drag object holding the full
+                // dragged amount. Never remove again — restore whatever was not committed.
+                RestoreDragRemainder(srcInv, itemRef, accepted);
+                if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
+                    TellPlayer("The shared chest refused the move. Try again.");
+                if (onDone != null)
+                    onDone(null, status, rev);
+                return;
+            }
             if (accepted > 0 && srcInv != null && sent != null)
             {
                 string name = sent.Snapshot != null && sent.Snapshot.m_shared != null ? sent.Snapshot.m_shared.m_name : null;
@@ -230,6 +247,27 @@ namespace BestAutoSort.Tx
                 TellPlayer("The shared chest refused the move. Try again.");
             if (onDone != null)
                 onDone(null, status, rev);
+        }
+
+        private static void RestoreDragRemainder(Inventory srcInv, ItemData itemRef, int accepted)
+        {
+            if (srcInv == null || itemRef == null)
+                return;
+            int restore = itemRef.m_stack - accepted;
+            if (restore <= 0)
+                return;
+            itemRef.m_stack = restore;
+            if (srcInv.AddItem(itemRef))
+            {
+                srcInv.m_onChanged?.Invoke();
+                return;
+            }
+            // Inventory full: drop at feet rather than lose the items.
+            Player player = Player.m_localPlayer;
+            if (player != null)
+                ((Humanoid)player).DropItem(srcInv, itemRef, restore);
+            else
+                TxLog.Error("drag restore failed: no player, items lost: " + restore);
         }
 
         private static void CompensateAddBack(Container container, TxOpItem sent, int amount)
@@ -457,6 +495,15 @@ namespace BestAutoSort.Tx
                     RefreshNow(p.Container);
                     TellPlayer("Shared chest request timed out. Try again.");
                     TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op);
+                    try
+                    {
+                        if (p.OnResponse != null)
+                            p.OnResponse(null, TxStatus.UnknownTx, 0u);
+                    }
+                    catch (Exception ex)
+                    {
+                        TxLog.Error("tx=" + p.TxId + " timeout completion failed: " + ex.Message);
+                    }
                     continue;
                 }
                 if (now < p.NextTryAt)

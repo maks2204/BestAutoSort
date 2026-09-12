@@ -190,7 +190,7 @@ namespace BestAutoSort.Patches
                 if (((Humanoid)player).IsItemEquiped(dragItem))
                     player.UnequipItem(dragItem, false);
                 Plugin.LogInstance.LogInfo((object)("[ChestTX] drag-drop chest=" + chestInv.GetWidth() + "x" + chestInv.GetHeight() + " pos=(" + pos.x + "," + pos.y + ")"));
-                ChestTxService.RequestAdd(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null);
+                ChestTxService.RequestAdd(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null, true);
                 TxGui.CancelDrag(gui);
                 return;
             }

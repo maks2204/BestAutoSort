@@ -138,6 +138,11 @@ namespace BestAutoSort.Tx
 
         internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint> onDone)
         {
+            RequestAdd(container, srcInv, item, amount, wantX, wantY, onDone, false);
+        }
+
+        internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint> onDone, bool alreadyRemoved)
+        {
             // A stale grid may report a cell outside the inventory (beyond W/H):
             // then auto-place instead of refusing (like click-move).
             Inventory chestInv = container != null ? container.GetInventory() : null;
@@ -161,7 +166,7 @@ namespace BestAutoSort.Tx
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
                 int accepted = ReadAcceptedAt(pkg, 0);
-                CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone);
+                CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone, alreadyRemoved);
             });
         }
 

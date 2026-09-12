@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 
+
 namespace BestAutoSort.Core;
 
 /// <summary>
@@ -14,6 +15,33 @@ internal static class CustomDataTags
 	internal static bool IsBenignKey(string key)
 	{
 		return !string.IsNullOrEmpty(key) && key.StartsWith("com.jg224.gearslots.", StringComparison.Ordinal);
+	}
+
+	/// <summary>Remove benign bookkeeping keys from the live item. Returns true if anything was removed.</summary>
+	internal static bool StripBenign(ItemDrop.ItemData item)
+	{
+		if (item == null || item.m_customData == null || item.m_customData.Count == 0)
+			return false;
+		bool removed = false;
+		System.Collections.Generic.List<string> drop = null;
+		foreach (System.Collections.Generic.KeyValuePair<string, string> kv in item.m_customData)
+		{
+			if (IsBenignKey(kv.Key))
+			{
+				if (drop == null)
+					drop = new System.Collections.Generic.List<string>();
+				drop.Add(kv.Key);
+			}
+		}
+		if (drop != null)
+		{
+			foreach (string key in drop)
+			{
+				if (item.m_customData.Remove(key))
+					removed = true;
+			}
+		}
+		return removed;
 	}
 
 	internal static bool HasForeignData(ItemDrop.ItemData item)

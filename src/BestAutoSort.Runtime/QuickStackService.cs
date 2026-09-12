@@ -55,6 +55,14 @@ internal sealed class QuickStackService
 		_totalMoved = 0;
 		_submitted = 0;
 		_onCompleted = onCompleted;
+		int cleaned = 0;
+		foreach (ItemData allItem in ((Humanoid)localPlayer).GetInventory().GetAllItems())
+		{
+			if (CustomDataTags.StripBenign(allItem))
+				cleaned++;
+		}
+		if (cleaned > 0)
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack stripped GearSlots tags from " + cleaned + " item(s)"));
 		List<Container> list = FindEligibleContainers(localPlayer);
 		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack start chests=" + list.Count));
 		if (list.Count == 0)

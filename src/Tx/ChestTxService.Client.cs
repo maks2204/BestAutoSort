@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using BestAutoSort.Core;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
 using UnityEngine;
@@ -268,6 +269,7 @@ namespace BestAutoSort.Tx
         {
             if (srcInv == null || itemRef == null)
                 return;
+            CustomDataTags.StripBenign(itemRef);
             int restore = itemRef.m_stack - accepted;
             if (restore <= 0)
                 return;
@@ -332,6 +334,7 @@ namespace BestAutoSort.Tx
                         if (accepted <= 0)
                             continue;
                         ItemData item = TxCodec.ResolvePrefab(prefabHash, inner);
+                        CustomDataTags.StripBenign(item);
                         if (item == null)
                         {
                             TxLog.Error("take completion: prefab " + prefabHash + " missing, compensating " + accepted);

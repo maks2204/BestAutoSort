@@ -300,6 +300,7 @@ internal sealed class QuickStackService
 			int reserved = 0;
 			int quest = 0;
 			int custom = 0;
+			System.Collections.Generic.Dictionary<string, int> customKeys = new System.Collections.Generic.Dictionary<string, int>();
 			foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 			{
 				if (allItem == null || allItem.m_shared == null)
@@ -337,11 +338,31 @@ internal sealed class QuickStackService
 				if (ModConfig.SkipCustomData.Value && allItem.m_customData.Count > 0)
 				{
 					custom++;
+					foreach (System.Collections.Generic.KeyValuePair<string, string> kv in allItem.m_customData)
+					{
+						int kc;
+						customKeys.TryGetValue(kv.Key, out kc);
+						customKeys[kv.Key] = kc + 1;
+					}
 					continue;
 				}
 				movable++;
 			}
 			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: inventory movable=" + movable + " (equipped=" + eq + " hotbar=" + hot + " noautostack=" + noauto + " locked=" + locked + " reserved=" + reserved + " quest=" + quest + " custom=" + custom + ")"));
+			if (customKeys.Count > 0)
+			{
+				System.Text.StringBuilder cksb = new System.Text.StringBuilder();
+				cksb.Append("[ChestTX] quickstack diagnosis: customData keys: ");
+				bool cfirst = true;
+				foreach (System.Collections.Generic.KeyValuePair<string, int> kv in customKeys)
+				{
+					if (!cfirst)
+						cksb.Append(", ");
+					cfirst = false;
+					cksb.Append(kv.Key).Append("x").Append(kv.Value);
+				}
+				Plugin.LogInstance.LogInfo((object)cksb.ToString());
+			}
 			System.Text.StringBuilder sb = new System.Text.StringBuilder();
 			sb.Append("[ChestTX] quickstack diagnosis: ").Append(inRange).Append(" in range, rejected: ");
 			bool first = true;

@@ -171,7 +171,6 @@ internal sealed class QuickStackService
 				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack chest skipped (no candidates)");
 				continue;
 			}
-				continue;
 			TxOpCall call = new TxOpCall();
 			call.Op = TxOp.AddBatch;
 			call.Items.AddRange(candidates);
@@ -207,8 +206,6 @@ internal sealed class QuickStackService
 		}
 		if (!ChestTxService.IsShared(openContainer))
 		{
-			if (!openContainer.IsOwner())
-				return true;
 			if (!openContainer.IsOwner())
 				return true;
 			List<TransferRecord> records = new List<TransferRecord>();

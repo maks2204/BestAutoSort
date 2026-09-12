@@ -489,6 +489,7 @@ namespace BestAutoSort.Tx
             body.Write((int)TxOp.Query);
             body.Write(0u);
             body.Write(LocalPlayerId());
+            body.Write(LocalActorPos());
             body.Write(false);
             body.Write(false);
             ZPackage request = new ZPackage();
@@ -618,6 +619,7 @@ namespace BestAutoSort.Tx
             body.Write((int)op);
             body.Write(0u);
             body.Write(LocalPlayerId());
+            body.Write(LocalActorPos());
             body.Write(false);
             body.Write(false);
             ZPackage request = new ZPackage();
@@ -781,6 +783,14 @@ namespace BestAutoSort.Tx
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return 0u;
             return netView.GetZDO().DataRevision;
+        }
+
+        private static Vector3 LocalActorPos()
+        {
+            Player player = Player.m_localPlayer;
+            if ((Object)player == (Object)null)
+                return Vector3.zero;
+            return ((Component)player).transform.position;
         }
 
         private static long LocalPlayerId()

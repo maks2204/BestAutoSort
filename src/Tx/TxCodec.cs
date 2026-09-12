@@ -7,7 +7,7 @@ namespace BestAutoSort.Tx
 {
     /// <summary>
     /// Encoding of ChestTX request/response bodies into ZPackage.
-    /// Request layout: [proto:int][txId:long][op:int][baseRev:uint][playerId:long][body]
+    /// Request layout: [proto:int][op:int][baseRev:uint][playerId:long][actorPos:vec3][body]
     /// Response layout: [txId:long][status:int][revision:uint][totalsOnly:bool][body]
     /// Item layout: [prefabHash:int][itemPkg:ZPackage][amount:int][x:int][y:int][maxStack:int]
     /// Items are never held across RPCs: the snapshot is serialized immediately, and
@@ -15,23 +15,25 @@ namespace BestAutoSort.Tx
     /// </summary>
     internal static class TxCodec
     {
-        public const int ProtoVersion = 1;
+        public const int ProtoVersion = 2;
 
-        public static void WriteHeader(ZPackage pkg, long txId, TxOp op, uint baseRev, long playerId)
+        public static void WriteHeader(ZPackage pkg, long txId, TxOp op, uint baseRev, long playerId, Vector3 actorPos)
         {
             pkg.Write(ProtoVersion);
             pkg.Write(txId);
             pkg.Write((int)op);
             pkg.Write(baseRev);
             pkg.Write(playerId);
+            pkg.Write(actorPos);
         }
 
-        public static bool ReadHeader(ZPackage pkg, out long txId, out TxOp op, out uint baseRev, out long playerId)
+        public static bool ReadHeader(ZPackage pkg, out long txId, out TxOp op, out uint baseRev, out long playerId, out Vector3 actorPos)
         {
             txId = 0L;
             op = 0;
             baseRev = 0u;
             playerId = 0L;
+            actorPos = Vector3.zero;
             try
             {
                 if (pkg.ReadInt() != ProtoVersion)
@@ -40,6 +42,7 @@ namespace BestAutoSort.Tx
                 op = (TxOp)pkg.ReadInt();
                 baseRev = pkg.ReadUInt();
                 playerId = pkg.ReadLong();
+                actorPos = pkg.ReadVector3();
                 return true;
             }
             catch (Exception)

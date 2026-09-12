@@ -462,6 +462,7 @@ namespace BestAutoSort.Tx
             pkg.Write((int)call.Op);
             pkg.Write(baseRev);
             pkg.Write(LocalPlayerId());
+            pkg.Write(LocalActorPos());
             pkg.Write(call.EnforceRule);
             pkg.Write(call.RespectReserves);
             switch (call.Op)
@@ -529,7 +530,8 @@ namespace BestAutoSort.Tx
             TxOpCall call;
             uint baseRev;
             long playerId;
-            if (!DecodeCall(payload, out call, out baseRev, out playerId))
+            Vector3 actorPos;
+            if (!DecodeCall(payload, out call, out baseRev, out playerId, out actorPos))
             {
                 TxLog.Warn("tx=" + txId + " undecodable request from " + sender);
                 return;
@@ -552,7 +554,7 @@ namespace BestAutoSort.Tx
                 RespondQuery(container, sender, txId);
                 return;
             }
-            if (!ChestAuthority.CanUse(container, sender, playerId))
+            if (!ChestAuthority.CanUse(container, sender, playerId, actorPos))
             {
                 TxLog.Warn("tx=" + txId + " REJECT access peer=" + sender);
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), true, call.Op);
@@ -577,11 +579,12 @@ namespace BestAutoSort.Tx
             Drain(state);
         }
 
-        private static bool DecodeCall(ZPackage payload, out TxOpCall call, out uint baseRev, out long playerId)
+        private static bool DecodeCall(ZPackage payload, out TxOpCall call, out uint baseRev, out long playerId, out Vector3 actorPos)
         {
             call = null;
             baseRev = 0u;
             playerId = 0L;
+            actorPos = Vector3.zero;
             try
             {
                 if (payload.ReadInt() != TxCodec.ProtoVersion)
@@ -589,6 +592,7 @@ namespace BestAutoSort.Tx
                 TxOp op = (TxOp)payload.ReadInt();
                 baseRev = payload.ReadUInt();
                 playerId = payload.ReadLong();
+                actorPos = payload.ReadVector3();
                 call = new TxOpCall();
                 call.Op = op;
                 call.EnforceRule = payload.ReadBool();

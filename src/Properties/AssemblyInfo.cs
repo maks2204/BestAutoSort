@@ -5,8 +5,8 @@ using System.Runtime.Versioning;
 
 [assembly: AssemblyCompany("maks2204")]
 [assembly: AssemblyConfiguration("Release")]
-[assembly: AssemblyFileVersion("0.1.5.0")]
-[assembly: AssemblyInformationalVersion("0.1.5")]
+[assembly: AssemblyFileVersion("0.1.6.0")]
+[assembly: AssemblyInformationalVersion("0.1.6")]
 [assembly: AssemblyProduct("BestAutoSort")]
 [assembly: AssemblyTitle("BestAutoSort")]
-[assembly: AssemblyVersion("0.1.5.0")]
+[assembly: AssemblyVersion("0.1.6.0")]

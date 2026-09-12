@@ -84,14 +84,19 @@ internal static class ChestAuthority
 		return false;
 	}
 
-	internal static bool CanUse(Container container, long sender, long claimedPlayerId)
+	internal static bool CanUse(Container container, long sender, long claimedPlayerId, Vector3 claimedPos)
 	{
-		if (!ResolveActor(sender, out var playerId, out var position) || playerId != claimedPlayerId)
+		// The range check uses the position stamped by the client: the manager's
+		// replicated copy of a remote player lags behind, which wrongly rejected
+		// walk-up-and-click deposits (items bounced back to the inventory).
+		// Spoofing is still contained: the playerId must match the ZDO-owned
+		// character, plus vanilla CheckAccess and the ward check apply.
+		if (!ResolveActor(sender, out var playerId, out var _) || playerId != claimedPlayerId)
 		{
 			return false;
 		}
 		float num = Mathf.Clamp(ModConfig.NearbyRange.Value, 4f, 100f);
-		Vector3 val = ((Component)container).transform.position - position;
+		Vector3 val = ((Component)container).transform.position - claimedPos;
 		if ((val).sqrMagnitude <= num * num && TxReflect.HasAccess(container, playerId))
 		{
 			return WardAccess(container, playerId);

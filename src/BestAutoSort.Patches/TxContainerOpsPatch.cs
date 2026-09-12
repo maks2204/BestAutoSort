@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.Tx;
+using BestAutoSort.TxCore;
 using HarmonyLib;
 using UnityEngine;
 
@@ -60,7 +61,23 @@ namespace BestAutoSort.Patches
                 __result = true;
                 return false;
             }
-            ChestTxService.RequestTakeBatch(__instance, playerInv, items, null);
+            Container container = __instance;
+            ChestTxService.RequestTakeBatch(container, playerInv, items,
+                delegate (ZPackage pkg, TxStatus status, uint rev)
+                {
+                    List<DecodedTake> takes = TxCodec.ReadTakeResults(pkg);
+                    if (takes == null)
+                        return;
+                    List<TransferRecord> records = new List<TransferRecord>();
+                    for (int i = 0; i < takes.Count; i++)
+                    {
+                        DecodedTake t = takes[i];
+                        if (t != null && t.Item != null && t.Item.m_shared != null && t.Accepted > 0)
+                            records.Add(new TransferRecord(t.Item.m_shared.m_name, t.Item.GetIcon(), t.Accepted, t.Item.m_shared.m_maxStackSize));
+                    }
+                    if (records.Count > 0)
+                        TransferVisuals.PlayToPlayer(records, container);
+                });
             __result = true;
             return false;
         }
@@ -105,7 +122,17 @@ namespace BestAutoSort.Patches
             }
             if (items.Count == 0)
                 return false;
-            ChestTxService.RequestAddBatch(__instance, playerInv, items, null);
+            Container stackContainer = __instance;
+            TxOpCall stackCall = new TxOpCall();
+            stackCall.Op = TxOp.AddBatch;
+            stackCall.Items.AddRange(items);
+            stackCall.EnforceRule = false;
+            ChestTxService.SubmitCall(stackContainer, stackCall, playerInv,
+                delegate (List<TransferRecord> records)
+                {
+                    if (records.Count > 0)
+                        TransferVisuals.Play(records, stackContainer);
+                });
             return false;
         }
     }

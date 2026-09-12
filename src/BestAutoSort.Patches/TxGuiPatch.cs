@@ -220,11 +220,8 @@ namespace BestAutoSort.Patches
                 return true;
             if (TxGui.BlockedByFeed(container))
                 return false;
-            if (container.IsOwner())
-            {
-                ChestTxService.DrainForLocal(container);
-                return true;
-            }
+            // Всегда через tx (владелец — локально в очередь): иначе у владельца
+            // немая ванилла без визуала и без броадкаста.
             Player player = Player.m_localPlayer;
             if ((Object)player == (Object)null || player.IsTeleporting())
                 return false;
@@ -232,6 +229,7 @@ namespace BestAutoSort.Patches
             Inventory playerInv = ((Humanoid)player).GetInventory();
             if (chestInv == null || playerInv == null)
                 return false;
+            ChestTxService.DrainForLocal(container);
             List<TxOpItem> items = new List<TxOpItem>();
             foreach (ItemData it in new List<ItemData>(chestInv.GetAllItems()))
             {
@@ -241,7 +239,22 @@ namespace BestAutoSort.Patches
             }
             if (items.Count == 0)
                 return false;
-            ChestTxService.RequestTakeBatch(container, playerInv, items, null);
+            ChestTxService.RequestTakeBatch(container, playerInv, items,
+                delegate (ZPackage pkg, TxStatus status, uint rev)
+                {
+                    List<DecodedTake> takes = TxCodec.ReadTakeResults(pkg);
+                    if (takes == null)
+                        return;
+                    List<TransferRecord> records = new List<TransferRecord>();
+                    for (int i = 0; i < takes.Count; i++)
+                    {
+                        DecodedTake t = takes[i];
+                        if (t != null && t.Item != null && t.Item.m_shared != null && t.Accepted > 0)
+                            records.Add(new TransferRecord(t.Item.m_shared.m_name, t.Item.GetIcon(), t.Accepted, t.Item.m_shared.m_maxStackSize));
+                    }
+                    if (records.Count > 0)
+                        TransferVisuals.PlayToPlayer(records, container);
+                });
             return false;
         }
     }
@@ -256,11 +269,8 @@ namespace BestAutoSort.Patches
                 return true;
             if (TxGui.BlockedByFeed(container))
                 return false;
-            if (container.IsOwner())
-            {
-                ChestTxService.DrainForLocal(container);
-                return true;
-            }
+            // Всегда через tx (владелец — локально в очередь): иначе у владельца
+            // немая ванилла без визуала и без броадкаста.
             Player player = Player.m_localPlayer;
             if ((Object)player == (Object)null || player.IsTeleporting())
                 return false;
@@ -268,6 +278,7 @@ namespace BestAutoSort.Patches
             Inventory playerInv = ((Humanoid)player).GetInventory();
             if (chestInv == null || playerInv == null)
                 return false;
+            ChestTxService.DrainForLocal(container);
             HashSet<string> names = new HashSet<string>();
             foreach (ItemData chestItem in chestInv.GetAllItems())
             {
@@ -291,23 +302,25 @@ namespace BestAutoSort.Patches
             }
             if (items.Count == 0)
                 return false;
-            ChestTxService.RequestAddBatch(container, playerInv, items,
-                delegate (ZPackage pkg, TxStatus status, uint rev)
+            TxOpCall call = new TxOpCall();
+            call.Op = TxOp.AddBatch;
+            call.Items.AddRange(items);
+            call.EnforceRule = false;
+            ChestTxService.SubmitCall(container, call, playerInv,
+                delegate (List<TransferRecord> records)
                 {
                     int total = 0;
-                    try
-                    {
-                        int n = pkg != null ? pkg.ReadInt() : 0;
-                        for (int i = 0; i < n; i++)
-                            total += pkg.ReadInt();
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    for (int i = 0; i < records.Count; i++)
+                        total += records[i].Amount;
                     if (total > 0)
+                    {
+                        TransferVisuals.Play(records, container);
                         TxGui.TellPlayer(Localization.instance.Localize("$msg_stackall " + total));
+                    }
                     else
+                    {
                         TxGui.TellPlayer(Localization.instance.Localize("$msg_stackall_none"));
+                    }
                 });
             return false;
         }

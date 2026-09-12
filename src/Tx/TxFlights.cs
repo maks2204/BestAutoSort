@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
-using BestAutoSort.TxCore;
 using UnityEngine;
 
 namespace BestAutoSort.Tx

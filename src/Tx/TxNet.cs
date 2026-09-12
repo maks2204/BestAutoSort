@@ -42,6 +42,7 @@ namespace BestAutoSort.Tx
             {
                 _registeredRpc = instance;
                 CompatiblePeers.Clear();
+                instance.Register<ZPackage>(TxFlights.FlightsRpc, TxFlights.OnFlightPacket);
                 instance.Register<string>(HelloRpc, delegate (long sender, string version)
                 {
                     if (Plugin.IsActive)

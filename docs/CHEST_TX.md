@@ -58,6 +58,10 @@ operations (exception: one-shot explicit acquire for upgrades — no loops).
   global merge and no fallback); without a cell — auto-place.
 - Presence (ViewerOpen/Close) is fire-and-forget, no responses.
 - EnforceLid counts the manager's own open GUI too.
+- Quick-stack flights (`TxFlights`): after every committed AddBatch the manager
+  broadcasts `(txId, chest, sourcePos, hash+amount list)` to all peers; receivers
+  resolve icons locally and play `TransferVisuals.PlayFrom`. The originator is
+  skipped by matching the session id in the txId high bits — order-safe both ways.
 
 `Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade / SetRule`
 (+ `ViewerOpen/Close`, `Query`). GUI, QuickStack, restock, prefetches,

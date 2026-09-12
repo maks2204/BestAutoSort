@@ -33,7 +33,16 @@ internal static class TransferVisuals
 
 	private static void Play(IReadOnlyCollection<TransferRecord> records, Container container, bool toPlayer)
 	{
-		if (!ModConfig.ShowTransferFlights.Value || records.Count == 0 || (Object)(object)container == (Object)null)
+		PlayFrom(records, container, toPlayer, null);
+	}
+
+	/// <summary>
+	/// Flights with an explicit start point (for remote viewers: start at the sorter position).
+	/// fromPos == null means start at the local player (previous behavior).
+	/// </summary>
+	internal static void PlayFrom(IReadOnlyCollection<TransferRecord> records, Container container, bool toPlayer, Vector3? fromPos)
+	{
+		if (!ModConfig.ShowTransferFlights.Value || records == null || records.Count == 0 || (Object)(object)container == (Object)null)
 		{
 			return;
 		}
@@ -65,7 +74,7 @@ internal static class TransferVisuals
 					float num5 = (float)num * 0.035f + (float)i * 0.055f;
 					num2 = Mathf.Max(num2, num5);
 					flag = true;
-					((MonoBehaviour)Plugin.Instance).StartCoroutine(Fly(value2.Icon, container, num5, toPlayer));
+					((MonoBehaviour)Plugin.Instance).StartCoroutine(Fly(value2.Icon, container, num5, toPlayer, fromPos));
 				}
 				num++;
 			}
@@ -118,17 +127,30 @@ internal static class TransferVisuals
 		}
 	}
 
-	private static IEnumerator Fly(Sprite icon, Container container, float delay, bool toPlayer)
+	private static IEnumerator Fly(Sprite icon, Container container, float delay, bool toPlayer, Vector3? fromPos = null)
 	{
 		if (delay > 0f)
 		{
 			yield return (object)new WaitForSeconds(delay);
 		}
-		if ((Object)(object)Player.m_localPlayer == (Object)null || (Object)(object)container == (Object)null)
+		if ((Object)(object)container == (Object)null)
 		{
 			yield break;
 		}
-		Vector3 val = ((Component)Player.m_localPlayer).transform.position + Vector3.up * 1.25f;
+		Vector3 startBase;
+		if (fromPos != null)
+		{
+			startBase = fromPos.Value;
+		}
+		else
+		{
+			if ((Object)(object)Player.m_localPlayer == (Object)null)
+			{
+				yield break;
+			}
+			startBase = ((Component)Player.m_localPlayer).transform.position;
+		}
+		Vector3 val = startBase + Vector3.up * 1.25f;
 		Vector3 val2 = ((Component)container).transform.position + Vector3.up * 0.8f;
 		Vector3 start = (toPlayer ? val2 : val);
 		Vector3 end = (toPlayer ? val : val2);

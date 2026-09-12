@@ -8,6 +8,8 @@ internal static class CraftingFromChestsContext
 {
 	private static readonly FieldInfo CraftRecipeField = AccessTools.Field(typeof(InventoryGui), "m_craftRecipe");
 
+	private static readonly FieldInfo SelectedRecipeField = AccessTools.Field(typeof(InventoryGui), "m_selectedRecipe");
+
 	internal static Player? Player { get; private set; }
 
 	internal static Recipe? Recipe { get; private set; }
@@ -39,9 +41,11 @@ internal static class CraftingFromChestsContext
 
 	/// <summary>
 	/// The recipe currently selected in the crafting panel (or being crafted).
-	/// Display-time requirement checks run for EVERY visible recipe: prefetching
-	/// for all of them floods the player inventory. Only the selected recipe
-	/// may pull missing mats ahead of the actual craft.
+	/// Requirement checks run for EVERY visible recipe (list rendering) and every frame
+	/// for the panel one: prefetching for all of them floods the player inventory.
+	/// Only the selected recipe may pull missing mats ahead of the actual craft.
+	/// Vanilla keeps the browsed choice in m_selectedRecipe (RecipeDataPair), NOT in
+	/// m_craftRecipe — the latter is assigned only in OnCraftPressed.
 	/// </summary>
 	internal static bool IsSelectedRecipe(Recipe? recipe)
 	{
@@ -55,11 +59,46 @@ internal static class CraftingFromChestsContext
 		try
 		{
 			object value = CraftRecipeField.GetValue(gui);
-			return (Object)(object)(value as Recipe) == (Object)(object)recipe;
+			if ((Object)(object)(value as Recipe) == (Object)(object)recipe)
+				return true;
 		}
 		catch
 		{
-			return false;
+		}
+		return (Object)(object)GetBrowsedRecipe(gui) == (Object)(object)recipe;
+	}
+
+	private static PropertyInfo? _browsedRecipeProperty;
+
+	private static bool _browsedRecipeLookupFailed;
+
+	private static Recipe? GetBrowsedRecipe(InventoryGui gui)
+	{
+		if (_browsedRecipeLookupFailed)
+			return null;
+		try
+		{
+			// m_selectedRecipe is a private nested struct (RecipeDataPair):
+			// box it, then read its Recipe property.
+			object boxed = SelectedRecipeField.GetValue(gui);
+			if (boxed == null)
+				return null;
+			if (_browsedRecipeProperty == null)
+			{
+				_browsedRecipeProperty = boxed.GetType().GetProperty("Recipe",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				if (_browsedRecipeProperty == null)
+				{
+					_browsedRecipeLookupFailed = true;
+					return null;
+				}
+			}
+			return _browsedRecipeProperty.GetValue(boxed) as Recipe;
+		}
+		catch
+		{
+			_browsedRecipeLookupFailed = true;
+			return null;
 		}
 	}
 
@@ -72,12 +111,7 @@ internal static class CraftingFromChestsContext
 			return false;
 		try
 		{
-			// Selection lives on the wielded hammer's PieceTable.
-			ItemData? right = ((Humanoid)lp).GetCurrentWeapon();
-			PieceTable? table = right?.m_shared?.m_buildPieces;
-			if ((Object)(object)table == (Object)null)
-				return false;
-			return (Object)(object)table.GetSelectedPiece() == (Object)(object)piece;
+			return (Object)(object)lp.GetSelectedPiece() == (Object)(object)piece;
 		}
 		catch
 		{

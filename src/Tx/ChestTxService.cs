@@ -301,6 +301,22 @@ namespace BestAutoSort.Tx
                 }
                 return;
             }
+            System.Collections.Generic.List<ItemDrop.ItemData> claimed;
+            if (!TryClaimAddItems(call, out claimed))
+            {
+                TxLog.Info("local add skipped: all items already in flight");
+                if (onDone != null)
+                {
+                    StoredResult empty = new StoredResult();
+                    empty.Op = call.Op;
+                    empty.Status = TxStatus.Accepted;
+                    empty.Revision = CurrentRevision(container);
+                    onDone(empty);
+                }
+                return;
+            }
+            try
+            {
             TxJob job = new TxJob();
             job.Container = container;
             job.IsLocal = true;
@@ -312,6 +328,11 @@ namespace BestAutoSort.Tx
             job.Complete = onDone;
             state.Queue.Enqueue(job);
             Drain(state);
+            }
+            finally
+            {
+                ReleaseClaimed(claimed);
+            }
         }
 
         /// <summary>
@@ -380,6 +401,51 @@ namespace BestAutoSort.Tx
             return TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
         }
 
+        /// <summary>
+        /// In-flight deduplicator for Adds: the same live ItemData must never be committed
+        /// twice (quickstack snapshots every chest from one inventory state; a double click
+        /// re-sends the same stack). First submit wins; later duplicates are pruned.
+        /// Takes are safe by re-resolution on the manager and are not tracked.
+        /// </summary>
+        private static readonly System.Collections.Generic.HashSet<ItemDrop.ItemData> InFlightAdds = new System.Collections.Generic.HashSet<ItemDrop.ItemData>();
+
+        private static bool TryClaimAddItems(TxOpCall call, out System.Collections.Generic.List<ItemDrop.ItemData> claimed)
+        {
+            claimed = null;
+            if (call == null || (call.Op != TxOp.Add && call.Op != TxOp.AddBatch))
+                return true;
+            for (int i = call.Items.Count - 1; i >= 0; i--)
+            {
+                TxOpItem it = call.Items[i];
+                ItemDrop.ItemData src = it != null ? it.SourceRef : null;
+                if (src == null)
+                    continue;
+                if (InFlightAdds.Add(src))
+                {
+                    if (claimed == null)
+                        claimed = new System.Collections.Generic.List<ItemDrop.ItemData>();
+                    claimed.Add(src);
+                }
+                else
+                {
+                    call.Items.RemoveAt(i);
+                    TxLog.Info("add submit pruned duplicate in-flight item (already sending)");
+                }
+            }
+            return call.Items.Count > 0;
+        }
+
+        private static void ReleaseClaimed(System.Collections.Generic.List<ItemDrop.ItemData> claimed)
+        {
+            if (claimed == null)
+                return;
+            for (int i = 0; i < claimed.Count; i++)
+            {
+                if (claimed[i] != null)
+                    InFlightAdds.Remove(claimed[i]);
+            }
+        }
+
         private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone)
         {
             if (!Plugin.IsActive || !IsShared(container))
@@ -398,6 +464,12 @@ namespace BestAutoSort.Tx
                 });
                 return;
             }
+            System.Collections.Generic.List<ItemDrop.ItemData> claimed;
+            if (!TryClaimAddItems(call, out claimed))
+            {
+                TxLog.Info("add submit skipped: all items already in flight");
+                return;
+            }
             long txId = TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
             ZPackage payload = EncodeCall(call, CurrentRevision(container));
             ZPackage request = new ZPackage();
@@ -414,6 +486,7 @@ namespace BestAutoSort.Tx
             pending.Container = container;
             pending.Payload = request;
             pending.Op = call.Op;
+            pending.Claimed = claimed;
             pending.Attempts = 0;
             pending.NextTryAt = 0f;
             pending.Deadline = Time.realtimeSinceStartup + FailDeadline;

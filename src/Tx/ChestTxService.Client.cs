@@ -136,6 +136,7 @@ namespace BestAutoSort.Tx
                 return;
             }
             Pending.Remove(txId);
+            ReleaseClaimed(pending.Claimed);
             TxLog.Info("tx=" + txId + " response status=" + status + " rev=" + revision + (totalsOnly ? " totals-only" : ""));
             ZPackage body;
             try
@@ -485,6 +486,7 @@ namespace BestAutoSort.Tx
                     if (done == null)
                         done = new List<long>();
                     done.Add(kv.Key);
+                    ReleaseClaimed(p.Claimed);
                     continue;
                 }
                 if (now >= p.Deadline)
@@ -492,6 +494,7 @@ namespace BestAutoSort.Tx
                     if (done == null)
                         done = new List<long>();
                     done.Add(kv.Key);
+                    ReleaseClaimed(p.Claimed);
                     RefreshNow(p.Container);
                     TellPlayer("Shared chest request timed out. Try again.");
                     TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op);

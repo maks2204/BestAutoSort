@@ -137,5 +137,7 @@ namespace BestAutoSort.Tx
         public bool QuerySent;
         /// <summary>Completion context (closures over live refs — valid only until the deadline).</summary>
         public System.Action<ZPackage, TxStatus, uint> OnResponse;
+        /// <summary>Source items claimed by the in-flight deduplicator (Add/AddBatch).</summary>
+        public System.Collections.Generic.List<ItemDrop.ItemData> Claimed;
     }
 }

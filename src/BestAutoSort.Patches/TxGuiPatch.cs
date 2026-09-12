@@ -300,6 +300,7 @@ namespace BestAutoSort.Patches
                 if (op != null)
                     items.Add(op);
             }
+            Plugin.LogInstance.LogInfo((object)("[ChestTX] stack-all button candidates=" + items.Count));
             if (items.Count == 0)
                 return false;
             TxOpCall call = new TxOpCall();

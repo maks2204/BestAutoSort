@@ -38,19 +38,27 @@ internal sealed class QuickStackService
 	internal void BeginNearbyQuickStack(Action? onCompleted = null)
 	{
 		Player localPlayer = Player.m_localPlayer;
-		if (!ModConfig.Enabled.Value || (Object)(object)localPlayer == (Object)null || _routine != null)
+		if (!ModConfig.Enabled.Value || (Object)(object)localPlayer == (Object)null)
 		{
+			Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack ignored (disabled or no player)");
+			return;
+		}
+		if (_routine != null)
+		{
+			Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack ignored (session already running)");
 			return;
 		}
 		_session++;
 		_targets = new List<Container>();
 		_onCompleted = onCompleted;
 		List<Container> list = FindEligibleContainers(localPlayer);
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack start chests=" + list.Count));
 		bool flag = StackIntoOpenContainer(localPlayer, list);
 		if (list.Count == 0)
 		{
 			if (flag || !HasMovablePlayerItems(localPlayer) || RestockProfileService.HasProfiles(localPlayer))
 			{
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack nothing to do");
 				CompleteSession();
 				return;
 			}
@@ -196,6 +204,7 @@ internal sealed class QuickStackService
 			return true;
 		}
 		List<TxOpItem> candidates = CollectCandidates(player, openContainer);
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack open-chest candidates=" + candidates.Count));
 		if (candidates.Count == 0)
 			return true;
 		TxOpCall call = new TxOpCall();

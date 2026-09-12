@@ -101,7 +101,9 @@ internal static class NearbyResourceService
 			bool flag = false;
 			for (int j = 1; j <= maxQuality; j++)
 			{
-				int local = CountAvailable(player, name, j, ((Component)player).transform.position, true);
+				// Display/button check: foreign stock counts (it is staged on press).
+				// The DoCrafting gate (HasStagedMats) enforces actually-staged stock.
+				int local = CountAvailable(player, name, j, ((Component)player).transform.position);
 				if (local >= num)
 				{
 					flag = true;
@@ -208,6 +210,47 @@ internal static class NearbyResourceService
 			}
 		}
 		return null;
+	}
+
+	/// <summary>
+	/// Strict gate for DoCrafting: every requirement covered by the player inventory
+	/// plus self-owned chests (synchronously consumable). No prefetch, no foreign stock.
+	/// </summary>
+	internal static bool HasStagedMats(Player player, Recipe recipe, int qualityLevel, int craftMultiplier)
+	{
+		if ((Object)(object)player == (Object)null || (Object)(object)recipe == (Object)null)
+			return false;
+		CraftingStation currentCraftingStation = player.GetCurrentCraftingStation();
+		Requirement[] resources = recipe.m_resources;
+		foreach (Requirement val in resources)
+		{
+			if (!AppliesToStation(val, currentCraftingStation))
+				continue;
+			int num = val.GetAmount(qualityLevel) * craftMultiplier;
+			if (num <= 0 || val.m_resItem == null || val.m_resItem.m_itemData == null || val.m_resItem.m_itemData.m_shared == null)
+				continue;
+			string name = val.m_resItem.m_itemData.m_shared.m_name;
+			int maxQuality = val.m_resItem.m_itemData.m_shared.m_maxQuality;
+			bool flag = false;
+			for (int j = 1; j <= maxQuality; j++)
+			{
+				if (CountAvailable(player, name, j, ((Component)player).transform.position, true) >= num)
+				{
+					flag = true;
+					break;
+				}
+			}
+			if (recipe.m_requireOnlyOneIngredient)
+			{
+				if (flag)
+					return true;
+			}
+			else if (!flag)
+				return false;
+		}
+		if (!recipe.m_requireOnlyOneIngredient)
+			return true;
+		return false;
 	}
 
 	/// <summary>

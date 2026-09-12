@@ -251,6 +251,7 @@ namespace BestAutoSort.Tx
                 string name = sent.Snapshot != null && sent.Snapshot.m_shared != null ? sent.Snapshot.m_shared.m_name : null;
                 int quality = sent.Snapshot != null ? sent.Snapshot.m_quality : -1;
                 int removed = TxInventory.RemoveForTake(srcInv, itemRef, name, quality, accepted);
+                TxLog.Info("add-remove accepted=" + accepted + " removed=" + removed);
                 if (removed < accepted)
                 {
                     // Source changed mid-RTT: send the excess back to the chest as compensation.
@@ -270,6 +271,7 @@ namespace BestAutoSort.Tx
             if (srcInv == null || itemRef == null)
                 return;
             CustomDataTags.StripBenign(itemRef);
+            TxLog.Info("drag-restore stack=" + itemRef.m_stack + " accepted=" + accepted);
             int restore = itemRef.m_stack - accepted;
             if (restore <= 0)
                 return;

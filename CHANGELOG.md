@@ -2,8 +2,10 @@
 
 - Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
 
-## Unreleased
+## 0.1.7
 
+- Pull-on-press crafting (no browse-time floods), chest-inclusive craft/build display, DoCrafting conservation gate.
+- In-flight Add deduplication, drag/grid-inventory fixes, monotonic viewer, GearSlots tag handling.
 - Verified against **Valheim 1.0.12**.
 
 ## 0.1.2

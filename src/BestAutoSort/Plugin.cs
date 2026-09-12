@@ -26,6 +26,8 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginVersion = "0.1.5";
 
+	internal const string BuildTag = "0.1.5+txdiag";
+
 	private Harmony? _harmony;
 
 	private bool _shutDown;
@@ -52,7 +54,7 @@ public sealed class Plugin : BaseUnityPlugin
 			_harmony = new Harmony("dev.maks2204.bestautosort");
 			PatchAllSafely();
 			IsActive = true;
-			Logger.LogInfo((object)"BestAutoSort " + PluginVersion + " loaded.");
+			Logger.LogInfo((object)"BestAutoSort build " + BuildTag + " loaded.");
 		}
 		catch (Exception ex)
 		{

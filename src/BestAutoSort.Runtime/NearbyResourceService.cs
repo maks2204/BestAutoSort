@@ -441,7 +441,10 @@ internal static class NearbyResourceService
 			return;
 		if (!ChestTxService.IsShared(container) || container.IsOwner())
 			return;
-		TxOpItem op = ChestTxService.SnapshotItem(item, item.m_stack, -1, -1);
+		// Single-insert UX (fuel/food/ore/mead): borrow exactly 1 unit, like the
+		// owned-chest loan path (TryLoanOneItem). Full stacks flooded the inventory
+		// with no loan to return the remainder.
+		TxOpItem op = ChestTxService.SnapshotItem(item, 1, -1, -1);
 		if (op == null)
 			return;
 		TxOpCall call = new TxOpCall();

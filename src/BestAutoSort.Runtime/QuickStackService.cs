@@ -110,7 +110,7 @@ internal sealed class QuickStackService
 				continue;
 			if (ItemLockService.IsLocked(item) || RestockProfileService.IsTarget(item))
 				continue;
-			if (ModConfig.SkipCustomData.Value && item.m_customData.Count > 0)
+			if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 				continue;
 			if (!QuickStackTransfer.CanAcceptFromRule(rule, item, destNames, destCats))
 				continue;
@@ -231,7 +231,7 @@ internal sealed class QuickStackService
 	{
 		foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 		{
-			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || allItem.m_customData.Count <= 0))
+			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
 			{
 				return true;
 			}
@@ -335,7 +335,7 @@ internal sealed class QuickStackService
 					reserved++;
 					continue;
 				}
-				if (ModConfig.SkipCustomData.Value && allItem.m_customData.Count > 0)
+				if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(allItem))
 				{
 					custom++;
 					foreach (System.Collections.Generic.KeyValuePair<string, string> kv in allItem.m_customData)
@@ -448,7 +448,7 @@ internal sealed class QuickStackService
 		ItemMatchIndex itemMatchIndex = new ItemMatchIndex();
 		foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 		{
-			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || allItem.m_customData.Count <= 0))
+			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
 			{
 				itemMatchIndex.Names.Add(allItem.m_shared.m_name);
 				itemMatchIndex.PrefabNames.Add(ValheimItemCategoryClassifier.PrefabName(allItem));

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using BestAutoSort.Core;
 using BestAutoSort.Tx;
 using BestAutoSort.TxCore;
 using HarmonyLib;
@@ -621,7 +622,7 @@ internal static class NearbyResourceService
 					continue;
 				if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
 					continue;
-				if (ModConfig.SkipCustomData.Value && item.m_customData.Count > 0)
+				if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 					continue;
 				int n = missing < item.m_stack ? missing : item.m_stack;
 				TxOpItem op = ChestTxService.SnapshotItem(item, n, -1, -1);

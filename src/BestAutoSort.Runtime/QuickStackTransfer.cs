@@ -38,7 +38,7 @@ internal static class QuickStackTransfer
 		}
 		if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
 			return false;
-		if (ModConfig.SkipCustomData.Value && item.m_customData.Count > 0)
+		if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 			return false;
 		return true;
 	}
@@ -130,7 +130,7 @@ internal static class QuickStackTransfer
 		{
 			return false;
 		}
-		if (ModConfig.SkipCustomData.Value && item.m_customData.Count > 0)
+		if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 		{
 			return false;
 		}

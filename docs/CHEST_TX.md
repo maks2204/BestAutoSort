@@ -1,99 +1,98 @@
-# ChestTX — authoritative transactional multiplayer для сундуков
+# ChestTX — authoritative transactional chest multiplayer
 
-## 1. Проблема исходной архитектуры
+## 1. Problem with the original architecture
 
-Мод (и ванилла) открывал/таскал/стакал через передачу ZDO ownership:
-`SaveContainer → ForceSendZDO(peer) → SetOwner(peer)` + ожидание
-(`CompleteAfterOwnership`: цикл до дедлайна + `WaitForSeconds(0.05f)`).
-Следствия: закрытие чужого GUI (ванильный `UpdateContainer` рисует панель
-только владельцу), replay по stale-снапшотам с хранением `ItemData`-ссылок
-через сетевые задержки, `Trying to add item to occupied slot -1,-1` при
-конкурентном `StackAll`, двойные выдачи при двойном TakeAll, гонки
-фон (autofeed/auto-pull/craft/restock/quickstack) vs GUI.
+The mod (and vanilla) opened/stacked/took via ZDO ownership transfer:
+`SaveContainer → ForceSendZDO(peer) → SetOwner(peer)` + waiting
+(`CompleteAfterOwnership`: loop until deadline + `WaitForSeconds(0.05f)`).
+Consequences: someone else's GUI closing (vanilla `UpdateContainer` renders
+the panel for the owner only), replays over stale snapshots while holding
+`ItemData` references across network delays, `Trying to add item to occupied
+slot -1,-1` under concurrent `StackAll`, double payouts on double TakeAll,
+background (autofeed/auto-pull/craft/restock/quickstack) vs GUI races.
 
-## 2. Сетевая модель ChestTX
+## 2. ChestTX network model
 
-Менеджер сундука = владелец ZDO. Ownership НЕ передаётся между операциями
-(исключения: timeout-recovery claim и явный structural acquire для апгрейда —
-оба разовые, без циклов).
+The chest manager is the ZDO owner. Ownership is NEVER handed over between
+operations (exception: one-shot explicit acquire for upgrades — no loops).
 
-- Запрос: `BestAutoSort_TxRequest(txId, body)` на ZNetView сундука без target —
-  движок доставляет владельцу. Тело: `[proto][op][baseRev][playerId][enforceRule][respectReserves][...]`.
-- Ответ: `BestAutoSort_TxResponse(txId, status, revision, totalsOnly, body)`
-  конкретному пиру. Тела операций — вложенные `ZPackage`.
-- Предметы: `[prefabHash][itemPkg][amount][x][y][maxStack]`; `itemPkg` — байты
-  `ItemData.Save` (durability/quality/stack/variant/crafter/customData/cheated/world/gridPos).
-  Shared резолвится менеджером из префаба по хэшу (как ванильный `Inventory.Load`).
-  Живые ссылки между фазами запрещены: менеджер резолвит заново
-  (клетка + имя + качество, фолбэк имя + качество + вариант + world).
-- Очередь на сундук, строго по одной: validate → apply → `Save()` →
-  revision (`ZDO.DataRevision`) → ответ. Всё на main thread (RPC Valheim там же).
-- `txId = peerId<<32 | counter`. Идемпотентность: in-memory кэш полных
-  результатов (128) + персистентное кольцо `(txId, acceptedTotal, revision)×32`
-  в ZDO. Повтор = кэш. Потерянный ответ = Query по тому же txId.
-  После handoff: Add — итоги из кольца; Take — redelivery эквивалента
-  из живого состояния (консервация соблюдена, клиентский pending-set
-  отбрасывает поздние дубликаты).
-- Клиент меняет свой инвентарь ТОЛЬКО по ответу, ровно на accepted
-  (ref с фолбэком на name-scan; недобор — компенсация обратно).
-  Take при полном инвентаре — автокомпенсация в сундук.
-- Stale: revision везётся в запросе (лог `stale_revision`), reject — только
-  когда цель резолва исчезла/изменилась. Refresh вьюверов — поллингом
-  `DataRevision` + сравнение байт `s_items` (без лишних рефрешей),
-  перезагрузка с открытым GUI (транспайлер `UpdateContainer`:
-  `IsOwner` → `ShouldRender`). Drag из сундука при рефреше отменяется
-  (предмет остаётся в сундуке — потерь нет).
-- Присутствие: ViewerOpen/Close + heartbeat 5с, prune 15с; менеджер выставляет
-  `s_inUse` (крышка). Takeover: новый владелец всегда `Load()` из ZDO
-  (committed state) + сеет кольцо.
-- Частичное помещение: `accepted = requested - остаток` по правилу
-  placed/full-merge/partial (сверено с `Inventory.AddItem`); клиент снимает
-  ровно accepted.
-- Таймауты: 3с, до 4 попыток с тем же txId, затем 2× Query, затем
-  явный фейл с рефрешем. Claim ownership — только по таймауту.
+- Request: `BestAutoSort_TxRequest(txId, body)` to the chest ZNetView with no target —
+  the engine delivers it to the owner. Body: `[proto][op][baseRev][playerId][enforceRule][respectReserves][...]`.
+- Response: `BestAutoSort_TxResponse(txId, status, revision, totalsOnly, body)`
+  to the specific peer. Operation bodies are nested `ZPackage`s.
+- Items: `[prefabHash][itemPkg][amount][x][y][maxStack]`; `itemPkg` holds
+  `ItemData.Save` bytes (durability/quality/stack/variant/crafter/customData/cheated/world/gridPos).
+  The manager resolves shared from the prefab by hash (like vanilla `Inventory.Load`).
+  Live references across phases are forbidden: the manager re-resolves
+  (cell + name + quality, fallback name + quality + variant + world).
+- Per-chest queue, strictly one at a time: validate → apply → `Save()` →
+  revision (`ZDO.DataRevision`) → response. All on the main thread (Valheim RPCs run there too).
+- `txId = peerId<<32 | counter`. Idempotency: in-memory full-result
+  cache (128) + persistent `(txId, acceptedTotal, revision)×32` ring
+  in the ZDO. Retry = cache hit. Lost response = Query with the same txId.
+  After handoff: Add returns totals from the ring; Take gets an equivalent
+  redelivered from live state (conservation holds, the client pending-set
+  drops late duplicates).
+- The client touches its own inventory ONLY on response, exactly by accepted
+  (ref with a name-scan fallback; shortfall is compensated back).
+  Take with a full inventory auto-compensates back into the chest.
+- Staleness: revision rides along in the request (`stale_revision` log), reject only
+  when the resolve target vanished/changed. Viewer refresh polls
+  `DataRevision` + compares `s_items` bytes (no redundant refreshes),
+  reloading with the GUI open (the `UpdateContainer` transpiler:
+  `IsOwner` → `ShouldRender`). Chest-sourced drags are cancelled on refresh
+  (the item stays in the chest — no loss).
+- Presence: ViewerOpen/Close + 5s heartbeat, 15s prune; the manager sets
+  `s_inUse` (the lid). Takeover: the new owner always `Load()`s from the ZDO
+  (committed state) + seeds the ring.
+- Partial placement: `accepted = requested - remainder` per the
+  placed/full-merge/partial rule (verified against `Inventory.AddItem`); the client
+  removes exactly accepted.
+- Timeouts: 3s, up to 4 attempts with the same txId, then 2× Query, then
+  an explicit failure with refresh.
 
-## 3. Операции ChestTransactionService
+## 3. ChestTransactionService operations
 
-- Add с запрошенной клеткой (drag&drop) — строго позиционно через
-  приватный `Inventory.AddItem(item, amount, x, y)` (как ванилла, без
-  глобального мёржа и без фолбэка); без клетки — авторазмещение.
-- Presence (ViewerOpen/Close) — fire-and-forget, без ответов.
-- EnforceLid считает и собственный открытый GUI менеджера.
+- Add with a requested cell (drag&drop) goes strictly positional through the
+  private `Inventory.AddItem(item, amount, x, y)` (like vanilla, no
+  global merge and no fallback); without a cell — auto-place.
+- Presence (ViewerOpen/Close) is fire-and-forget, no responses.
+- EnforceLid counts the manager's own open GUI too.
 
 `Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade / SetRule`
-(+ `ViewerOpen/Close`, `Query`). GUI, QuickStack, ресток, префетчи,
-возвраты займов, trash — все через них. Менеджерские локальные мутации —
-через ту же очередь (`MutateLocal` + немедленный drain).
-Фоновое (autofeed-протокол сервера, legacy-миграция, консольные команды) —
-только владельцем, синхронно (сериально main thread'ом).
+(+ `ViewerOpen/Close`, `Query`). GUI, QuickStack, restock, prefetches,
+loan returns, trash — all through them. Manager-local mutations go through
+the same queue (`MutateLocal` + immediate drain).
+Background work (server autofeed protocol, legacy migration, console commands) —
+owner-only, synchronous (serial on the main thread).
 
-## 4. Инвариант
+## 4. Invariant
 
 `TOTAL BEFORE + legitimate creation − legitimate consumption = TOTAL AFTER`
-для любого предмета. Проверяется тестами 1–12 + soak (см. tests/ChestTx.Tests).
+for any item. Covered by tests 1–12 + soak (see tests/ChestTx.Tests).
 
-## 5. Логи `[ChestTX]` (опция Debug → TxVerbose)
+## 5. `[ChestTX]` logs (Debug → TxVerbose option)
 
 - `container=<zdoid> tx=<id> peer=<id> op=ADD ... revision=123->124`
 - `tx=<id> REJECT stale_revision client=122 server=124`
 - `tx=<id> DUPLICATE returning cached result`
 - `tx=<id> DUPLICATE handoff-redelivery accepted=N`
 - `manager changed old=X new=Y revision=124`
-Никаких логов каждый frame.
+No per-frame logging.
 
-## 6. Изменённые/новые файлы
+## 6. Changed/new files
 
 - `src/BestAutoSort.TxCore/` (new): `TxProtocol`, `TxModel`, `ModelChest`, `TxCore`
-- `tests/ChestTx.Tests/` (new): 12 тестов + soak
+- `tests/ChestTx.Tests/` (new): 12 tests + soak
 - `src/Tx/` (new): `ChestTxService`, `ChestTxService.Client`, `TxState`,
   `TxCodec`, `TxInventory`, `TxReflect`, `TxNet`, `TxLog`
-- `src/BestAutoSort.Patches/`: new `TxContainerAwake/Open/Ops/Render/Gui`;
+- `src/BestAutoSort.Patches/`: new `TxContainerAwake/Open/Ops/Render/Gui/DropOutside`;
   deleted `MultiUser*` (8), `ContainerStackResponsePatch`
 - deleted `src/BestAutoSort.Runtime/MultiUserContainerService.cs`
 - `Plugin` (Pump, Sort-tx, Upgrade-acquire, Reset),
-  `QuickStackService` (батчи), `RestockProfileService` (цепочка),
-  `NearbyResourceService` (manager-only consume, префетч, гейты проверок, no-claim),
-  `ProductionItemLoan` (возврат через tx), `InventoryButtons` (trash),
-  `ChestRuleEditor` (SetRule tx), `ChestRuleEditor/Buttons` (прямое открытие),
-  `ChestAuthority/ChestAuthority/StorageCommands` (TxReflect-хелперы),
-  `ModConfig` (TxVerbose, описание AllowConcurrentChestUse)
+  `QuickStackService` (batches), `RestockProfileService` (chain),
+  `NearbyResourceService` (manager-only consume, prefetch, check gates, no-claim),
+  `ProductionItemLoan` (return via tx), `InventoryButtons` (trash),
+  `ChestRuleEditor` (SetRule tx), rule editor opening (direct),
+  `ChestAuthority/StorageCommands` (TxReflect helpers),
+  `ModConfig` (TxVerbose, AllowConcurrentChestUse description)

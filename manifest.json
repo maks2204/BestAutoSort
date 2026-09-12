@@ -1,6 +1,6 @@
 {
   "name": "BestAutoSort",
-  "version_number": "0.1.3",
+  "version_number": "0.1.4",
   "website_url": "",
   "description": "Standalone storage mod: shared chests, quick-stack, restock, rules, crafting from chests, autofeed, upgrades, sort.",
   "dependencies": [

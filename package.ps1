@@ -6,15 +6,52 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $csproj = Join-Path $root "BestAutoSort.csproj"
 
-# Версия из csproj
+# Version from csproj (first PropertyGroup that defines it).
 [xml]$xml = Get-Content $csproj
-$version = $xml.Project.PropertyGroup.Version | Select-Object -First 1
+$version = $xml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -ExpandProperty Version -First 1
 if (-not $version) { $version = "0.1.0" }
+
+# Manifest version must match the zip name or Thunderstore rejects the package.
+$manifestVersion = (Get-Content (Join-Path $root "manifest.json") -Raw | ConvertFrom-Json).version_number
+if ($manifestVersion -ne $version) {
+    throw "Version mismatch: csproj=$version, manifest.json=$manifestVersion. Align them first."
+}
+
+# Icon sanity check (Thunderstore expects 256x256 PNG).
+Add-Type -AssemblyName System.Drawing
+$iconPath = Join-Path $root "icon.png"
+try {
+    $icon = [System.Drawing.Image]::FromFile($iconPath)
+    try {
+        if ($icon.Width -ne 256 -or $icon.Height -ne 256) {
+            Write-Host "WARNING: icon.png is $($icon.Width)x$($icon.Height), expected 256x256." -ForegroundColor Yellow
+        }
+    }
+    finally {
+        $icon.Dispose()
+    }
+}
+catch {
+    Write-Host "WARNING: could not read icon.png: $_" -ForegroundColor Yellow
+}
+
+$pkgDir = Join-Path $root "bin/$Configuration/net472/package"
+if (Test-Path $pkgDir) {
+    # Drop stale files (e.g. renamed DLLs) so they never leak into the zip.
+    Remove-Item $pkgDir -Recurse -Force
+}
 
 Write-Host "Building BestAutoSort $version ($Configuration)..." -ForegroundColor Cyan
 dotnet build $csproj -c $Configuration -p:Deploy=false -p:Package=true
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet build failed with exit code $LASTEXITCODE, package aborted."
+}
 
-$pkgDir = Join-Path $root "bin/$Configuration/net472/package"
+$dllPath = Join-Path $pkgDir "plugins/BestAutoSort.dll"
+if (-not (Test-Path $dllPath)) {
+    throw "Expected output missing: $dllPath"
+}
+
 $zipPath = Join-Path $root "BestAutoSort-$version.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath }
 Compress-Archive -Path "$pkgDir/*" -DestinationPath $zipPath

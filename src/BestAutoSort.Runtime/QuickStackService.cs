@@ -25,6 +25,8 @@ internal sealed class QuickStackService
 	private List<Container> _targets = new List<Container>();
 
 	private Coroutine? _routine;
+	private static int _totalMoved;
+	private static int _submitted;
 
 	private int _session;
 
@@ -50,6 +52,8 @@ internal sealed class QuickStackService
 		}
 		_session++;
 		_targets = new List<Container>();
+		_totalMoved = 0;
+		_submitted = 0;
 		_onCompleted = onCompleted;
 		List<Container> list = FindEligibleContainers(localPlayer);
 		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack start chests=" + list.Count));
@@ -145,14 +149,11 @@ internal sealed class QuickStackService
 			{
 				List<TransferRecord> direct = new List<TransferRecord>();
 				QuickStackTransfer.MoveMatching(chest, ((Humanoid)player).GetInventory(), direct);
-				if (direct.Count > 0)
-					TransferVisuals.Play(direct, chest);
-				continue;
-			}
-			if (chest.IsOwner())
-			{
-				List<TransferRecord> direct = new List<TransferRecord>();
-				QuickStackTransfer.MoveMatching(chest, ((Humanoid)player).GetInventory(), direct);
+				int movedHere = 0;
+				for (int i = 0; i < direct.Count; i++)
+					movedHere += direct[i].Amount;
+				_totalMoved += movedHere;
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack owner-direct moved=" + movedHere));
 				if (direct.Count > 0)
 					TransferVisuals.Play(direct, chest);
 				continue;
@@ -162,11 +163,16 @@ internal sealed class QuickStackService
 			// Candidates from the local snapshot; the manager re-validates rules at commit.
 			List<TxOpItem> candidates = CollectCandidates(player, chest);
 			if (candidates.Count == 0)
+			{
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack chest skipped (no candidates)");
+				continue;
+			}
 				continue;
 			TxOpCall call = new TxOpCall();
 			call.Op = TxOp.AddBatch;
 			call.Items.AddRange(candidates);
 			call.EnforceRule = true;
+			_submitted++;
 			ChestTxService.SubmitCall(chest, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records)
 				{
 					if (session == _session && records.Count > 0)
@@ -182,6 +188,9 @@ internal sealed class QuickStackService
 		if (session != _session)
 			yield break;
 		_routine = null;
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack session done moved=" + _totalMoved + " submitted=" + _submitted));
+		if (_totalMoved == 0 && _submitted == 0)
+			TellPlayer("Quick stack moved nothing (no matching items, chest full, or rules block them).");
 		CompleteSession();
 	}
 
@@ -211,6 +220,7 @@ internal sealed class QuickStackService
 		call.Op = TxOp.AddBatch;
 		call.Items.AddRange(candidates);
 		call.EnforceRule = true;
+		_submitted++;
 		ChestTxService.SubmitCall(openContainer, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records2)
 			{
 				if (records2.Count > 0)

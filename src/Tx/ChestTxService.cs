@@ -696,7 +696,8 @@ namespace BestAutoSort.Tx
                     {
                         TxLog.Error("tx=" + job.TxId + " completion failed: " + ex.Message);
                     }
-                    if (job.Call.Op == TxOp.AddBatch && result.AcceptedTotal() > 0)
+                    if ((job.Call.Op == TxOp.Add || job.Call.Op == TxOp.AddBatch || job.Call.Op == TxOp.TakeBatch)
+                        && result.AcceptedTotal() > 0)
                     {
                         if (!job.IsLocal)
                             TxFlights.PlayLocalBatch(state, job, result);

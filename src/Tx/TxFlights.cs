@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
+using BestAutoSort.TxCore;
 using UnityEngine;
 
 namespace BestAutoSort.Tx
@@ -31,6 +32,7 @@ namespace BestAutoSort.Tx
                 ZPackage pkg = new ZPackage();
                 pkg.Write(job.TxId);
                 pkg.Write(netView.GetZDO().m_uid);
+                pkg.Write(job.Call.Op == TxOp.TakeBatch);
                 pkg.Write(from);
                 int count = 0;
                 for (int i = 0; i < job.Call.Items.Count && i < result.Accepted.Count; i++)
@@ -78,7 +80,8 @@ namespace BestAutoSort.Tx
                 }
                 if (records.Count == 0)
                     return;
-                TransferVisuals.PlayFrom(records, state.Container, false, ResolveSourcePos(state, job));
+                bool toPlayer = job.Call.Op == TxOp.TakeBatch;
+                TransferVisuals.PlayFrom(records, state.Container, toPlayer, ResolveSourcePos(state, job));
             }
             catch (Exception ex)
             {
@@ -116,6 +119,7 @@ namespace BestAutoSort.Tx
                 if (TxIdGen.PeerOf(txId) == ZNet.GetUID())
                     return;
                 ZDOID zdoid = pkg.ReadZDOID();
+                bool toPlayer = pkg.ReadBool();
                 Vector3 from = pkg.ReadVector3();
                 int count = pkg.ReadInt();
                 if (count < 0 || count > MaxEntries)
@@ -141,7 +145,7 @@ namespace BestAutoSort.Tx
                         records.Add(record);
                 }
                 if (records.Count > 0)
-                    TransferVisuals.PlayFrom(records, container, false, from);
+                    TransferVisuals.PlayFrom(records, container, toPlayer, from);
             }
             catch (Exception ex)
             {

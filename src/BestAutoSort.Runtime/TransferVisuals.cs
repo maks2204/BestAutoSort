@@ -37,10 +37,12 @@ internal static class TransferVisuals
 	}
 
 	/// <summary>
-	/// Flights with an explicit start point (for remote viewers: start at the sorter position).
-	/// fromPos == null means start at the local player (previous behavior).
+	/// Flights with an explicit remote endpoint (for remote viewers).
+	/// toPlayer=false: remotePos is the start (sorter), end is the chest.
+	/// toPlayer=true: start is the chest, remotePos is the end (taker).
+	/// remotePos == null falls back to the local player (previous behavior).
 	/// </summary>
-	internal static void PlayFrom(IReadOnlyCollection<TransferRecord> records, Container container, bool toPlayer, Vector3? fromPos)
+	internal static void PlayFrom(IReadOnlyCollection<TransferRecord> records, Container container, bool toPlayer, Vector3? remotePos)
 	{
 		if (!ModConfig.ShowTransferFlights.Value || records == null || records.Count == 0 || (Object)(object)container == (Object)null)
 		{
@@ -74,7 +76,7 @@ internal static class TransferVisuals
 					float num5 = (float)num * 0.035f + (float)i * 0.055f;
 					num2 = Mathf.Max(num2, num5);
 					flag = true;
-					((MonoBehaviour)Plugin.Instance).StartCoroutine(Fly(value2.Icon, container, num5, toPlayer, fromPos));
+					((MonoBehaviour)Plugin.Instance).StartCoroutine(Fly(value2.Icon, container, num5, toPlayer, remotePos));
 				}
 				num++;
 			}
@@ -127,7 +129,7 @@ internal static class TransferVisuals
 		}
 	}
 
-	private static IEnumerator Fly(Sprite icon, Container container, float delay, bool toPlayer, Vector3? fromPos = null)
+	private static IEnumerator Fly(Sprite icon, Container container, float delay, bool toPlayer, Vector3? remotePos = null)
 	{
 		if (delay > 0f)
 		{
@@ -137,10 +139,26 @@ internal static class TransferVisuals
 		{
 			yield break;
 		}
-		Vector3 startBase;
-		if (fromPos != null)
+		Vector3 remoteOrLocal;
+		Vector3 chestPos = ((Component)container).transform.position;
+		Vector3 val;
+		Vector3 val2;
+		Vector3 start;
+		Vector3 end;
+		if (remotePos != null)
 		{
-			startBase = fromPos.Value;
+			if (toPlayer)
+			{
+				start = chestPos + Vector3.up * 1.25f;
+				end = remotePos.Value + Vector3.up * 1.25f;
+			}
+			else
+			{
+				start = remotePos.Value + Vector3.up * 1.25f;
+				end = chestPos + Vector3.up * 0.8f;
+			}
+			val = start;
+			val2 = end;
 		}
 		else
 		{
@@ -148,12 +166,11 @@ internal static class TransferVisuals
 			{
 				yield break;
 			}
-			startBase = ((Component)Player.m_localPlayer).transform.position;
+			val = ((Component)Player.m_localPlayer).transform.position + Vector3.up * 1.25f;
+			val2 = ((Component)container).transform.position + Vector3.up * 0.8f;
+			start = (toPlayer ? val2 : val);
+			end = (toPlayer ? val : val2);
 		}
-		Vector3 val = startBase + Vector3.up * 1.25f;
-		Vector3 val2 = ((Component)container).transform.position + Vector3.up * 0.8f;
-		Vector3 start = (toPlayer ? val2 : val);
-		Vector3 end = (toPlayer ? val : val2);
 		Vector3 val3 = Vector3.Cross(Vector3.up, end - start);
 		Vector3 sideways = (val3).normalized * Random.Range(-0.35f, 0.35f);
 		GameObject flight = new GameObject("BestAutoSort_ItemFlight");

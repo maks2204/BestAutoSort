@@ -34,8 +34,12 @@
     <Exec Command="git -C &quot;$(MSBuildProjectDirectory)&quot; rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitHash" />
     </Exec>
+    <Exec Command="git -C &quot;$(MSBuildProjectDirectory)&quot; diff --quiet HEAD --" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="GitDirtyCode" />
+    </Exec>
     <PropertyGroup>
       <GitCommitHash Condition="'$(GitCommitHash)' == ''">unknown</GitCommitHash>
+      <GitCommitHash Condition="'$(GitCommitHash)' != 'unknown' and '$(GitDirtyCode)' != '0'">$(GitCommitHash)+dirty</GitCommitHash>
     </PropertyGroup>
     <ItemGroup>
       <BuildInfoLine Include="namespace BestAutoSort" />

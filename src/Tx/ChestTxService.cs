@@ -554,9 +554,10 @@ namespace BestAutoSort.Tx
                 RespondQuery(container, sender, txId);
                 return;
             }
-            if (!ChestAuthority.CanUse(container, sender, playerId, actorPos))
+            string accessWhy;
+            if (!ChestAuthority.CanUse(container, sender, playerId, actorPos, out accessWhy))
             {
-                TxLog.Warn("tx=" + txId + " REJECT access peer=" + sender);
+                TxLog.Warn("tx=" + txId + " REJECT access(" + accessWhy + ") peer=" + sender);
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }

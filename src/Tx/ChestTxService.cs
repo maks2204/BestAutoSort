@@ -94,22 +94,30 @@ namespace BestAutoSort.Tx
             AutoFeedService.Attach(container);
         }
 
+        /// <summary>
+        /// IsShared + причина отказа (только для диагностики тихих скипов).
+        /// </summary>
+        internal static bool IsSharedVerbose(Container container, out string why)
+        {
+            why = "ok";
+            if (!ModConfig.AllowConcurrentChestUse.Value) { why = "AllowConcurrentChestUse disabled"; return false; }
+            if ((Object)container == (Object)null) { why = "null container"; return false; }
+            if (!((Behaviour)container).isActiveAndEnabled) { why = "behaviour disabled"; return false; }
+            if (AutoFeedService.IsLocked(container)) { why = "autofeed lease/block active"; return false; }
+            if ((Object)container.m_wagon != (Object)null) { why = "wagon cart"; return false; }
+            if ((Object)((Component)container).GetComponentInParent<Ship>() != (Object)null) { why = "ship"; return false; }
+            if ((Object)((Component)container).GetComponent<Player>() != (Object)null) { why = "player inventory"; return false; }
+            if ((Object)((Component)container).GetComponent<TombStone>() != (Object)null) { why = "tombstone"; return false; }
+            ZNetView netView = TxReflect.GetNetView(container);
+            if ((Object)netView == (Object)null) { why = "no netview"; return false; }
+            if (!netView.IsValid()) { why = "netview invalid"; return false; }
+            return true;
+        }
+
         internal static bool IsShared(Container container)
         {
-            if (!ModConfig.AllowConcurrentChestUse.Value)
-                return false;
-            if ((Object)container == (Object)null || !((Behaviour)container).isActiveAndEnabled)
-                return false;
-            if (AutoFeedService.IsLocked(container))
-                return false;
-            if ((Object)container.m_wagon != (Object)null || (Object)((Component)container).GetComponentInParent<Ship>() != (Object)null)
-                return false;
-            if ((Object)((Component)container).GetComponent<Player>() != (Object)null || (Object)((Component)container).GetComponent<TombStone>() != (Object)null)
-                return false;
-            ZNetView netView = TxReflect.GetNetView(container);
-            if ((Object)netView != (Object)null)
-                return netView.IsValid();
-            return false;
+            string why;
+            return IsSharedVerbose(container, out why);
         }
 
         internal static bool IsManager(Container container)

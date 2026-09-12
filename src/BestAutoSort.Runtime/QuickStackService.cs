@@ -158,8 +158,12 @@ internal sealed class QuickStackService
 					TransferVisuals.Play(direct, chest);
 				continue;
 			}
-			if (!ChestTxService.IsShared(chest))
+			string sharedWhy;
+			if (!ChestTxService.IsSharedVerbose(chest, out sharedWhy))
+			{
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack chest skipped: " + sharedWhy));
 				continue;
+			}
 			// Candidates from the local snapshot; the manager re-validates rules at commit.
 			List<TxOpItem> candidates = CollectCandidates(player, chest);
 			if (candidates.Count == 0)

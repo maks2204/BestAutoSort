@@ -89,7 +89,10 @@ namespace BestAutoSort.Tx
                 // Own tx (matched by originator session in the high bits):
                 // local visuals already played or playing — skip to avoid doubles.
                 if (TxIdGen.PeerOf(txId) == ZNet.GetUID())
+                {
+                    TxLog.Info("flights rx tx=" + txId + " skipped-own");
                     return;
+                }
                 ZDOID zdoid = pkg.ReadZDOID();
                 bool toPlayer = pkg.ReadBool();
                 Vector3 from = pkg.ReadVector3();
@@ -98,13 +101,22 @@ namespace BestAutoSort.Tx
                     return;
                 ZNetScene scene = ZNetScene.instance;
                 if ((Object)scene == (Object)null)
+                {
+                    TxLog.Info("flights rx tx=" + txId + " no-scene");
                     return;
+                }
                 GameObject go = scene.FindInstance(zdoid);
                 if ((Object)go == (Object)null)
+                {
+                    TxLog.Info("flights rx tx=" + txId + " no-container-object");
                     return;
+                }
                 Container container = go.GetComponent<Container>();
                 if ((Object)container == (Object)null)
+                {
+                    TxLog.Info("flights rx tx=" + txId + " no-container-component");
                     return;
+                }
                 List<TransferRecord> records = new List<TransferRecord>(count);
                 for (int i = 0; i < count; i++)
                 {
@@ -117,7 +129,14 @@ namespace BestAutoSort.Tx
                         records.Add(record);
                 }
                 if (records.Count > 0)
+                {
+                    TxLog.Info("flights rx tx=" + txId + " playing entries=" + records.Count);
                     TransferVisuals.PlayFrom(records, container, toPlayer, from);
+                }
+                else
+                {
+                    TxLog.Info("flights rx tx=" + txId + " empty (prefabs unknown?)");
+                }
             }
             catch (Exception ex)
             {

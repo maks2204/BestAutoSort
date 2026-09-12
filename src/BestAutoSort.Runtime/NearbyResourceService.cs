@@ -107,8 +107,6 @@ internal static class NearbyResourceService
 					flag = true;
 					break;
 				}
-				if (global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedRecipe(recipe))
-					PrefetchMissing(player, name, j, num - local);
 			}
 			if (recipe.m_requireOnlyOneIngredient)
 			{
@@ -197,8 +195,6 @@ internal static class NearbyResourceService
 			for (quality = 1; quality <= maxQuality; quality++)
 			{
 				int local = CountAvailable(player, name, quality, ((Component)player).transform.position, true);
-				if (local < num && global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedRecipe(recipe))
-					PrefetchMissing(player, name, quality, num - local);
 				if (local >= num)
 				{
 					ItemData val2 = ((Humanoid)player).GetInventory().GetItem(name, quality, false) ?? FindItem(((Component)player).transform.position, (ItemData candidate) => candidate.m_shared.m_name == name && candidate.m_quality == quality);
@@ -212,6 +208,36 @@ internal static class NearbyResourceService
 			}
 		}
 		return null;
+	}
+
+	/// <summary>
+	/// Stage missing mats for the pressed recipe from foreign chests.
+	/// Called once per craft press; vanilla DoCrafting runs seconds later.
+	/// </summary>
+	internal static void PrefetchForCraftPress(Player player, Recipe recipe, int qualityLevel, int craftMultiplier)
+	{
+		if (!ModConfig.CraftFromNearbyChests.Value || (Object)(object)player != (Object)(object)Player.m_localPlayer)
+			return;
+		if ((Object)(object)recipe == (Object)null)
+			return;
+		CraftingStation currentCraftingStation = player.GetCurrentCraftingStation();
+		Requirement[] resources = recipe.m_resources;
+		foreach (Requirement val in resources)
+		{
+			if (!AppliesToStation(val, currentCraftingStation))
+				continue;
+			int num = val.GetAmount(qualityLevel) * craftMultiplier;
+			if (num <= 0 || val.m_resItem == null || val.m_resItem.m_itemData == null || val.m_resItem.m_itemData.m_shared == null)
+				continue;
+			string name = val.m_resItem.m_itemData.m_shared.m_name;
+			int maxQuality = val.m_resItem.m_itemData.m_shared.m_maxQuality;
+			for (int j = 1; j <= maxQuality; j++)
+			{
+				int local = CountAvailable(player, name, j, ((Component)player).transform.position, true);
+				if (local < num)
+					PrefetchMissing(player, name, j, num - local);
+			}
+		}
 	}
 
 	internal static void ConsumeRequirements(Player player, Requirement[] requirements, int qualityLevel, int itemQuality, int multiplier)

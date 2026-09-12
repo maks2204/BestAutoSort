@@ -158,12 +158,15 @@ namespace BestAutoSort.Patches
             }
             else
             {
-                // Player -> chest: Add the full stack.
+                // Player -> chest: Add the full stack. Source is the clicked grid's
+                // inventory (GearSlots dedicated slots are separate inventories:
+                // removing from the main one would miss and duplicate).
                 if (item.m_shared.m_questItem)
                     return;
                 player.RemoveEquipAction(item);
                 player.UnequipItem(item);
-                ChestTxService.RequestAdd(container, playerInv, item, item.m_stack, -1, -1, null);
+                Inventory srcInv = ((Object)(object)targetInv != (Object)null) ? targetInv : playerInv;
+                ChestTxService.RequestAdd(container, srcInv, item, item.m_stack, -1, -1, null);
             }
         }
 
@@ -185,18 +188,18 @@ namespace BestAutoSort.Patches
                 TxGui.CancelDrag(gui);
                 return;
             }
-            if (targetInv == chestInv && dragInv == playerInv)
+            if (targetInv == chestInv && dragInv != chestInv)
             {
                 if (((Humanoid)player).IsItemEquiped(dragItem))
                     player.UnequipItem(dragItem, false);
                 Plugin.LogInstance.LogInfo((object)("[ChestTX] drag-drop chest=" + chestInv.GetWidth() + "x" + chestInv.GetHeight() + " pos=(" + pos.x + "," + pos.y + ")"));
-                ChestTxService.RequestAdd(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null, true);
+                ChestTxService.RequestAdd(container, dragInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null, true);
                 TxGui.CancelDrag(gui);
                 return;
             }
-            if (targetInv == playerInv && dragInv == chestInv)
+            if (targetInv != chestInv && dragInv == chestInv)
             {
-                ChestTxService.RequestTake(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null);
+                ChestTxService.RequestTake(container, targetInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null);
                 TxGui.CancelDrag(gui);
                 return;
             }

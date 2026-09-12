@@ -217,8 +217,22 @@ namespace BestAutoSort.Tx
             CompleteAdd(srcInv, itemRef, sent, accepted, status, rev, container, onDone, false);
         }
 
+        private static void LogNonMainInventory(string op, Inventory inv)
+        {
+            try
+            {
+                Player lp = Player.m_localPlayer;
+                if (lp != null && (Object)(object)inv != (Object)null && (Object)(object)inv != (Object)(object)((Humanoid)lp).GetInventory())
+                    TxLog.Info(op + " uses non-main inventory (dedicated slots?)");
+            }
+            catch
+            {
+            }
+        }
+
         private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, bool alreadyRemoved)
         {
+            LogNonMainInventory("add", srcInv);
             if (alreadyRemoved)
             {
                 // Drag-deposit: the stack already left the inventory when the drag started
@@ -304,6 +318,7 @@ namespace BestAutoSort.Tx
 
         private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone)
         {
+            LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
             {
                 try

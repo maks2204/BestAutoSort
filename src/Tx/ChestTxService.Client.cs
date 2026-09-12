@@ -223,7 +223,7 @@ namespace BestAutoSort.Tx
             try
             {
                 Player lp = Player.m_localPlayer;
-                if (lp != null && (Object)(object)inv != (Object)null && (Object)(object)inv != (Object)(object)((Humanoid)lp).GetInventory())
+                if (lp != null && inv != null && !object.ReferenceEquals(inv, ((Humanoid)lp).GetInventory()))
                     TxLog.Info(op + " uses non-main inventory (dedicated slots?)");
             }
             catch

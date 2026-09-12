@@ -165,7 +165,7 @@ namespace BestAutoSort.Patches
                     return;
                 player.RemoveEquipAction(item);
                 player.UnequipItem(item);
-                Inventory srcInv = ((Object)(object)targetInv != (Object)null) ? targetInv : playerInv;
+                Inventory srcInv = (targetInv != null) ? targetInv : playerInv;
                 ChestTxService.RequestAdd(container, srcInv, item, item.m_stack, -1, -1, null);
             }
         }

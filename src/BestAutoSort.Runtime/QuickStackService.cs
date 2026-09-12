@@ -57,6 +57,8 @@ internal sealed class QuickStackService
 		_onCompleted = onCompleted;
 		List<Container> list = FindEligibleContainers(localPlayer);
 		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack start chests=" + list.Count));
+		if (list.Count == 0)
+			LogEmptyDiagnosis(localPlayer);
 		bool flag = StackIntoOpenContainer(localPlayer, list);
 		if (list.Count == 0)
 		{
@@ -235,6 +237,77 @@ internal sealed class QuickStackService
 			}
 		}
 		return false;
+	}
+
+	private static void LogEmptyDiagnosis(Player player)
+	{
+		try
+		{
+			Vector3 playerPosition = ((Component)player).transform.position;
+			float range = ModConfig.NearbyRange.Value;
+			float rangeSquared = range * range;
+			int inRange = 0;
+			System.Collections.Generic.Dictionary<string, int> rejects = new System.Collections.Generic.Dictionary<string, int>();
+			foreach (Container container in Object.FindObjectsByType<Container>((FindObjectsSortMode)0))
+			{
+				if ((Object)(object)container == (Object)null)
+					continue;
+				Vector3 val = ((Component)container).transform.position - playerPosition;
+				if ((val).sqrMagnitude > rangeSquared)
+					continue;
+				inRange++;
+				string why = "rule-seeds";
+				if (!((Behaviour)container).isActiveAndEnabled)
+					why = "disabled";
+				else if (AutoFeedService.IsLocked(container))
+					why = "autofeed-lease";
+				else if ((Object)(object)((Component)container).GetComponent<Player>() != (Object)null)
+					why = "player-inventory";
+				else if ((Object)(object)((Component)container).GetComponent<TombStone>() != (Object)null)
+					why = "tombstone";
+				else if (!ModConfig.IncludeVehicleContainers.Value && ((Object)(object)container.m_wagon != (Object)null || (Object)(object)((Component)container).GetComponentInParent<Ship>() != (Object)null))
+					why = "vehicle-policy";
+				else if (container.m_checkGuardStone && !PrivateArea.CheckAccess(((Component)container).transform.position, 0f, false, false))
+					why = "guard-stone";
+				else if (!HasPrivacyAccess(container))
+					why = "private";
+				else if (!ModConfig.IncludeWorldContainers.Value)
+				{
+					Piece piece = ((Component)container).GetComponent<Piece>() ?? ((Component)container).GetComponentInParent<Piece>();
+					if ((Object)(object)piece == (Object)null || !piece.IsPlacedByPlayer())
+						why = "world-container-policy";
+				}
+				else if (!ChestTxService.IsShared(container))
+				{
+					string sharedWhy;
+					ChestTxService.IsSharedVerbose(container, out sharedWhy);
+					why = "not-shared:" + sharedWhy;
+				}
+				int n;
+				rejects.TryGetValue(why, out n);
+				rejects[why] = n + 1;
+			}
+			if (inRange == 0)
+			{
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: no containers within " + range + "m at all"));
+				return;
+			}
+			System.Text.StringBuilder sb = new System.Text.StringBuilder();
+			sb.Append("[ChestTX] quickstack diagnosis: ").Append(inRange).Append(" in range, rejected: ");
+			bool first = true;
+			foreach (System.Collections.Generic.KeyValuePair<string, int> kv in rejects)
+			{
+				if (!first)
+					sb.Append(", ");
+				first = false;
+				sb.Append(kv.Key).Append("x").Append(kv.Value);
+			}
+			Plugin.LogInstance.LogInfo((object)sb.ToString());
+		}
+		catch (System.Exception ex)
+		{
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis failed: " + ex.Message));
+		}
 	}
 
 	private static List<Container> FindEligibleContainers(Player player)

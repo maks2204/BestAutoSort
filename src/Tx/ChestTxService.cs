@@ -699,8 +699,8 @@ namespace BestAutoSort.Tx
                     if ((job.Call.Op == TxOp.Add || job.Call.Op == TxOp.AddBatch || job.Call.Op == TxOp.TakeBatch)
                         && result.AcceptedTotal() > 0)
                     {
-                        if (!job.IsLocal)
-                            TxFlights.PlayLocalBatch(state, job, result);
+                        // Броадкаст с target 0 заходит и локально (loopback),
+                        // так что менеджер тоже проигрывает — отдельно не нужно.
                         TxFlights.BroadcastFlights(state, job, result);
                     }
                 }

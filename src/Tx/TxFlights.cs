@@ -49,42 +49,15 @@ namespace BestAutoSort.Tx
                     pkg.Write(result.Accepted[i]);
                     written++;
                 }
-                rpc.InvokeRoutedRPC(FlightsRpc, pkg);
+                // targetPeerID 0 = настоящий броадкаст: отправитель обрабатывает
+                // локально (loopback), сервер ретранслирует остальным.
+                // InvokeRoutedRPC(name, params) без target шлёт ТОЛЬКО серверу!
+                rpc.InvokeRoutedRPC(0L, FlightsRpc, pkg);
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + job.TxId + " flights broadcast entries=" + written);
             }
             catch (Exception ex)
             {
                 TxLog.Warn("flights broadcast failed: " + ex.Message);
-            }
-        }
-
-        /// <summary>
-        /// Проиграть чужой батч у себя на менеджере (броадкаст себя не покрывает).
-        /// </summary>
-        internal static void PlayLocalBatch(ChestState state, TxJob job, StoredResult result)
-        {
-            try
-            {
-                if ((Object)state.Container == (Object)null)
-                    return;
-                List<TransferRecord> records = new List<TransferRecord>();
-                for (int i = 0; i < job.Call.Items.Count && i < result.Accepted.Count; i++)
-                {
-                    if (result.Accepted[i] <= 0)
-                        continue;
-                    TxOpItem item = job.Call.Items[i];
-                    if (item.Snapshot == null || item.Snapshot.m_shared == null)
-                        continue;
-                    records.Add(new TransferRecord(item.Snapshot.m_shared.m_name, item.Snapshot.GetIcon(), result.Accepted[i], item.Snapshot.m_shared.m_maxStackSize));
-                }
-                if (records.Count == 0)
-                    return;
-                bool toPlayer = job.Call.Op == TxOp.TakeBatch;
-                TransferVisuals.PlayFrom(records, state.Container, toPlayer, ResolveSourcePos(state, job));
-            }
-            catch (Exception ex)
-            {
-                TxLog.Warn("local batch visuals failed: " + ex.Message);
             }
         }
 

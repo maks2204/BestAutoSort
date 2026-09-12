@@ -59,7 +59,7 @@ operations (exception: one-shot explicit acquire for upgrades — no loops).
 - Presence (ViewerOpen/Close) is fire-and-forget, no responses.
 - EnforceLid counts the manager's own open GUI too.
 - Flight visuals (`TxFlights`): after every committed Add/AddBatch/TakeBatch the manager
-  broadcasts `(txId, chest, takeFlag, sourcePos, hash+amount list)` to all peers; receivers
+  broadcasts `(txId, chest, takeFlag, sourcePos, hash+amount list)` with targetPeerID 0 (true broadcast: loopback locally, relayed by the server to the rest; a bare InvokeRoutedRPC(name, params) only reaches the server); receivers
   resolve icons locally and play direction-aware `TransferVisuals.PlayFrom`.
   The originator is skipped by matching the session id in the txId high bits —
   order-safe both ways; the manager also plays remote batches locally.

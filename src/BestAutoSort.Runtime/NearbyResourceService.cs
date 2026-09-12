@@ -515,12 +515,26 @@ internal static class NearbyResourceService
 		if (PrefetchCooldown.TryGetValue(name, out next) && now < next)
 			return;
 		PrefetchCooldown[name] = now + 2f;
+		int wanted = missing;
+		int skippedLease = 0;
+		int skippedLocal = 0;
 		foreach (Container container in GetEligibleContainers(((Component)player).transform.position))
 		{
 			if (missing <= 0)
 				break;
-			if (!ChestTxService.IsShared(container) || container.IsOwner())
+			if (!ChestTxService.IsShared(container))
+			{
+				string why;
+				ChestTxService.IsSharedVerbose(container, out why);
+				if (why.Contains("lease") || why.Contains("autofeed"))
+					skippedLease++;
 				continue;
+			}
+			if (container.IsOwner())
+			{
+				skippedLocal++;
+				continue;
+			}
 			if (AutoFeedService.IsLocked(container))
 				continue;
 			Inventory chestInv = container.GetInventory();
@@ -553,6 +567,8 @@ internal static class NearbyResourceService
 				missing -= n;
 			}
 		}
+		if (missing > 0)
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] prefetch " + name + " short by " + missing + " of " + wanted + " (lease-locked=" + skippedLease + " local-owner=" + skippedLocal + ")"));
 	}
 
 	private static ItemData? FindItem(Vector3 origin, Func<ItemData, bool> predicate)

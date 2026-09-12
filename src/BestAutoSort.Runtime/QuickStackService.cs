@@ -145,21 +145,11 @@ internal sealed class QuickStackService
 				yield break;
 			if ((Object)(object)chest == (Object)null || (Object)(object)player == (Object)null)
 				continue;
-			if (chest.IsOwner())
-			{
-				List<TransferRecord> direct = new List<TransferRecord>();
-				QuickStackTransfer.MoveMatching(chest, ((Humanoid)player).GetInventory(), direct);
-				int movedHere = 0;
-				for (int i = 0; i < direct.Count; i++)
-					movedHere += direct[i].Amount;
-				_totalMoved += movedHere;
-				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack owner-direct moved=" + movedHere));
-				if (direct.Count > 0)
-					TransferVisuals.Play(direct, chest);
-				continue;
-			}
+			// Единый путь для владельца и остальных: SubmitCall сам ведёт
+			// владельца локально в очередь (тот же кадр, серийно), остальных — по сети.
+			// Коммит всегда идёт через менеджер: броадкаст полётов срабатывает для всех.
 			string sharedWhy;
-			if (!ChestTxService.IsSharedVerbose(chest, out sharedWhy))
+			if (!chest.IsOwner() && !ChestTxService.IsSharedVerbose(chest, out sharedWhy))
 			{
 				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack chest skipped: " + sharedWhy));
 				continue;
@@ -178,6 +168,10 @@ internal sealed class QuickStackService
 			_submitted++;
 			ChestTxService.SubmitCall(chest, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records)
 				{
+					int movedHere = 0;
+					for (int i = 0; i < records.Count; i++)
+						movedHere += records[i].Amount;
+					_totalMoved += movedHere;
 					if (session == _session && records.Count > 0)
 						TransferVisuals.Play(records, chest);
 				});

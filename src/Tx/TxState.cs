@@ -92,6 +92,7 @@ namespace BestAutoSort.Tx
     internal sealed class TxJob
     {
         public Container Container;
+        public bool IsLocal;
         public long TxId;
         public long Sender;
         public long PlayerId;

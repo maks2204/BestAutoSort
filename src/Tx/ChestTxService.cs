@@ -290,6 +290,7 @@ namespace BestAutoSort.Tx
             }
             TxJob job = new TxJob();
             job.Container = container;
+            job.IsLocal = true;
             job.TxId = NextLocalTxId();
             job.Sender = ZNet.GetUID();
             job.PlayerId = LocalPlayerId();
@@ -696,7 +697,11 @@ namespace BestAutoSort.Tx
                         TxLog.Error("tx=" + job.TxId + " completion failed: " + ex.Message);
                     }
                     if (job.Call.Op == TxOp.AddBatch && result.AcceptedTotal() > 0)
+                    {
+                        if (!job.IsLocal)
+                            TxFlights.PlayLocalBatch(state, job, result);
                         TxFlights.BroadcastFlights(state, job, result);
+                    }
                 }
             }
             finally

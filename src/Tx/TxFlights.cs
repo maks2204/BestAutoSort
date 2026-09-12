@@ -57,6 +57,35 @@ namespace BestAutoSort.Tx
             }
         }
 
+        /// <summary>
+        /// Проиграть чужой батч у себя на менеджере (броадкаст себя не покрывает).
+        /// </summary>
+        internal static void PlayLocalBatch(ChestState state, TxJob job, StoredResult result)
+        {
+            try
+            {
+                if ((Object)state.Container == (Object)null)
+                    return;
+                List<TransferRecord> records = new List<TransferRecord>();
+                for (int i = 0; i < job.Call.Items.Count && i < result.Accepted.Count; i++)
+                {
+                    if (result.Accepted[i] <= 0)
+                        continue;
+                    TxOpItem item = job.Call.Items[i];
+                    if (item.Snapshot == null || item.Snapshot.m_shared == null)
+                        continue;
+                    records.Add(new TransferRecord(item.Snapshot.m_shared.m_name, item.Snapshot.GetIcon(), result.Accepted[i], item.Snapshot.m_shared.m_maxStackSize));
+                }
+                if (records.Count == 0)
+                    return;
+                TransferVisuals.PlayFrom(records, state.Container, false, ResolveSourcePos(state, job));
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("local batch visuals failed: " + ex.Message);
+            }
+        }
+
         private static Vector3 ResolveSourcePos(ChestState state, TxJob job)
         {
             try

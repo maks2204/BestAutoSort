@@ -292,6 +292,56 @@ internal sealed class QuickStackService
 				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: no containers within " + range + "m at all"));
 				return;
 			}
+			int movable = 0;
+			int eq = 0;
+			int hot = 0;
+			int noauto = 0;
+			int locked = 0;
+			int reserved = 0;
+			int quest = 0;
+			int custom = 0;
+			foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
+			{
+				if (allItem == null || allItem.m_shared == null)
+					continue;
+				if (allItem.m_shared.m_questItem)
+				{
+					quest++;
+					continue;
+				}
+				if (!allItem.m_shared.m_autoStack)
+				{
+					noauto++;
+					continue;
+				}
+				if (((Humanoid)player).IsItemEquiped(allItem))
+				{
+					eq++;
+					continue;
+				}
+				if (ModConfig.ProtectHotbar.Value && allItem.m_gridPos.y == 0)
+				{
+					hot++;
+					continue;
+				}
+				if (ItemLockService.IsLocked(allItem))
+				{
+					locked++;
+					continue;
+				}
+				if (RestockProfileService.IsTarget(allItem))
+				{
+					reserved++;
+					continue;
+				}
+				if (ModConfig.SkipCustomData.Value && allItem.m_customData.Count > 0)
+				{
+					custom++;
+					continue;
+				}
+				movable++;
+			}
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: inventory movable=" + movable + " (equipped=" + eq + " hotbar=" + hot + " noautostack=" + noauto + " locked=" + locked + " reserved=" + reserved + " quest=" + quest + " custom=" + custom + ")"));
 			System.Text.StringBuilder sb = new System.Text.StringBuilder();
 			sb.Append("[ChestTX] quickstack diagnosis: ").Append(inRange).Append(" in range, rejected: ");
 			bool first = true;

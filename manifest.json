@@ -1,0 +1,9 @@
+{
+  "name": "BestAutoSort",
+  "version_number": "0.1.2",
+  "website_url": "",
+  "description": "Standalone storage mod: shared chests, quick-stack, restock, rules, crafting from chests, autofeed, upgrades, sort.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2333"
+  ]
+}

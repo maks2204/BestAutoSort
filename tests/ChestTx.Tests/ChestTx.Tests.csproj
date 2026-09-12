@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Стресс/юнит-харнес протокола ChestTX. Офлайн, без внешних пакетов:
+       dotnet run -c Release. Ненулевой exit code при любом провале. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>ChestTx.Tests</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/BestAutoSort.TxCore/BestAutoSort.TxCore.csproj" />
+  </ItemGroup>
+</Project>

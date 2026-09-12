@@ -1,0 +1,121 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- BestAutoSort: standalone storage mod. Исходники в src/, проект в корне. -->
+  <PropertyGroup>
+    <AssemblyName>BestAutoSort</AssemblyName>
+    <RootNamespace>BestAutoSort</RootNamespace>
+    <TargetFramework>net472</TargetFramework>
+    <Version>0.1.2</Version>
+    <AssemblyVersion>0.1.2.0</AssemblyVersion>
+    <FileVersion>0.1.2.0</FileVersion>
+    <Description>BestAutoSort: standalone storage mod (quick-stack, restock, rules, crafting from chests, autofeed, shared chests, upgrades, sort)</Description>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <LangVersion>14.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+    <DebugType>portable</DebugType>
+    <ValheimPath Condition="'$(ValheimPath)' == '' and '$(VALHEIM_INSTALL)' != ''">$(VALHEIM_INSTALL)</ValheimPath>
+    <ValheimPath Condition="'$(ValheimPath)' == ''">D:/SteamLibrary/steamapps/common/Valheim</ValheimPath>
+    <BepInExCore>$(ValheimPath)/BepInEx/core</BepInExCore>
+    <Managed>$(ValheimPath)/valheim_Data/Managed</Managed>
+    <!-- Деплой в собственную папку BepInEx/plugins/BestAutoSort -->
+    <DeployDir>$(ValheimPath)/BepInEx/plugins/BestAutoSort</DeployDir>
+    <!-- Mod sources live in src/, project in root. Excluded from build:
+         tests/ (tests), bin/obj (artifacts). -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**/*;**/bin/**;**/obj/**</DefaultItemExcludes>
+    <!-- Thunderstore-файлы лежат рядом с проектом, в корне репозитория -->
+    <RepoRoot>$(MSBuildProjectDirectory)</RepoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCore)/BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCore)/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Managed)/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Managed)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(Managed)/UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(Managed)/UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(Managed)/UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(Managed)/UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(Managed)/UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(Managed)/UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(Managed)/Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Splatform">
+      <HintPath>$(Managed)/Splatform.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe">
+      <HintPath>$(Managed)/System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_valheim">
+      <HintPath>$(Managed)/assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_utils">
+      <HintPath>$(Managed)/assembly_utils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_guiutils">
+      <HintPath>$(Managed)/assembly_guiutils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp" Condition="Exists('$(Managed)/Assembly-CSharp.dll')">
+      <HintPath>$(Managed)/Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Deploy)' == 'true' or '$(Configuration)' == 'Debug'">
+    <MakeDir Directories="$(DeployDir)" Condition="!Exists('$(DeployDir)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)" SkipUnchangedFiles="true" />
+    <Message Text="Deployed $(TargetFileName) -&gt; $(DeployDir)" Importance="high" />
+  </Target>
+
+  <Target Name="ThunderstorePackage" AfterTargets="Build" Condition="'$(Package)' == 'true'">
+    <MakeDir Directories="$(OutDir)/package" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(OutDir)/package/plugins" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(RepoRoot)/manifest.json" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(RepoRoot)/README.md" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(RepoRoot)/CHANGELOG.md" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" Condition="Exists('$(RepoRoot)/CHANGELOG.md')" />
+    <Copy SourceFiles="$(RepoRoot)/icon.png" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" Condition="Exists('$(RepoRoot)/icon.png')" />
+  </Target>
+</Project>

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BestAutoSort.TxCore/BestAutoSort.TxCore.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ChestTx.Tests/ChestTx.Tests.csproj" />
+  </Folder>
+  <Project Path="BestAutoSort.csproj" />
+</Solution>

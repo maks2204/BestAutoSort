@@ -1,0 +1,355 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using BestAutoSort.Runtime;
+using BestAutoSort.Tx;
+using BestAutoSort.TxCore;
+using HarmonyLib;
+using UnityEngine;
+using BestAutoSort;
+
+namespace BestAutoSort.Patches
+{
+    /// <summary>
+    /// Shared-chest GUI operations go through ChestTX instead of ownership handoff.
+    /// Owner (manager): drain the remote queue, then vanilla code synchronously
+    /// (the main thread serializes everything itself — strict order).
+    /// Non-owner: build the tx, send it, release the drag ghost, skip vanilla.
+    /// Own-inventory items are removed ONLY on response (in ChestTxService).
+    /// Purely local stuff (player→player, drag start, split dialog) stays vanilla.
+    /// </summary>
+    internal static class TxGui
+    {
+        private static readonly FieldInfo DragInventoryField = AccessTools.Field(typeof(InventoryGui), "m_dragInventory");
+        private static readonly FieldInfo DragItemField = AccessTools.Field(typeof(InventoryGui), "m_dragItem");
+        private static readonly FieldInfo DragAmountField = AccessTools.Field(typeof(InventoryGui), "m_dragAmount");
+
+        private static readonly MethodInfo SetupDragItemMethod = AccessTools.Method(typeof(InventoryGui), "SetupDragItem", (Type[])null, (Type[])null);
+
+        internal static Inventory GetDragInventory(InventoryGui gui)
+        {
+            object value = DragInventoryField.GetValue(gui);
+            return (Inventory)((value is Inventory) ? value : null);
+        }
+
+        internal static ItemData GetDragItem(InventoryGui gui)
+        {
+            object value = DragItemField.GetValue(gui);
+            return (ItemData)((value is ItemData) ? value : null);
+        }
+
+        internal static int GetDragAmount(InventoryGui gui)
+        {
+            object value = DragAmountField.GetValue(gui);
+            if (value is int)
+                return (int)value;
+            return 0;
+        }
+
+        internal static void CancelDrag(InventoryGui gui)
+        {
+            SetupDragItemMethod.Invoke(gui, new object[3] { null, null, 1 });
+        }
+
+        internal static void TellPlayer(string message)
+        {
+            Player player = Player.m_localPlayer;
+            if (player != null)
+                ((Character)player).Message((MessageType)2, message, 0, (Sprite)null, false);
+        }
+
+        /// <summary>
+        /// Autofeed lease: while feeding holds the chest — nobody may touch it (as before).
+        /// </summary>
+        internal static bool BlockedByFeed(Container container)
+        {
+            if (AutoFeedService.IsLocked(container))
+            {
+                TellPlayer("Auto Feed is finishing a protected chest operation. Try again shortly.");
+                return true;
+            }
+            return false;
+        }
+
+        internal static ItemData FindInPlayer(Inventory playerInv, string name, int quality)
+        {
+            if (playerInv == null || string.IsNullOrEmpty(name))
+                return null;
+            foreach (ItemData it in playerInv.GetAllItems())
+            {
+                if (it != null && it.m_shared != null
+                    && string.Equals(it.m_shared.m_name, name, StringComparison.Ordinal)
+                    && it.m_quality == quality)
+                    return it;
+            }
+            return null;
+        }
+    }
+
+    [HarmonyPatch(typeof(InventoryGui), "OnSelectedItem")]
+    internal static class TxGuiSelectedPatch
+    {
+        private static bool Prefix(InventoryGui __instance, InventoryGrid grid, ItemData item, Vector2i pos, Modifier mod)
+        {
+            Container container = InventoryAccess.CurrentContainer(__instance);
+            if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+                return true;
+            if (TxGui.BlockedByFeed(container))
+                return false;
+            Player player = Player.m_localPlayer;
+            if ((Object)player == (Object)null)
+                return false;
+            Inventory chestInv = container.GetInventory();
+            Inventory playerInv = ((Humanoid)player).GetInventory();
+            Inventory targetInv = grid.GetInventory();
+
+            if (container.IsOwner())
+            {
+                ChestTxService.DrainForLocal(container);
+                return true;
+            }
+
+            ItemData dragItem = TxGui.GetDragItem(__instance);
+            Inventory dragInv = TxGui.GetDragInventory(__instance);
+            bool hasDrag = dragItem != null && dragInv != null;
+
+            if (hasDrag)
+            {
+                // player->player stays fully local.
+                if (dragInv == playerInv && targetInv == playerInv)
+                    return true;
+                HandleDragDrop(__instance, container, chestInv, player, playerInv, targetInv, dragItem, dragInv, item, pos);
+                return false;
+            }
+
+            // No drag: intercept only chest-related Move/Drop.
+            // Select/Split (drag start, dialog) stays vanilla: no mutations.
+            if (mod != Modifier.Move && mod != Modifier.Drop)
+                return true;
+            if (targetInv != chestInv)
+            {
+                // Click on own inventory: Move with an open chest = deposit (tx),
+                // Drop = drop on the ground (vanilla, chest untouched).
+                if (mod == Modifier.Move)
+                {
+                    if (item == null)
+                        return false;
+                    HandleClickMove(__instance, container, chestInv, player, playerInv, targetInv, item);
+                    return false;
+                }
+                return true;
+            }
+            HandleClickMove(__instance, container, chestInv, player, playerInv, targetInv, item);
+            return false;
+        }
+
+        private static void HandleClickMove(InventoryGui gui, Container container, Inventory chestInv, Player player, Inventory playerInv, Inventory targetInv, ItemData item)
+        {
+            if (item == null)
+                return;
+            if (targetInv == chestInv)
+            {
+                // Chest -> player: Take the full stack.
+                if (item.m_shared.m_questItem)
+                    return;
+                player.RemoveEquipAction(item);
+                player.UnequipItem(item);
+                ChestTxService.RequestTake(container, playerInv, item, item.m_stack, null);
+            }
+            else
+            {
+                // Player -> chest: Add the full stack.
+                if (item.m_shared.m_questItem)
+                    return;
+                player.RemoveEquipAction(item);
+                player.UnequipItem(item);
+                ChestTxService.RequestAdd(container, playerInv, item, item.m_stack, -1, -1, null);
+            }
+        }
+
+        private static void HandleDragDrop(InventoryGui gui, Container container, Inventory chestInv, Player player, Inventory playerInv, Inventory targetInv, ItemData dragItem, Inventory dragInv, ItemData item, Vector2i pos)
+        {
+            int dragAmount = TxGui.GetDragAmount(gui);
+            if (dragAmount <= 0)
+            {
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            if (targetInv != chestInv && targetInv != playerInv)
+            {
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            if ((dragItem.m_shared.m_questItem || (item != null && item.m_shared.m_questItem)) && dragInv != targetInv)
+            {
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            if (targetInv == chestInv && dragInv == playerInv)
+            {
+                if (((Humanoid)player).IsItemEquiped(dragItem))
+                    player.UnequipItem(dragItem, false);
+                Plugin.LogInstance.LogInfo((object)("[ChestTX] drag-drop chest=" + chestInv.GetWidth() + "x" + chestInv.GetHeight() + " pos=(" + pos.x + "," + pos.y + ")"));
+                ChestTxService.RequestAdd(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null);
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            if (targetInv == playerInv && dragInv == chestInv)
+            {
+                ChestTxService.RequestTake(container, playerInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null);
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            if (targetInv == chestInv && dragInv == chestInv)
+            {
+                ChestTxService.RequestMove(container, dragItem, Math.Min(dragAmount, dragItem.m_stack), pos.x, pos.y, null);
+                TxGui.CancelDrag(gui);
+                return;
+            }
+            TxGui.CancelDrag(gui);
+        }
+    }
+
+    [HarmonyPatch(typeof(InventoryGui), "OnTakeAll")]
+    internal static class TxGuiTakeAllPatch
+    {
+        private static bool Prefix(InventoryGui __instance)
+        {
+            Container container = InventoryAccess.CurrentContainer(__instance);
+            if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+                return true;
+            if (TxGui.BlockedByFeed(container))
+                return false;
+            if (container.IsOwner())
+            {
+                ChestTxService.DrainForLocal(container);
+                return true;
+            }
+            Player player = Player.m_localPlayer;
+            if ((Object)player == (Object)null || player.IsTeleporting())
+                return false;
+            Inventory chestInv = container.GetInventory();
+            Inventory playerInv = ((Humanoid)player).GetInventory();
+            if (chestInv == null || playerInv == null)
+                return false;
+            List<TxOpItem> items = new List<TxOpItem>();
+            foreach (ItemData it in new List<ItemData>(chestInv.GetAllItems()))
+            {
+                TxOpItem op = ChestTxService.SnapshotItem(it, it.m_stack, -1, -1);
+                if (op != null)
+                    items.Add(op);
+            }
+            if (items.Count == 0)
+                return false;
+            ChestTxService.RequestTakeBatch(container, playerInv, items, null);
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(InventoryGui), "OnStackAll")]
+    internal static class TxGuiStackAllPatch
+    {
+        private static bool Prefix(InventoryGui __instance)
+        {
+            Container container = InventoryAccess.CurrentContainer(__instance);
+            if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+                return true;
+            if (TxGui.BlockedByFeed(container))
+                return false;
+            if (container.IsOwner())
+            {
+                ChestTxService.DrainForLocal(container);
+                return true;
+            }
+            Player player = Player.m_localPlayer;
+            if ((Object)player == (Object)null || player.IsTeleporting())
+                return false;
+            Inventory chestInv = container.GetInventory();
+            Inventory playerInv = ((Humanoid)player).GetInventory();
+            if (chestInv == null || playerInv == null)
+                return false;
+            HashSet<string> names = new HashSet<string>();
+            foreach (ItemData chestItem in chestInv.GetAllItems())
+            {
+                if (chestItem != null && chestItem.m_shared != null)
+                    names.Add(chestItem.m_shared.m_name);
+            }
+            List<TxOpItem> items = new List<TxOpItem>();
+            foreach (ItemData it in new List<ItemData>(playerInv.GetAllItems()))
+            {
+                if (it == null || it.m_shared == null || it.m_shared.m_questItem)
+                    continue;
+                if (((Humanoid)player).IsItemEquiped(it))
+                    continue;
+                if (ItemLockService.IsLocked(it) || RestockProfileService.IsTarget(it))
+                    continue;
+                if (!names.Contains(it.m_shared.m_name))
+                    continue;
+                TxOpItem op = ChestTxService.SnapshotItem(it, it.m_stack, -1, -1);
+                if (op != null)
+                    items.Add(op);
+            }
+            if (items.Count == 0)
+                return false;
+            ChestTxService.RequestAddBatch(container, playerInv, items,
+                delegate (ZPackage pkg, TxStatus status, uint rev)
+                {
+                    int total = 0;
+                    try
+                    {
+                        int n = pkg != null ? pkg.ReadInt() : 0;
+                        for (int i = 0; i < n; i++)
+                            total += pkg.ReadInt();
+                    }
+                    catch (Exception)
+                    {
+                    }
+                    if (total > 0)
+                        TxGui.TellPlayer(Localization.instance.Localize("$msg_stackall " + total));
+                    else
+                        TxGui.TellPlayer(Localization.instance.Localize("$msg_stackall_none"));
+                });
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(InventoryGui), "OnRightClickItem")]
+    internal static class TxGuiRightClickPatch
+    {
+        private static bool Prefix(InventoryGui __instance, InventoryGrid grid, ItemData item, Vector2i pos)
+        {
+            Container container = InventoryAccess.CurrentContainer(__instance);
+            if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+                return true;
+            if (TxGui.BlockedByFeed(container))
+                return false;
+            if (grid.GetInventory() != container.GetInventory())
+                return true;
+            if (container.IsOwner())
+            {
+                ChestTxService.DrainForLocal(container);
+                return true;
+            }
+            if (item == null)
+                return false;
+            Player player = Player.m_localPlayer;
+            if ((Object)player == (Object)null)
+                return false;
+            Inventory playerInv = ((Humanoid)player).GetInventory();
+            // Use from the chest: Take the full stack, then Use your own copy.
+            string name = item.m_shared != null ? item.m_shared.m_name : null;
+            int quality = item.m_quality;
+            ChestTxService.RequestTake(container, playerInv, item, item.m_stack,
+                delegate (ZPackage pkg, TxStatus status, uint rev)
+                {
+                    if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
+                        return;
+                    ItemData mine = TxGui.FindInPlayer(playerInv, name, quality);
+                    if (mine != null)
+                        player.UseItem(playerInv, mine, true);
+                });
+            return false;
+        }
+
+    }
+}

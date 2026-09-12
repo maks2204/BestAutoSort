@@ -1,3 +1,7 @@
+## 0.1.3
+
+- Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
+
 ## Unreleased
 
 - Verified against **Valheim 1.0.12**.

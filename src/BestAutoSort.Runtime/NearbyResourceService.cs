@@ -107,7 +107,8 @@ internal static class NearbyResourceService
 					flag = true;
 					break;
 				}
-				PrefetchMissing(player, name, j, num - local);
+				if (global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedRecipe(recipe))
+					PrefetchMissing(player, name, j, num - local);
 			}
 			if (recipe.m_requireOnlyOneIngredient)
 			{
@@ -160,7 +161,8 @@ internal static class NearbyResourceService
 				int local = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
 				if (local < val.m_amount)
 				{
-					PrefetchMissing(player, name, -1, val.m_amount - local);
+					if (global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedPiece(piece))
+						PrefetchMissing(player, name, -1, val.m_amount - local);
 					return false;
 				}
 			}
@@ -195,7 +197,7 @@ internal static class NearbyResourceService
 			for (quality = 1; quality <= maxQuality; quality++)
 			{
 				int local = CountAvailable(player, name, quality, ((Component)player).transform.position, true);
-				if (local < num)
+				if (local < num && global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedRecipe(recipe))
 					PrefetchMissing(player, name, quality, num - local);
 				if (local >= num)
 				{

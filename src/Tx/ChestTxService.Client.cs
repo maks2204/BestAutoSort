@@ -410,7 +410,7 @@ namespace BestAutoSort.Tx
         /// Take request with custom completion for automation (production, feeding, restock).
         /// Received items are NOT placed anywhere automatically — onDone decides.
         /// </summary>
-        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint> onDone)
+        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null)
         {
             if (items == null || items.Count == 0)
                 return;
@@ -430,7 +430,7 @@ namespace BestAutoSort.Tx
                 }
                 if (onDone != null)
                     onDone(decoded, status, rev);
-            });
+            }, playerId, actorPos);
         }
 
         /// <summary>

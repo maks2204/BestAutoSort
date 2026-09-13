@@ -288,7 +288,7 @@ namespace BestAutoSort.Tx
         /// Manager-local mutation (own GUI/automation on the owner):
         /// goes into the same chest queue and runs immediately, serially with remote ones.
         /// </summary>
-        internal static void MutateLocal(Container container, TxOpCall call, Action<StoredResult> onDone)
+        internal static void MutateLocal(Container container, TxOpCall call, Action<StoredResult> onDone, long playerId = 0L)
         {
             ChestState state = GetState(container);
             if (state == null || !container.IsOwner())
@@ -322,7 +322,7 @@ namespace BestAutoSort.Tx
             job.IsLocal = true;
             job.TxId = NextLocalTxId();
             job.Sender = ZNet.GetUID();
-            job.PlayerId = LocalPlayerId();
+            job.PlayerId = playerId != 0L ? playerId : LocalPlayerId();
             job.BaseRev = CurrentRevision(container);
             job.Call = call;
             job.Complete = onDone;
@@ -446,7 +446,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone)
+        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null)
         {
             if (!Plugin.IsActive || !IsShared(container))
             {
@@ -464,7 +464,7 @@ namespace BestAutoSort.Tx
                     RefreshNow(container);
                     if (onDone != null)
                         onDone(null, r.Status, r.Revision);
-                });
+                }, playerId);
                 return;
             }
             System.Collections.Generic.List<ItemDrop.ItemData> claimed;
@@ -474,7 +474,7 @@ namespace BestAutoSort.Tx
                 return;
             }
             long txId = TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
-            ZPackage payload = EncodeCall(call, CurrentRevision(container));
+            ZPackage payload = EncodeCall(call, CurrentRevision(container), playerId, actorPos);
             ZPackage request = new ZPackage();
             request.Write(txId);
             request.Write(payload);
@@ -536,14 +536,14 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static ZPackage EncodeCall(TxOpCall call, uint baseRev)
+        private static ZPackage EncodeCall(TxOpCall call, uint baseRev, long playerId, Vector3? actorPos)
         {
             ZPackage pkg = new ZPackage();
             pkg.Write(TxCodec.ProtoVersion);
             pkg.Write((int)call.Op);
             pkg.Write(baseRev);
-            pkg.Write(LocalPlayerId());
-            pkg.Write(LocalActorPos());
+            pkg.Write(playerId != 0L ? playerId : LocalPlayerId());
+            pkg.Write(actorPos.HasValue ? actorPos.Value : LocalActorPos());
             pkg.Write(call.EnforceRule);
             pkg.Write(call.RespectReserves);
             switch (call.Op)

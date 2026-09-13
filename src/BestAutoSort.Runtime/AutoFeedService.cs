@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using BestAutoSort.Core;
 using BestAutoSort.Tx;
+using BestAutoSort.TxCore;
 using HarmonyLib;
 using UnityEngine;
 
@@ -18,57 +19,27 @@ internal static class AutoFeedService
 		internal float Next;
 	}
 
-	private sealed class ClientRequest
-	{
-		internal int Id;
-
-		internal Container Container;
-
-		internal ZDOID Animal;
-
-		internal float Expires;
-
-		internal float RetryAt;
-	}
-
-	private sealed class ServerRequest
-	{
-		internal string Key = "";
-
-		internal int Id;
-
-		internal long Sender;
-
-		internal long Actor;
-
-		internal Container Container;
-
-		internal ZDOID Animal;
-
-		internal long PreviousOwner;
-
-		internal float Expires;
-
-		internal bool Prepared;
-
-		internal byte[]? Inventory;
-	}
-
-	internal const string TakeFoodRpc = "BestAutoSort_AutoFeedTake";
-
-	internal const string TakeFoodResponseRpc = "BestAutoSort_AutoFeedTakeResponse";
-
-	internal const string FinalizeFoodRpc = "BestAutoSort_AutoFeedFinalize";
-
-	internal const string PrepareFoodRpc = "BestAutoSort_AutoFeedPrepare";
-
-	internal const string PreparedFoodRpc = "BestAutoSort_AutoFeedPrepared";
-
-	private const string ReceiptKey = "BestAutoSort.AutoFeedReceipt.v1";
-
 	private const string LeaseKey = "BestAutoSort.AutoFeedLeaseUntil.v1";
 
-	private const int MaximumInventoryBytes = 65536;
+	/// <summary>Animals with a Take already in flight (animal -> expiry).</summary>
+	private static readonly Dictionary<ZDOID, float> FeedingAnimals = new Dictionary<ZDOID, float>();
+
+	private static readonly Dictionary<int, float> LastProductionDiagnosticAt = new Dictionary<int, float>();
+
+	private static void LogProductionDiagnostic(Component production, string message, bool warning)
+	{
+		int instanceID = ((Object)production).GetInstanceID();
+		float realtimeSinceStartup = Time.realtimeSinceStartup;
+		float value;
+		if (!LastProductionDiagnosticAt.TryGetValue(instanceID, out value) || !(realtimeSinceStartup - value < 2f))
+		{
+			LastProductionDiagnosticAt[instanceID] = realtimeSinceStartup;
+			if (warning)
+				Plugin.LogInstance.LogWarning((object)message);
+			else
+				Plugin.LogInstance.LogInfo((object)message);
+		}
+	}
 
 	private static readonly FieldInfo TameableNetViewField = AccessTools.Field(typeof(Tameable), "m_nview");
 
@@ -114,52 +85,12 @@ internal static class AutoFeedService
 
 	private static float _nearestDistance;
 
-	private static readonly Dictionary<int, ClientRequest> ClientRequests = new Dictionary<int, ClientRequest>();
 
-	private static readonly Dictionary<string, ServerRequest> ServerRequests = new Dictionary<string, ServerRequest>(StringComparer.Ordinal);
-
-	private static readonly FeedRequestLedger Receipts = new FeedRequestLedger();
-
-	private static readonly HashSet<ZDOID> BusyAnimals = new HashSet<ZDOID>();
-
-	private static readonly HashSet<ZDOID> BlockedChests = new HashSet<ZDOID>();
-
-	private static readonly Dictionary<long, Queue<float>> RequestRates = new Dictionary<long, Queue<float>>();
-
-	private static int nextRequestId;
 
 	internal static void Attach(Container container)
 	{
 		EnsureSession();
 		TrackContainer(container);
-		ZNetView view = GetNetView(container);
-		if ((Object)(object)view == (Object)null || !view.IsValid())
-		{
-			return;
-		}
-		view.Register<ZPackage>("BestAutoSort_AutoFeedTake", (Action<long, ZPackage>)delegate(long sender, ZPackage package)
-		{
-			ReceiveRequest(container, sender, package);
-		});
-		view.Register<int, bool>("BestAutoSort_AutoFeedTakeResponse", (Action<long, int, bool>)delegate(long sender, int request, bool committed)
-		{
-			if (Plugin.IsActive && ChestAuthority.IsServerSender(sender) && ClientRequests.TryGetValue(request, out ClientRequest value) && !((Object)(object)value.Container != (Object)(object)container))
-			{
-				ClientRequests.Remove(request);
-				view.InvokeRPC(sender, "BestAutoSort_AutoFeedFinalize", new object[2] { request, committed });
-			}
-		});
-		view.Register<int, bool>("BestAutoSort_AutoFeedFinalize", (Action<long, int, bool>)delegate
-		{
-		});
-		view.Register<ZPackage>("BestAutoSort_AutoFeedPrepare", (Action<long, ZPackage>)delegate(long sender, ZPackage package)
-		{
-			PrepareInventory(container, sender, package);
-		});
-		view.Register<ZPackage>("BestAutoSort_AutoFeedPrepared", (Action<long, ZPackage>)delegate(long sender, ZPackage package)
-		{
-			ReceivePrepared(container, sender, package);
-		});
 	}
 
 	internal static void TryFeed(Tameable tameable)
@@ -181,10 +112,8 @@ internal static class AutoFeedService
 		{
 			float realtimeSinceStartup = Time.realtimeSinceStartup;
 			ScanCooldown value3 = ScanCooldowns.GetValue(tameable, (Tameable _) => new ScanCooldown());
-			if (AutoFeedPolicy.ShouldScan(realtimeSinceStartup, value3.Next) && !ClientRequests.Values.Any(delegate(ClientRequest request)
-			{
-				return request.Animal == animalView.GetZDO().m_uid;
-			}) && _scanningAnimal != tameable && ScanQueue.Enqueue(tameable))
+			float feedExp;
+			if (AutoFeedPolicy.ShouldScan(realtimeSinceStartup, value3.Next) && (!FeedingAnimals.TryGetValue(animalView.GetZDO().m_uid, out feedExp) || realtimeSinceStartup >= feedExp) && _scanningAnimal != tameable && ScanQueue.Enqueue(tameable))
 			{
 				value3.Next = realtimeSinceStartup + ModConfig.AutoFeedInterval.Value;
 				(((Component)tameable).GetComponent<AutoFeedAnimalTracker>() ?? ((Component)tameable).gameObject.AddComponent<AutoFeedAnimalTracker>()).Animal = tameable;
@@ -321,58 +250,101 @@ internal static class AutoFeedService
 		return false;
 	}
 
+	/// <summary>
+	/// Feed one unit via the tx queue (manager-serialized, atomic): no ownership
+	/// transfer, no snapshots, no lease. The animal owner feeds directly; remote
+	/// managers commit the Take like any client request.
+	/// </summary>
 	private static void DispatchFeed(Tameable tameable, Container container)
 	{
-		if ((Object)(object)ZNet.instance == (Object)null || !TryGetHungryOwner(tameable, out ZNetView view, out MonsterAI ai))
-		{
+		if ((Object)(object)ZNet.instance == (Object)null)
 			return;
-		}
-		long num;
-		if (!ZNet.instance.IsServer())
-		{
-			Player localPlayer = Player.m_localPlayer;
-			num = ((localPlayer != null) ? localPlayer.GetPlayerID() : 0);
-		}
+		if (!TryGetHungryOwner(tameable, out ZNetView view, out MonsterAI ai))
+			return;
+		ZDOID animalId = view.GetZDO().m_uid;
+		float now = Time.realtimeSinceStartup;
+		float exp;
+		if (FeedingAnimals.TryGetValue(animalId, out exp) && now < exp)
+			return;
+		// Feeder identity must match the CanUse server branch: any server
+		// (dedicated or host) stamps the chest creator; pure clients stamp self.
+		// Stamped position is the ANIMAL's (matches the range check semantics).
+		long feederId;
+		if (ZNet.instance.IsServer())
+			feederId = Creator(container);
 		else
 		{
-			num = Creator(container);
+			Player localPlayer = Player.m_localPlayer;
+			if (localPlayer == null)
+				return;
+			feederId = localPlayer.GetPlayerID();
 		}
-		long actor = num;
-		if (!IsEligible(container, ((Component)tameable).transform.position, actor) || !HasFood(container, AcceptedFood(ai)))
-		{
+		Vector3 animalPos = ((Component)tameable).transform.position;
+		if (!IsEligible(container, animalPos, feederId))
 			return;
-		}
-		ZDOID animal = view.GetZDO().m_uid;
-		if (ClientRequests.Values.Any(delegate(ClientRequest request)
+		Dictionary<string, ItemDrop> accepted = AcceptedFood(ai);
+		ItemData pick = null;
+		foreach (ItemData candidate in container.GetInventory().GetAllItems())
 		{
-			return request.Animal == animal;
-		}))
-		{
-			return;
-		}
-		int num2 = NextRequestId();
-		if (ZNet.instance.IsServer())
-		{
-			BeginRequest(container, 0L, num2, animal);
-			return;
-		}
-		ZNetPeer serverPeer = ZNet.instance.GetServerPeer();
-		if (serverPeer != null)
-		{
-			view.GetZDO().SetOwner(serverPeer.m_uid);
-			ZDOMan.instance.ForceSendZDO(serverPeer.m_uid, animal);
-			float realtimeSinceStartup = Time.realtimeSinceStartup;
-			ClientRequest clientRequest = new ClientRequest
+			if (candidate == null || candidate.m_shared == null)
+				continue;
+			if (!candidate.m_shared.m_questItem && accepted.ContainsKey(candidate.m_shared.m_name) && ChestReserveStore.Available(container, candidate) > 0)
 			{
-				Id = num2,
-				Container = container,
-				Animal = animal,
-				Expires = realtimeSinceStartup + 12f,
-				RetryAt = realtimeSinceStartup + 1f
-			};
-			ClientRequests[num2] = clientRequest;
-			SendRequest(serverPeer.m_uid, clientRequest);
+				pick = candidate;
+				break;
+			}
 		}
+		if (pick == null)
+			return;
+		TxOpItem op = ChestTxService.SnapshotItem(pick, 1, -1, -1);
+		if (op == null)
+			return;
+		FeedingAnimals[animalId] = now + 15f;
+		List<TxOpItem> items = new List<TxOpItem>();
+		items.Add(op);
+		ChestTxService.RequestTakeCustom(container, items, true, delegate(List<DecodedTake> decoded, TxStatus status, uint rev)
+		{
+			FeedingAnimals.Remove(animalId);
+			DecodedTake got = null;
+			if (decoded != null)
+			{
+				foreach (DecodedTake dt in decoded)
+				{
+					if (dt != null && dt.Accepted > 0 && dt.Item != null)
+					{
+						got = dt;
+						break;
+					}
+				}
+			}
+			if (got == null)
+				return;
+			// Re-verify the animal before consuming: still ours, hungry, calm.
+			ZNetScene scene = ZNetScene.instance;
+			GameObject go = (scene != null) ? scene.FindInstance(animalId) : null;
+			Tameable live = (go != null) ? go.GetComponent<Tameable>() : null;
+			if (live == null || !TryGetHungryOwner(live, out ZNetView _, out MonsterAI liveAi))
+			{
+				// Took the food but cannot feed: send it back instead of voiding it.
+				ItemData back = got.Item;
+				back.m_stack = got.Accepted;
+				ChestTxService.CompensateTakeBackItem(container, got.PrefabHash, back);
+				return;
+			}
+			Dictionary<string, ItemDrop> liveAccepted = AcceptedFood(liveAi);
+			ItemDrop prefab;
+			if (got.Item.m_shared != null && liveAccepted.TryGetValue(got.Item.m_shared.m_name, out prefab) && (Object)(object)prefab != (Object)null)
+			{
+				ConsumedItemMethod.Invoke(live, new object[1] { prefab });
+				LogProductionDiagnostic(tameable, "Fed " + got.Item.m_shared.m_name + " to " + ((Object)live).name + " via tx.", warning: false);
+			}
+			else
+			{
+				ItemData back2 = got.Item;
+				back2.m_stack = got.Accepted;
+				ChestTxService.CompensateTakeBackItem(container, got.PrefabHash, back2);
+			}
+		});
 	}
 
 	private static void TrackContainer(Container container)
@@ -432,438 +404,21 @@ internal static class AutoFeedService
 		}
 		EnsureSession();
 		UpdateScans();
+		// Expire lost feed flights (responses always clear explicitly).
 		float realtimeSinceStartup = Time.realtimeSinceStartup;
-		ClientRequest[] array = ClientRequests.Values.ToArray();
-		foreach (ClientRequest clientRequest in array)
-		{
-			if ((Object)(object)clientRequest.Container == (Object)null || realtimeSinceStartup >= clientRequest.Expires)
-			{
-				ClientRequests.Remove(clientRequest.Id);
-			}
-			else if (!(realtimeSinceStartup < clientRequest.RetryAt))
-			{
-				clientRequest.RetryAt = realtimeSinceStartup + 1f;
-				ZNet instance = ZNet.instance;
-				ZNetPeer val = ((instance != null) ? instance.GetServerPeer() : null);
-				if (val != null)
-				{
-					SendRequest(val.m_uid, clientRequest);
-				}
-			}
-		}
-		if ((Object)(object)ZNet.instance == (Object)null || !ZNet.instance.IsServer())
-		{
-			return;
-		}
-		ServerRequest[] array2 = ServerRequests.Values.ToArray();
-		foreach (ServerRequest serverRequest in array2)
-		{
-			if ((Object)(object)serverRequest.Container == (Object)null || realtimeSinceStartup >= serverRequest.Expires)
-			{
-				Finish(serverRequest, committed: false);
-				continue;
-			}
-			ZNetScene instance2 = ZNetScene.instance;
-			GameObject obj = ((instance2 != null) ? instance2.FindInstance(serverRequest.Animal) : null);
-			Tameable val2 = ((obj != null) ? obj.GetComponent<Tameable>() : null);
-			object obj2;
-			if (!((Object)(object)val2 == (Object)null))
-			{
-				object value = TameableNetViewField.GetValue(val2);
-				obj2 = ((value is ZNetView) ? value : null);
-			}
-			else
-			{
-				obj2 = null;
-			}
-			ZNetView val3 = (ZNetView)obj2;
-			ZNetView netView = GetNetView(serverRequest.Container);
-			if ((Object)(object)val3 == (Object)null || !val3.IsValid() || !val3.IsOwner() || (Object)(object)netView == (Object)null || !netView.IsOwner() || !serverRequest.Prepared)
-			{
-				continue;
-			}
-			bool committed = false;
-			try
-			{
-				if (serverRequest.Inventory != null)
-				{
-					Inventory inventory = serverRequest.Container.GetInventory();
-					Inventory val4 = new Inventory("BestAutoSort feed validation", inventory.GetBkg(), inventory.GetWidth(), inventory.GetHeight());
-					val4.Load(new ZPackage(serverRequest.Inventory));
-					inventory.GetAllItems().Clear();
-					inventory.GetAllItems().AddRange(val4.GetAllItems());
-					InventoryChangedMethod.Invoke(inventory, new object[2] { false, false });
-					serverRequest.Inventory = null;
-					TxReflect.SaveContainer(serverRequest.Container);
-				}
-				else
-				{
-					TxReflect.LoadContainer(serverRequest.Container);
-				}
-				long num = ((serverRequest.Sender == 0L) ? Creator(serverRequest.Container) : serverRequest.Actor);
-				if (serverRequest.Sender != 0L)
-				{
-					if (ChestAuthority.ResolveActor(serverRequest.Sender, out var playerId, out var position) && playerId == num)
-					{
-						Vector3 val5 = position - ((Component)val2).transform.position;
-						if (!((val5).sqrMagnitude > 16384f))
-						{
-							goto IL_02bf;
-						}
-					}
-					Finish(serverRequest, committed: false);
-					continue;
-				}
-				goto IL_02bf;
-				IL_02bf:
-				if (IsEligible(serverRequest.Container, ((Component)val2).transform.position, num, ownLease: true))
-				{
-					committed = CompleteOperation(serverRequest, val2);
-				}
-			}
-			catch (Exception ex)
-			{
-				Plugin.LogInstance.LogError((object)("Server Auto Feed operation failed: " + ex));
-			}
-			Finish(serverRequest, committed);
-		}
-		long[] array3 = RequestRates.Keys.Where((long peer) => ZNet.instance.GetPeer(peer) == null).ToArray();
-		foreach (long key in array3)
-		{
-			RequestRates.Remove(key);
-		}
-	}
-
-	private static void SendRequest(long server, ClientRequest request)
-	{
-		ZPackage val = new ZPackage();
-		val.Write(request.Id);
-		val.Write(request.Animal);
-		ZNetView? netView = GetNetView(request.Container);
-		if (netView != null)
-		{
-			netView.InvokeRPC(server, "BestAutoSort_AutoFeedTake", new object[1] { val });
-		}
-	}
-
-	private static void ReceiveRequest(Container container, long sender, ZPackage package)
-	{
-		if (!Plugin.IsActive || (Object)(object)ZNet.instance == (Object)null || !ZNet.instance.IsServer() || package == null || package.Size() > 64 || !ChestAuthority.ResolveActor(sender, out var _, out var _))
-		{
-			return;
-		}
-		if (!RequestRates.TryGetValue(sender, out Queue<float> value))
-		{
-			RequestRates.Add(sender, value = new Queue<float>());
-		}
-		float realtimeSinceStartup = Time.realtimeSinceStartup;
-		while (value.Count > 0 && realtimeSinceStartup - value.Peek() >= 1f)
-		{
-			value.Dequeue();
-		}
-		if (value.Count >= 20)
-		{
-			return;
-		}
-		value.Enqueue(realtimeSinceStartup);
-		try
-		{
-			int num = package.ReadInt();
-			ZDOID animal = package.ReadZDOID();
-			if (num > 0 && package.GetPos() == package.Size())
-			{
-				BeginRequest(container, sender, num, animal);
-			}
-		}
-		catch (Exception ex)
-		{
-			Plugin.LogInstance.LogWarning((object)("Rejected Auto Feed request: " + ex.Message));
-		}
-	}
-
-	private unsafe static void BeginRequest(Container container, long sender, int id, ZDOID animal)
-	{
-		ZNetView netView = GetNetView(container);
-		if (!ModConfig.Enabled.Value || !ModConfig.AutoFeedEnabled.Value || (Object)(object)netView == (Object)null || !netView.IsValid() || BlockedChests.Contains(netView.GetZDO().m_uid))
-		{
-			return;
-		}
-		string text = sender + ":" + id;
-		ZDOID uid = netView.GetZDO().m_uid;
-		string text2 = ((object)(*(ZDOID*)(&uid))/*cast due to constrained. prefix*/).ToString();
-		uid = animal;
-		string context = text2 + "/" + ((object)(*(ZDOID*)(&uid))/*cast due to constrained. prefix*/).ToString();
-		FeedRequestState feedRequestState = Receipts.Begin(text, context, Time.realtimeSinceStartup);
-		if (feedRequestState != FeedRequestState.New)
-		{
-			if (sender != 0L && feedRequestState != FeedRequestState.Pending)
-			{
-				netView.InvokeRPC(sender, "BestAutoSort_AutoFeedTakeResponse", new object[2]
-				{
-					id,
-					feedRequestState == FeedRequestState.Committed
-				});
-			}
-			return;
-		}
-		long playerId = Creator(container);
-		if (sender != 0L && !ChestAuthority.ResolveActor(sender, out playerId, out var _))
-		{
-			Receipts.Complete(text, committed: false);
-			return;
-		}
-		ZNetScene instance = ZNetScene.instance;
-		GameObject obj = ((instance != null) ? instance.FindInstance(animal) : null);
-		Tameable val = ((obj != null) ? obj.GetComponent<Tameable>() : null);
-		if ((Object)(object)val == (Object)null || !IsEligible(container, ((Component)val).transform.position, playerId) || ServerRequests.Count >= 64 || BusyAnimals.Contains(animal))
-		{
-			Receipts.Complete(text, committed: false);
-			if (sender != 0L)
-			{
-				netView.InvokeRPC(sender, "BestAutoSort_AutoFeedTakeResponse", new object[2] { id, false });
-			}
-			ReturnAnimal(animal, sender);
-			return;
-		}
-		string text3 = netView.GetZDO().GetString("BestAutoSort.AutoFeedReceipt.v1", "");
-		uid = animal;
-		if (text3 == text + "/" + ((object)(*(ZDOID*)(&uid))/*cast due to constrained. prefix*/).ToString())
-		{
-			Receipts.Complete(text, committed: true);
-			if (sender != 0L)
-			{
-				netView.InvokeRPC(sender, "BestAutoSort_AutoFeedTakeResponse", new object[2] { id, true });
-			}
-			ReturnAnimal(animal, sender);
-			return;
-		}
-		ServerRequest serverRequest = new ServerRequest
-		{
-			Key = text,
-			Id = id,
-			Sender = sender,
-			Actor = playerId,
-			Container = container,
-			Animal = animal,
-			PreviousOwner = netView.GetZDO().GetOwner(),
-			Expires = Time.realtimeSinceStartup + 8f,
-			Prepared = netView.IsOwner()
-		};
-		ServerRequests.Add(text, serverRequest);
-		BusyAnimals.Add(animal);
-		if (serverRequest.Prepared)
-		{
-			SetLease(netView);
-		}
-		else if (serverRequest.PreviousOwner == 0L)
-		{
-			netView.ClaimOwnership();
-			serverRequest.Prepared = netView.IsOwner();
-			if (serverRequest.Prepared)
-			{
-				SetLease(netView);
-			}
-		}
-		else
-		{
-			ZPackage val2 = new ZPackage();
-			val2.Write(text);
-			netView.InvokeRPC(serverRequest.PreviousOwner, "BestAutoSort_AutoFeedPrepare", new object[1] { val2 });
-		}
-	}
-
-	private static void PrepareInventory(Container container, long sender, ZPackage package)
-	{
-		if (!Plugin.IsActive)
-		{
-			return;
-		}
-		ZNetView netView = GetNetView(container);
-		if (!ChestAuthority.IsServerSender(sender) || (Object)(object)netView == (Object)null || !netView.IsOwner() || package == null || package.Size() > 128)
-		{
-			return;
-		}
-		try
-		{
-			string text = package.ReadString();
-			if (text.Length <= 96 && package.GetPos() == package.Size())
-			{
-				TxReflect.SaveContainer(container);
-				ZPackage val = new ZPackage();
-				container.GetInventory().Save(val);
-				byte[] array = val.GetArray();
-				if (array.Length <= 65536)
-				{
-					ZPackage val2 = new ZPackage();
-					val2.Write(text);
-					val2.Write(array);
-					SetLease(netView);
-					netView.GetZDO().SetOwner(sender);
-					ZDOMan.instance.ForceSendZDO(sender, netView.GetZDO().m_uid);
-					netView.InvokeRPC(sender, "BestAutoSort_AutoFeedPrepared", new object[1] { val2 });
-				}
-			}
-		}
-		catch (Exception ex)
-		{
-			Plugin.LogInstance.LogWarning((object)("Could not prepare Auto Feed chest: " + ex.Message));
-		}
-	}
-
-	private static void ReceivePrepared(Container container, long sender, ZPackage package)
-	{
-		if (!Plugin.IsActive || (Object)(object)ZNet.instance == (Object)null || !ZNet.instance.IsServer() || package == null || package.Size() > 65792)
-		{
-			return;
-		}
-		try
-		{
-			string text = package.ReadString();
-			byte[] array = package.ReadByteArray();
-			if (text.Length <= 96 && array.Length <= 65536 && package.GetPos() == package.Size() && ServerRequests.TryGetValue(text, out ServerRequest value) && !((Object)(object)value.Container != (Object)(object)container) && value.PreviousOwner == sender && !value.Prepared)
-			{
-				value.Inventory = array;
-				value.Prepared = true;
-			}
-		}
-		catch (Exception ex)
-		{
-			Plugin.LogInstance.LogWarning((object)("Rejected Auto Feed chest preparation: " + ex.Message));
-		}
-	}
-
-	private unsafe static bool CompleteOperation(ServerRequest request, Tameable tameable)
-	{
-		object value = MonsterAiField.GetValue(tameable);
-		MonsterAI val = (MonsterAI)((value is MonsterAI) ? value : null);
-		if ((Object)(object)val == (Object)null || ((BaseAI)val).IsAlerted() || !tameable.IsHungry())
-		{
-			return false;
-		}
-		Dictionary<string, ItemDrop> accepted = AcceptedFood(val);
-		Inventory inventory = request.Container.GetInventory();
-		ItemData item = inventory.GetAllItems().FirstOrDefault((ItemData candidate) => !candidate.m_shared.m_questItem && accepted.ContainsKey(candidate.m_shared.m_name) && ChestReserveStore.Available(request.Container, candidate) > 0);
-		if (item == null)
-		{
-			return false;
-		}
-		ItemData[] originals = inventory.GetAllItems().ToArray();
-		int[] stacks = originals.Select((ItemData candidate) => candidate.m_stack).ToArray();
-		Vector2i[] positions = originals.Select(delegate(ItemData candidate)
-		{
-			return candidate.m_gridPos;
-		}).ToArray();
-		ZDO animal = ((ZNetView)TameableNetViewField.GetValue(tameable)).GetZDO();
-		long before = animal.GetLong(ZDOVars.s_tameLastFeeding, 0L);
-		ZDO chest = GetNetView(request.Container).GetZDO();
-		string oldReceipt = chest.GetString("BestAutoSort.AutoFeedReceipt.v1", "");
-		try
-		{
-			return FeedTransaction.Execute(() => inventory.RemoveItem(item, 1), delegate
-			{
-				ConsumedItemMethod.Invoke(tameable, new object[1] { accepted[item.m_shared.m_name] });
-			}, () => !tameable.IsHungry(), delegate
-			{
-				TxReflect.SaveContainer(request.Container);
-				ZDO obj = chest;
-				string key = request.Key;
-				ZDOID animal2 = request.Animal;
-				obj.Set("BestAutoSort.AutoFeedReceipt.v1", key + "/" + ((object)(*(ZDOID*)(&animal2))/*cast due to constrained. prefix*/).ToString());
-			}, delegate
-			{
-				inventory.GetAllItems().Clear();
-				inventory.GetAllItems().AddRange(originals);
-				for (int i = 0; i < originals.Length; i++)
-				{
-					originals[i].m_stack = stacks[i];
-					originals[i].m_gridPos = positions[i];
-				}
-				animal.Set(ZDOVars.s_tameLastFeeding, before);
-				chest.Set("BestAutoSort.AutoFeedReceipt.v1", oldReceipt);
-				InventoryChangedMethod.Invoke(inventory, new object[2] { false, false });
-				TxReflect.SaveContainer(request.Container);
-			});
-		}
-		catch (AggregateException ex)
-		{
-			BlockedChests.Add(chest.m_uid);
-			Plugin.LogInstance.LogError((object)("Auto Feed could not finish rollback persistence. This chest is paused; preserve the world and logs before recovery: " + ex));
-			return false;
-		}
-	}
-
-	private static void Finish(ServerRequest request, bool committed)
-	{
-		ServerRequests.Remove(request.Key);
-		BusyAnimals.Remove(request.Animal);
-		Receipts.Complete(request.Key, committed);
-		ZNetView netView = GetNetView(request.Container);
-		if ((Object)(object)netView != (Object)null && netView.IsOwner())
-		{
-			netView.GetZDO().Set("BestAutoSort.AutoFeedLeaseUntil.v1", 0L);
-		}
-		if (request.Sender != 0L && (Object)(object)request.Container != (Object)null)
-		{
-			ZNetView? netView2 = GetNetView(request.Container);
-			if (netView2 != null)
-			{
-				netView2.InvokeRPC(request.Sender, "BestAutoSort_AutoFeedTakeResponse", new object[2] { request.Id, committed });
-			}
-		}
-		ReturnAnimal(request.Animal, request.Sender);
-	}
-
-	private static void ReturnAnimal(ZDOID animal, long sender)
-	{
-		if (sender == 0L)
-		{
-			return;
-		}
-		ZNet instance = ZNet.instance;
-		if (((instance != null) ? instance.GetPeer(sender) : null) != null)
-		{
-			ZNetScene instance2 = ZNetScene.instance;
-			object obj;
-			if (instance2 == null)
-			{
-				obj = null;
-			}
-			else
-			{
-				GameObject obj2 = instance2.FindInstance(animal);
-				obj = ((obj2 != null) ? obj2.GetComponent<ZNetView>() : null);
-			}
-			ZNetView val = (ZNetView)obj;
-			if (!((Object)(object)val == (Object)null) && val.IsValid() && val.IsOwner())
-			{
-				val.GetZDO().SetOwner(sender);
-				ZDOMan.instance.ForceSendZDO(sender, animal);
-			}
-		}
+		ZDOID[] stale = FeedingAnimals.Where((KeyValuePair<ZDOID, float> kv) => realtimeSinceStartup >= kv.Value).Select((KeyValuePair<ZDOID, float> kv) => kv.Key).ToArray();
+		for (int i = 0; i < stale.Length; i++)
+			FeedingAnimals.Remove(stale[i]);
 	}
 
 	internal static bool IsLocked(Container container)
 	{
+		// Legacy leases from older builds self-expire (timestamped); nothing sets new ones.
 		ZNetView? netView = GetNetView(container);
 		ZDO val = ((netView != null) ? netView.GetZDO() : null);
-		if (val != null)
-		{
-			if (!BlockedChests.Contains(val.m_uid))
-			{
-				if ((Object)(object)ZNet.instance != (Object)null)
-				{
-					return val.GetLong("BestAutoSort.AutoFeedLeaseUntil.v1", 0L) > ZNet.instance.GetTime().Ticks;
-				}
-				return false;
-			}
-			return true;
-		}
+		if (val != null && (Object)(object)ZNet.instance != (Object)null)
+			return val.GetLong(LeaseKey, 0L) > ZNet.instance.GetTime().Ticks;
 		return false;
-	}
-
-	private static void SetLease(ZNetView view)
-	{
-		view.GetZDO().Set("BestAutoSort.AutoFeedLeaseUntil.v1", ZNet.instance.GetTime().AddSeconds(12.0).Ticks);
 	}
 
 	private static bool IsEligible(Container container, Vector3 animalPosition, long actor, bool ownLease = false)
@@ -931,12 +486,6 @@ internal static class AutoFeedService
 		return null;
 	}
 
-	private static int NextRequestId()
-	{
-		nextRequestId = ((nextRequestId == int.MaxValue) ? 1 : (nextRequestId + 1));
-		return nextRequestId;
-	}
-
 	internal static void Reset()
 	{
 		ResetState(returnAnimals: true);
@@ -946,20 +495,7 @@ internal static class AutoFeedService
 
 	private static void ResetState(bool returnAnimals)
 	{
-		if (returnAnimals)
-		{
-			ServerRequest[] array = ServerRequests.Values.ToArray();
-			foreach (ServerRequest serverRequest in array)
-			{
-				ReturnAnimal(serverRequest.Animal, serverRequest.Sender);
-			}
-		}
-		ServerRequests.Clear();
-		ClientRequests.Clear();
-		BusyAnimals.Clear();
-		BlockedChests.Clear();
-		Receipts.Clear();
-		RequestRates.Clear();
+		FeedingAnimals.Clear();
 		ScanCooldowns = new ConditionalWeakTable<Tameable, ScanCooldown>();
 		ScanQueue.Clear();
 		LoadedContainers.Clear();

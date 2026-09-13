@@ -84,6 +84,33 @@ internal static class ChestAuthority
 		return false;
 	}
 
+	internal static long CreatorOf(Container container)
+	{
+		try
+		{
+			Piece piece = ((Component)container).GetComponent<Piece>() ?? ((Component)container).GetComponentInParent<Piece>();
+			if ((Object)(object)piece != (Object)null)
+				return piece.GetCreator();
+		}
+		catch
+		{
+		}
+		return 0L;
+	}
+
+	internal static bool IsServerSenderOrSelf(long sender)
+	{
+		try
+		{
+			if (sender == ZNet.GetUID() && (Object)(object)ZNet.instance != (Object)null && ZNet.instance.IsServer())
+				return true;
+		}
+		catch
+		{
+		}
+		return IsServerSender(sender);
+	}
+
 	internal static bool CanUse(Container container, long sender, long claimedPlayerId, Vector3 claimedPos, out string why)
 	{
 		// The range check uses the position stamped by the client: the manager's
@@ -92,6 +119,36 @@ internal static class ChestAuthority
 		// Spoofing is still contained: the playerId must match the ZDO-owned
 		// character, plus vanilla CheckAccess and the ward check apply.
 		why = "ok";
+		if (sender != 0L && IsServerSenderOrSelf(sender))
+		{
+			// Headless/dedicated server feeding: no player body, so no actor to resolve.
+			// The claim must be the chest creator (same rule the old feeder used);
+			// distance is checked against the stamped animal position.
+			long creator = CreatorOf(container);
+			if (creator == 0L || claimedPlayerId != creator)
+			{
+				why = "player-mismatch";
+				return false;
+			}
+			float range = Mathf.Clamp(ModConfig.NearbyRange.Value, 4f, 100f);
+			Vector3 toChest = ((Component)container).transform.position - claimedPos;
+			if ((toChest).sqrMagnitude > range * range)
+			{
+				why = "too-far";
+				return false;
+			}
+			if (!TxReflect.HasAccess(container, creator))
+			{
+				why = "vanilla-access";
+				return false;
+			}
+			if (!WardAccess(container, creator))
+			{
+				why = "ward";
+				return false;
+			}
+			return true;
+		}
 		if (!ResolveActor(sender, out var playerId, out var _))
 		{
 			why = "no-actor";

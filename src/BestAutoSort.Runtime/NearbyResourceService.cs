@@ -159,14 +159,15 @@ internal static class NearbyResourceService
 			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
 			{
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
-				// Display/button check: foreign stock counts (staged on aim, gated at placement).
-				int local = CountAvailable(player, name, -1, ((Component)player).transform.position);
-				if (local < val.m_amount)
-				{
-					if (global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedPiece(piece))
-						PrefetchMissing(player, name, -1, val.m_amount - local);
+				Vector3 origin = ((Component)player).transform.position;
+				// Staging trigger (local shortfall only): works even when the
+				// display verdict below already passes on foreign stock.
+				int localOnly = CountAvailable(player, name, -1, origin, true);
+				if (localOnly < val.m_amount && global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedPiece(piece))
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly);
+				// Display/button verdict: foreign stock counts (staged on aim, gated at placement).
+				if (CountAvailable(player, name, -1, origin) < val.m_amount)
 					return false;
-				}
 			}
 		}
 		return true;

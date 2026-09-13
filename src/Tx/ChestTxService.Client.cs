@@ -23,6 +23,18 @@ namespace BestAutoSort.Tx
             ZPackage pkg = new ZPackage();
             TxCodec.WriteResponseHeader(pkg, txId, status, revision, totalsOnly);
             pkg.Write(body);
+            if (body != null)
+            {
+                try
+                {
+                    int bytes = pkg.GetArray().Length;
+                    if (bytes > 4096)
+                        TxLog.Info("tx=" + txId + " respond bytes=" + bytes + " (large)");
+                }
+                catch
+                {
+                }
+            }
             try
             {
                 netView.InvokeRPC(peer, TxNet.TxResponseRpc, pkg);

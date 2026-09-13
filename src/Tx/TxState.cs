@@ -118,7 +118,8 @@ namespace BestAutoSort.Tx
         public long LastOwner;
         // Viewer (we watch a foreign chest):
         public bool ViewedByMe;
-        public uint SeenRev = uint.MaxValue;
+        public uint SeenRev;
+        public bool SeenOnce;
         public byte[] SeenBytes;
         // Presence (we are the manager): peer -> last hello time.
         public Dictionary<long, float> Viewers = new Dictionary<long, float>();

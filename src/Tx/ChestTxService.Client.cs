@@ -605,7 +605,8 @@ namespace BestAutoSort.Tx
             ChestState state = GetState(container);
             if (state == null)
                 return;
-            state.SeenRev = uint.MaxValue;
+            state.SeenRev = 0u;
+            state.SeenOnce = false;
             state.SeenBytes = null;
         }
 
@@ -648,13 +649,12 @@ namespace BestAutoSort.Tx
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return;
             uint rev = netView.GetZDO().DataRevision;
-            if (rev == state.SeenRev)
-                return;
-            if (rev < state.SeenRev)
+            if (state.SeenOnce && rev <= state.SeenRev)
             {
-                // Stale ZDO packet arrived after newer state (network reorder):
-                // never roll the open GUI backwards.
-                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer stale rev=" + rev + " (seen " + state.SeenRev + "), skipped");
+                // Same or stale ZDO revision (network reorder): never roll the
+                // open GUI backwards. First poll always applies.
+                if (rev < state.SeenRev)
+                    TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer stale rev=" + rev + " (seen " + state.SeenRev + "), skipped");
                 return;
             }
             byte[] bytes;
@@ -688,6 +688,7 @@ namespace BestAutoSort.Tx
                 return;
             }
             state.SeenRev = rev;
+            state.SeenOnce = true;
             state.SeenBytes = bytes;
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer refresh rev=" + rev);
         }
@@ -818,7 +819,8 @@ namespace BestAutoSort.Tx
                 List<RingEntry> ring = ReadRing(state.Container);
                 SeedFromRing(state, ring);
                 state.Viewers.Clear();
-                state.SeenRev = uint.MaxValue;
+                state.SeenRev = 0u;
+                state.SeenOnce = false;
                 state.SeenBytes = null;
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " manager changed old=" + state.LastOwner
                     + " new=" + ZNet.GetUID() + " revision=" + netView.GetZDO().DataRevision);

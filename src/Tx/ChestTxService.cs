@@ -458,12 +458,23 @@ namespace BestAutoSort.Tx
             }
             if (container.IsOwner())
             {
-                // Manager: enqueue locally, run right away.
+                // Manager: enqueue locally, run right away. Synthesize the same
+                // result body remote managers send (never null: decoders void takes).
                 MutateLocal(container, call, delegate (StoredResult r)
                 {
                     RefreshNow(container);
                     if (onDone != null)
-                        onDone(null, r.Status, r.Revision);
+                    {
+                        ZPackage body = null;
+                        try
+                        {
+                            body = EncodeResultBody(call, r);
+                        }
+                        catch
+                        {
+                        }
+                        onDone(body, r.Status, r.Revision);
+                    }
                 }, playerId);
                 return;
             }

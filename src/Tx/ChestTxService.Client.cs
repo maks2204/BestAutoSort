@@ -418,6 +418,35 @@ namespace BestAutoSort.Tx
             call.Op = TxOp.TakeBatch;
             call.Items.AddRange(items);
             call.RespectReserves = respectReserves;
+            if (container.IsOwner())
+            {
+                // Owner fast path: map the StoredResult directly. The Submit path hands
+                // a null package for local commits, which the body decoder cannot read
+                // (taken items would be voided).
+                MutateLocal(container, call, delegate (StoredResult r)
+                {
+                    RefreshNow(container);
+                    List<DecodedTake> direct = new List<DecodedTake>();
+                    if (r != null && r.Takes != null)
+                    {
+                        foreach (TakeEntry te in r.Takes)
+                        {
+                            if (te == null || te.Accepted <= 0)
+                                continue;
+                            DecodedTake dt = new DecodedTake();
+                            dt.PrefabHash = te.PrefabHash;
+                            dt.Item = te.Item;
+                            dt.Accepted = te.Accepted;
+                            direct.Add(dt);
+                        }
+                    }
+                    TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
+                    uint rev = (r != null) ? r.Revision : CurrentRevision(container);
+                    if (onDone != null)
+                        onDone(direct, st, rev);
+                }, playerId);
+                return;
+            }
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
                 List<DecodedTake> decoded = TxCodec.ReadTakeResults(pkg);

@@ -647,7 +647,9 @@ internal static class NearbyResourceService
 		int wanted = missing;
 		int skippedLease = 0;
 		int skippedLocal = 0;
-		foreach (Container container in GetEligibleContainers(((Component)player).transform.position))
+		System.Collections.Generic.IReadOnlyList<Container> scan = GetEligibleContainers(((Component)player).transform.position);
+		int scanned = (scan != null) ? scan.Count : 0;
+		foreach (Container container in scan)
 		{
 			if (missing <= 0)
 				break;
@@ -697,7 +699,7 @@ internal static class NearbyResourceService
 			}
 		}
 		if (missing > 0)
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] prefetch " + name + " short by " + missing + " of " + wanted + " (lease-locked=" + skippedLease + " local-owner=" + skippedLocal + ")"));
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] prefetch " + name + " short by " + missing + " of " + wanted + " (containers=" + scanned + " lease-locked=" + skippedLease + " local-owner=" + skippedLocal + ")"));
 	}
 
 	private static ItemData? FindItem(Vector3 origin, Func<ItemData, bool> predicate)

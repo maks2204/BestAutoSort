@@ -22,77 +22,111 @@ Notes:
 
 ## Multiplayer protocol (ChestTX)
 
-One chest = one manager = the ZDO owner. Ownership is never ping-ponged.
-Every mutation is a serial idempotent transaction: validate → apply →
-`Save()` → revision → response. Details: `docs/CHEST_TX.md`.
-
-RPCs (all through Ketch-verified `assembly_valheim` API):
-
-- `BestAutoSort_TxRequest` — client → chest ZNetView, no target (engine routes to owner).
-- `BestAutoSort_TxResponse` — manager → requesting peer (targeted).
-- `BestAutoSort_TxFlights` — manager → everybody (target `0L`, loopback included).
-- `BestAutoSort_MultiUserHello` — version string broadcast, exact-match compatibility.
-
-Packet layouts (`ZPackage`, nested):
-
 ```
-Request outer:  [txId:long][body:ZPackage]
-Request body:   [proto:int=2][op:int][baseRev:uint][playerId:long][actorPos:vec3]
-                [enforceRule:bool][respectReserves:bool][op-body...]
-Response:       [txId:long][status:int][revision:uint][totalsOnly:bool][body:ZPackage]
-Take body:      [count:int]([prefabHash:int][item:ZPackage][accepted:int])...
-Add body:       [count:int]([accepted:int])...
-Item snapshot:  [prefabHash][itemPkg][amount][x][y][maxStack], itemPkg = ItemData.Save
-                (quality/variant/durability/stack/crafter/customData/world/gridPos)
-Ops: Add/AddBatch/Take/TakeBatch/Move/Sort/Upgrade/SetRule/ViewerOpen/ViewerClose/Query
-Statuses: Accepted/Partial/Rejected/Duplicate/UnknownTx
+                    ┌─────────────┐
+                    │  ONE CHEST  │
+                    │  ONE OWNER  │  ← ZDO owner = manager, never ping-ponged
+                    │ ONE TX      │  ← validate → apply → Save() → revision → respond
+                    │  AT A TIME  │    (per-chest serial queue, main thread)
+                    └─────────────┘
 ```
 
-Take one stack (GUI drag, client `C`, manager `M` — the ZDO owner):
+Details: `docs/CHEST_TX.md`.
+
+### Actors & channels
 
 ```
-C: snapshot item -> Take(txId=peer<<32|counter, want=chest cell)
-C ──TxRequest────────────────────────────────────────────▶ M
-M: idempotency check (in-memory cache 128 + ZDO ring x32) → resolve live
-   stack by cell+name+quality → remove → Save() → revision++ → respond
-M ──TxResponse(Accepted, revision, take-body)──────────────▶ C
-C: credit exactly accepted into inventory (ref, name-scan fallback),
-   shortfall/overflow compensated back; late duplicates ignored.
-   Flights: M broadcasts (chest→taker); originator skips its own txId.
+┌──────────┐  TxRequest   ┌──────────────────────┐  TxResponse  ┌──────────┐
+│  CLIENT  │ ───────────▶ │  CHEST ZNetView      │ ───────────▶ │  CLIENT  │
+│ (any peer│  (no target: │  (engine routes the  │  (targeted   │ (same     │
+│  incl.   │  straight to │   packet to the ZDO  │   at the    │  peer)    │
+│  server) │  the owner)  │   owner = MANAGER)   │   requester)│          │
+└──────────┘              └──────────────────────┘              └──────────┘
+         TxFlights (target 0L = broadcast, loopback included) ──▶ EVERYBODY
+         MultiUserHello (version string, exact match) ──────────▶ EVERYBODY
 ```
 
-Deposit (quick-stack batch, same pattern per chest):
+### Packets (`ZPackage`, nested)
+
+| Packet | Layout |
+|---|---|
+| Request outer | `[txId:long]` `txId = peerId<<32 \| counter` + `[body:ZPackage]` |
+| Request body | `[proto:int=2]` `[op:int]` `[baseRev:uint]` `[playerId:long]` `[actorPos:vec3]` `[enforceRule:bool]` `[respectReserves:bool]` `[op-body…]` |
+| Response | `[txId:long]` `[status:int]` `[revision:uint]` `[totalsOnly:bool]` `[body:ZPackage]` |
+| Take body | `[count:int]` ×(`[prefabHash:int]` `[item:ZPackage]` `[accepted:int]`) |
+| Add body | `[count:int]` ×(`[accepted:int]`) |
+| Item snapshot | `[prefabHash]` `[itemPkg]` `[amount]` `[x]` `[y]` `[maxStack]`; `itemPkg` = `ItemData.Save` (quality/variant/durability/stack/crafter/customData/world/gridPos) |
+| Ops | Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade / SetRule / ViewerOpen / ViewerClose / Query |
+| Statuses | Accepted / Partial / Rejected / Duplicate / UnknownTx |
+
+### Take one stack (GUI drag)
 
 ```
-C: collect candidates (rule/seeds vs local snapshot, auto-place X=Y=-1) →
-   AddBatch(txId, EnforceRule=true), >4 items split into chunk-txs of 4
-C ──TxRequest────────────────────────────────────────────▶ M
-M: per item: rule check → merge/auto-place → Save() → respond counts
-   (Partial when chest fills, Rejected on rule/access, never partial state)
-M ──TxResponse(Accepted/Partial, accepted[])──────────────▶ C
-C: remove exactly accepted from own inventory (in-flight claim guard drops
-   double-submits of the same stack); short-removal compensated back.
+CLIENT (C)                              MANAGER (M, ZDO owner)
+   │                                              │
+   │ 1. snapshot item, want = chest cell          │
+   │    txId = peer<<32|counter                  │
+   │── TxRequest ───────────────────────────────▶│
+   │                                              │ 2. idempotency: mem-cache 128 + ZDO ring x32
+   │                                              │ 3. resolve LIVE stack (cell+name+quality)
+   │                                              │ 4. remove → Save() → revision++
+   │◀── TxResponse(Accepted, rev, take-body) ─────│
+   │ 5. credit EXACTLY accepted (ref, else         │
+   │    name-scan fallback); overflow/shortfall   │
+   │    compensated back; late dupes ignored      │
+   │                                              │
+   └─ Flights: M ──broadcast(chest→taker)──▶ all; originator skips own txId
 ```
 
-Lost response / retry / handoff:
+### Deposit batch (quick-stack, per chest)
 
 ```
-C: timeout → resend same txId (manager cache → Duplicate, no re-apply) →
-   still nothing → Query(txId) → cached result or UnknownTx
-Manager migration: new owner seeds cache from the ZDO ring (totals-only);
-   Take redelivery re-takes live equivalents (conservation holds),
-   Adds answer totals. Client pending-set drops late duplicates.
+CLIENT (C)                              MANAGER (M, ZDO owner)
+   │                                              │
+   │ 1. candidates vs local snapshot              │
+   │    (rule/seeds, auto-place X=Y=-1)           │
+   │ 2. AddBatch(EnforceRule); >4 items →         │
+   │    chunk-txs of 4; claim guard drops         │
+   │    double-submits of one stack               │
+   │── TxRequest ───────────────────────────────▶│
+   │                                              │ 3. per item: rule → merge/auto-place
+   │                                              │ 4. Save() → respond counts
+   │◀── TxResponse(Accepted/Partial,              │    (Partial if full, Rejected on rule/access;
+   │               accepted[]) ──────────────────│     never a partial STATE)
+   │ 5. remove EXACTLY accepted from self;        │
+   │    short-removal compensated back            │
 ```
 
-Viewers (many GUIs on one chest) + feeding:
+### Failure paths: retry · query · handoff
 
 ```
-Open:   C ──ViewerOpen (fire-and-forget, heartbeat)──▶ M ; M tracks presence
-View:   C polls ZDO.DataRevision + s_items bytes; reload with GUI open,
-        monotonic (stale revs skipped); lid flap suppressed for viewers.
-Feed:   animal owner submits Take(1 unit, actorPos=animal) like any client;
-        on accept -> vanilla OnConsumedItem on the animal, else the unit is
-        sent back. No ownership transfer, no leases. Flights fly chest→animal.
+CLIENT (C)                      MANAGER (M)                    NEW OWNER (M')
+   │                               │                                  │
+   │── TxRequest ─────────────────▶│ X response lost                    │
+   │         (timeout)             │                                  │
+   │── TxRequest(same txId) ──────▶│ cache hit → Duplicate,             │
+   │◀── TxResponse(Duplicate) ─────│ NO re-apply                        │
+   │         (still nothing)       │                                  │
+   │── Query(txId) ───────────────▶│ cached result ───▶ C               │
+   │                               │  (or UnknownTx → client retries    │
+   │                               │   as a NEW tx)                     │
+   │                               │         ┌ ownership migrates ──────▶
+   │                               │         │ M' seeds cache from ZDO ring
+   │                               │         │ (totals-only, x32)
+   │── retry/Query ────────────────┼─────────▶ M' Take: re-take live equivalents
+   │◀── Duplicate + items ─────────┼─────────│    Adds: answer totals
+   │  (client pending-set drops late duplicates → no double credit)     │
+```
+
+### Viewers (many GUIs, one chest) + feeding
+
+```
+OPEN:   C ── ViewerOpen (fire-and-forget + heartbeat) ──▶ M tracks presence
+VIEW:   C polls ZDO.DataRevision + s_items bytes ──▶ reload with GUI OPEN
+        (monotonic: stale revs skipped; lid flap suppressed for viewers)
+FEED:   animal owner ── Take(1 unit, actorPos=ANIMAL) ──▶ M (like any client)
+        on accept ──▶ vanilla OnConsumedItem(animal); else unit sent back.
+        No ownership transfer, no leases. Flights: chest ──▶ animal.
 ```
 
 ## Install

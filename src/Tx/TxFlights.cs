@@ -27,7 +27,7 @@ namespace BestAutoSort.Tx
                 ZRoutedRpc rpc = ZRoutedRpc.instance;
                 if (rpc == null)
                     return;
-                Vector3 from = ResolveSourcePos(state, job);
+                Vector3 from = (job.ActorPos.sqrMagnitude > 0.01f) ? job.ActorPos : ResolveSourcePos(state, job);
                 ZPackage pkg = new ZPackage();
                 pkg.Write(job.TxId);
                 pkg.Write(netView.GetZDO().m_uid);

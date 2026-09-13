@@ -288,7 +288,7 @@ namespace BestAutoSort.Tx
         /// Manager-local mutation (own GUI/automation on the owner):
         /// goes into the same chest queue and runs immediately, serially with remote ones.
         /// </summary>
-        internal static void MutateLocal(Container container, TxOpCall call, Action<StoredResult> onDone, long playerId = 0L)
+        internal static void MutateLocal(Container container, TxOpCall call, Action<StoredResult> onDone, long playerId = 0L, Vector3? actorPos = null)
         {
             ChestState state = GetState(container);
             if (state == null || !container.IsOwner())
@@ -323,6 +323,7 @@ namespace BestAutoSort.Tx
             job.TxId = NextLocalTxId();
             job.Sender = ZNet.GetUID();
             job.PlayerId = playerId != 0L ? playerId : LocalPlayerId();
+            job.ActorPos = actorPos.HasValue ? actorPos.Value : LocalActorPos();
             job.BaseRev = CurrentRevision(container);
             job.Call = call;
             job.Complete = onDone;
@@ -475,7 +476,7 @@ namespace BestAutoSort.Tx
                         }
                         onDone(body, r.Status, r.Revision);
                     }
-                }, playerId);
+                }, playerId, actorPos);
                 return;
             }
             System.Collections.Generic.List<ItemDrop.ItemData> claimed;
@@ -662,6 +663,7 @@ namespace BestAutoSort.Tx
             job.Sender = sender;
             job.PlayerId = playerId;
             job.BaseRev = baseRev;
+            job.ActorPos = actorPos;
             job.Call = call;
             job.Complete = delegate (StoredResult r)
             {

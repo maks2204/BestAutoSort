@@ -97,6 +97,8 @@ namespace BestAutoSort.Tx
         public long Sender;
         public long PlayerId;
         public uint BaseRev;
+        /// <summary>Position stamped by the submitter (player pos; animal pos for feeder takes).</summary>
+        public UnityEngine.Vector3 ActorPos;
         public TxOpCall Call;
         /// <summary>Remote: answer by RPC. Local: direct callback.</summary>
         public System.Action<StoredResult> Complete;

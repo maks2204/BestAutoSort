@@ -17,7 +17,7 @@ The chest manager is the ZDO owner. Ownership is NEVER handed over between
 operations (exception: one-shot explicit acquire for upgrades — no loops).
 
 - Request: `BestAutoSort_TxRequest(txId, body)` to the chest ZNetView with no target —
-  the engine delivers it to the owner. Body: `[proto][op][baseRev][playerId][enforceRule][respectReserves][...]`.
+  the engine delivers it to the owner. Body: `[proto=2][op][baseRev][playerId][actorPos][enforceRule][respectReserves][...]` (`actorPos` = stamper-declared position: player pos, animal pos for feeder takes).
 - Response: `BestAutoSort_TxResponse(txId, status, revision, totalsOnly, body)`
   to the specific peer. Operation bodies are nested `ZPackage`s.
 - Items: `[prefabHash][itemPkg][amount][x][y][maxStack]`; `itemPkg` holds

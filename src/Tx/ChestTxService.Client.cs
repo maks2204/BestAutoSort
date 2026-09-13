@@ -20,6 +20,8 @@ namespace BestAutoSort.Tx
             ZNetView netView = TxReflect.GetNetView(container);
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return;
+            if (peer == ZNet.GetUID())
+                TxLog.Info("tx=" + txId + " respond loopback (manager==requester)");
             ZPackage pkg = new ZPackage();
             TxCodec.WriteResponseHeader(pkg, txId, status, revision, totalsOnly);
             pkg.Write(body);
@@ -344,7 +346,15 @@ namespace BestAutoSort.Tx
                 }
                 catch (Exception ex)
                 {
-                    TxLog.Error("take completion decode failed: " + ex.Message);
+                    int verspreq = -1;
+                    try
+                    {
+                        verspreq = pkg.GetArray().Length;
+                    }
+                    catch
+                    {
+                    }
+                    TxLog.Error("take completion decode failed: " + ex.Message + " (body bytes=" + verspreq + ")");
                 }
                 // Per-item isolation: one broken entry must not void the rest —
                 // anything uncredited is sent back instead of being lost.

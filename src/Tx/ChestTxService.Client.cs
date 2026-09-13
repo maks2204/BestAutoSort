@@ -495,8 +495,30 @@ namespace BestAutoSort.Tx
         /// Universal AddBatch submit (quick-stack/automation): owner enqueues locally,
         /// otherwise over the network. On result removes accepted from srcInv and builds TransferRecords.
         /// </summary>
+        /// <summary>Max items per tx: keeps request/response bodies far from transport truncation.</summary>
+        internal const int BatchChunkSize = 4;
+
         internal static void SubmitCall(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>> onDone)
         {
+            if (call != null && call.Items.Count > BatchChunkSize)
+            {
+                // Split big batches: each chunk is an independent tx (own txId,
+                // own atomic commit). Disjoint item sets => the claim guard stays out.
+                // onDone fires per chunk (all current handlers tolerate repeats).
+                int i = 0;
+                while (i < call.Items.Count)
+                {
+                    TxOpCall part = new TxOpCall();
+                    part.Op = call.Op;
+                    part.EnforceRule = call.EnforceRule;
+                    part.RespectReserves = call.RespectReserves;
+                    for (int j = i; j < call.Items.Count && j < i + BatchChunkSize; j++)
+                        part.Items.Add(call.Items[j]);
+                    SubmitCall(container, part, srcInv, onDone);
+                    i += BatchChunkSize;
+                }
+                return;
+            }
             if (container.IsOwner())
             {
                 MutateLocal(container, call, delegate (StoredResult r)

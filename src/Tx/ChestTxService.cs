@@ -239,6 +239,24 @@ namespace BestAutoSort.Tx
             });
         }
 
+        internal static void RequestTakeBatchChunked(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
+        {
+            if (items == null || items.Count == 0)
+                return;
+            if (items.Count <= ChestTxService.BatchChunkSize)
+            {
+                RequestTakeBatch(container, dstInv, items, onDone);
+                return;
+            }
+            for (int i = 0; i < items.Count; i += ChestTxService.BatchChunkSize)
+            {
+                List<TxOpItem> part = new List<TxOpItem>();
+                for (int j = i; j < items.Count && j < i + ChestTxService.BatchChunkSize; j++)
+                    part.Add(items[j]);
+                RequestTakeBatch(container, dstInv, part, onDone);
+            }
+        }
+
         internal static void RequestTakeBatch(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
         {
             if (items == null || items.Count == 0)

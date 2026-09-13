@@ -242,7 +242,7 @@ namespace BestAutoSort.Patches
             }
             if (items.Count == 0)
                 return false;
-            ChestTxService.RequestTakeBatch(container, playerInv, items,
+            ChestTxService.RequestTakeBatchChunked(container, playerInv, items,
                 delegate (ZPackage pkg, TxStatus status, uint rev)
                 {
                     List<DecodedTake> takes = TxCodec.ReadTakeResults(pkg);

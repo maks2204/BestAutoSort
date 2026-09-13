@@ -62,7 +62,7 @@ namespace BestAutoSort.Patches
                 return false;
             }
             Container container = __instance;
-            ChestTxService.RequestTakeBatch(container, playerInv, items,
+            ChestTxService.RequestTakeBatchChunked(container, playerInv, items,
                 delegate (ZPackage pkg, TxStatus status, uint rev)
                 {
                     List<DecodedTake> takes = TxCodec.ReadTakeResults(pkg);

@@ -116,7 +116,7 @@ namespace BestAutoSort.Patches
                     continue;
                 if (!names.Contains(item.m_shared.m_name))
                     continue;
-                TxOpItem op = ChestTxService.SnapshotItem(item, item.m_stack, -1, -1);
+                TxOpItem op = ChestTxService.SnapshotAuto(item, item.m_stack);
                 if (op != null)
                     items.Add(op);
             }

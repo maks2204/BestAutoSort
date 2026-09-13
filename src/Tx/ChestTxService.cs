@@ -188,6 +188,21 @@ namespace BestAutoSort.Tx
             });
         }
 
+        /// <summary>
+        /// Add-intent snapshot: no positional want (auto-place/merge on the manager).
+        /// Player-grid coordinates must never leak into chest cells (pos-blocked rejects).
+        /// </summary>
+        internal static TxOpItem SnapshotAuto(ItemData item, int amount)
+        {
+            TxOpItem op = SnapshotItem(item, amount, -1, -1);
+            if (op != null)
+            {
+                op.X = -1;
+                op.Y = -1;
+            }
+            return op;
+        }
+
         internal static TxOpItem SnapshotItem(ItemData item, int amount, int wantX, int wantY)
         {
             if (item == null || item.m_shared == null || (Object)item.m_dropPrefab == null || amount <= 0)

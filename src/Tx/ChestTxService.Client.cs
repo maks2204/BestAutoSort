@@ -307,7 +307,7 @@ namespace BestAutoSort.Tx
                 TxLog.Error("compensation failed: item not found in player inventory");
                 return;
             }
-            TxOpItem back = SnapshotItem(live, Math.Min(amount, live.m_stack), -1, -1);
+            TxOpItem back = SnapshotAuto(live, Math.Min(amount, live.m_stack));
             if (back == null)
                 return;
             TxOpCall call = new TxOpCall();
@@ -379,7 +379,7 @@ namespace BestAutoSort.Tx
 
         internal static void CompensateTakeBackItem(Container container, int prefabHash, ItemData item)
         {
-            TxOpItem back = SnapshotItem(item, item.m_stack, -1, -1);
+            TxOpItem back = SnapshotAuto(item, item.m_stack);
             if (back == null)
                 return;
             TxOpCall call = new TxOpCall();

@@ -34,7 +34,7 @@ internal sealed class ProductionItemLoan
 		if ((Object)(object)_source != (Object)null && ChestTxService.IsShared(_source) && !_source.IsOwner())
 		{
 			// Return the loan remainder to a foreign chest via Add transaction (no ownership).
-			TxOpItem op = ChestTxService.SnapshotItem(_item, _item.m_stack, -1, -1);
+			TxOpItem op = ChestTxService.SnapshotAuto(_item, _item.m_stack);
 			if (op != null)
 			{
 				TxOpCall call = new TxOpCall();

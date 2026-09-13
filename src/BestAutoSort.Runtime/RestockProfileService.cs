@@ -392,7 +392,7 @@ internal static class RestockProfileService
 		Inventory destination = ((Humanoid)player).GetInventory();
 		if (destination == null || received == null)
 			return;
-		ItemData targetItem = destination.GetItemAt(need.Profile.X, need.Profile.Y);
+		ItemData targetItem = (need.Profile.X >= 0 && need.Profile.Y >= 0) ? destination.GetItemAt(need.Profile.X, need.Profile.Y) : null;
 		if (targetItem != null)
 		{
 			if (!string.Equals(targetItem.m_shared.m_name, received.m_shared.m_name, StringComparison.Ordinal))
@@ -417,14 +417,19 @@ internal static class RestockProfileService
 				ChestTxService.CompensateTakeBackItem(need.Container, need.PrefabHash, received);
 			return;
 		}
-		received.m_gridPos = new Vector2i(need.Profile.X, need.Profile.Y);
 		RestockMarker.Clear(received.m_customData);
 		RestockMarker.Set(received.m_customData, need.Profile.Id, need.Profile.Target);
-		if (!destination.AddItem(received, new Vector2i(need.Profile.X, need.Profile.Y)))
+		if (need.Profile.X >= 0 && need.Profile.Y >= 0)
 		{
-			if (!destination.AddItem(received))
-				ChestTxService.CompensateTakeBackItem(need.Container, need.PrefabHash, received);
+			received.m_gridPos = new Vector2i(need.Profile.X, need.Profile.Y);
+			if (destination.AddItem(received, new Vector2i(need.Profile.X, need.Profile.Y)))
+			{
+				destination.m_onChanged?.Invoke();
+				return;
+			}
 		}
+		if (!destination.AddItem(received))
+			ChestTxService.CompensateTakeBackItem(need.Container, need.PrefabHash, received);
 		destination.m_onChanged?.Invoke();
 	}
 

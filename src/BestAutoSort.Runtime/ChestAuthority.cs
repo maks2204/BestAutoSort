@@ -84,6 +84,20 @@ internal static class ChestAuthority
 		return false;
 	}
 
+	/// <summary>
+	/// Access gate must cover every scanner that submits txs (quickstack,
+	/// shared-resource prefetch, autofeed), otherwise found mats get rejected.
+	/// </summary>
+	internal static float EffectiveAccessRange()
+	{
+		float range = ModConfig.NearbyRange.Value;
+		if (ModConfig.SharedResourceRange.Value > range)
+			range = ModConfig.SharedResourceRange.Value;
+		if (ModConfig.AutoFeedRange.Value > range)
+			range = ModConfig.AutoFeedRange.Value;
+		return Mathf.Clamp(range, 4f, 100f);
+	}
+
 	internal static long CreatorOf(Container container)
 	{
 		try
@@ -130,7 +144,7 @@ internal static class ChestAuthority
 				why = "player-mismatch";
 				return false;
 			}
-			float range = Mathf.Clamp(ModConfig.NearbyRange.Value, 4f, 100f);
+			float range = EffectiveAccessRange();
 			Vector3 toChest = ((Component)container).transform.position - claimedPos;
 			if ((toChest).sqrMagnitude > range * range)
 			{
@@ -159,7 +173,7 @@ internal static class ChestAuthority
 			why = "player-mismatch";
 			return false;
 		}
-		float num = Mathf.Clamp(ModConfig.NearbyRange.Value, 4f, 100f);
+		float num = EffectiveAccessRange();
 		Vector3 val = ((Component)container).transform.position - claimedPos;
 		if ((val).sqrMagnitude > num * num)
 		{

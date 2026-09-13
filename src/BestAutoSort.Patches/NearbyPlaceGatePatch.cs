@@ -35,9 +35,27 @@ internal static class NearbyPlaceGatePatch
 		catch
 		{
 		}
-		if (!NearbyResourceService.HasStagedMatsForPiece(__instance, piece))
+		string missing;
+		if (!NearbyResourceService.HasStagedMatsForPiece(__instance, piece, out missing))
 		{
-			Plugin.LogInstance.LogInfo((object)"[ChestTX] place gated: staged mats not landed yet");
+			string needNames = "?";
+			try
+			{
+				Piece.Requirement[] reqs = piece.m_resources;
+				System.Text.StringBuilder sb = new System.Text.StringBuilder();
+				for (int i = 0; i < reqs.Length; i++)
+				{
+					if (i > 0)
+						sb.Append("+");
+					sb.Append(reqs[i].m_resItem != null && reqs[i].m_resItem.m_itemData != null && reqs[i].m_resItem.m_itemData.m_shared != null ? reqs[i].m_resItem.m_itemData.m_shared.m_name : "?");
+					sb.Append("x").Append(reqs[i].m_amount);
+				}
+				needNames = sb.ToString();
+			}
+			catch
+			{
+			}
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] place gated: staged mats not landed yet need=" + needNames + " missing=" + missing));
 			return false;
 		}
 		return true;

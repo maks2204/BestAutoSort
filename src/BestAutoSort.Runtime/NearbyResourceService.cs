@@ -179,6 +179,13 @@ internal static class NearbyResourceService
 	/// </summary>
 	internal static bool HasStagedMatsForPiece(Player player, Piece piece)
 	{
+		string dummy;
+		return HasStagedMatsForPiece(player, piece, out dummy);
+	}
+
+	internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)
+	{
+		missing = "";
 		if ((Object)(object)player == (Object)null || (Object)(object)piece == (Object)null)
 			return false;
 		Requirement[] resources = piece.m_resources;
@@ -186,8 +193,13 @@ internal static class NearbyResourceService
 		{
 			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
 			{
-				if (CountAvailable(player, val.m_resItem.m_itemData.m_shared.m_name, -1, ((Component)player).transform.position, true) < val.m_amount)
+				string name = val.m_resItem.m_itemData.m_shared.m_name;
+				int local = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
+				if (local < val.m_amount)
+				{
+					missing = name + " " + local + "/" + val.m_amount;
 					return false;
+				}
 			}
 		}
 		return true;

@@ -160,12 +160,8 @@ internal static class NearbyResourceService
 			{
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
 				Vector3 origin = ((Component)player).transform.position;
-				// Staging trigger (local shortfall only): works even when the
-				// display verdict below already passes on foreign stock.
-				int localOnly = CountAvailable(player, name, -1, origin, true);
-				if (localOnly < val.m_amount && global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedPiece(piece))
-					PrefetchMissing(player, name, -1, val.m_amount - localOnly);
-				// Display/button verdict: foreign stock counts (staged on aim, gated at placement).
+				// Display verdict only: foreign stock counts. Staging happens
+				// on placement click (deferred intent), never while browsing.
 				if (CountAvailable(player, name, -1, origin) < val.m_amount)
 					return false;
 			}
@@ -182,6 +178,29 @@ internal static class NearbyResourceService
 	{
 		string dummy;
 		return HasStagedMatsForPiece(player, piece, out dummy);
+	}
+
+	/// <summary>
+	/// Press-time staging: submit Take prefetches for the locally-missing part.
+	/// Called once per placement click (2s per-name throttle inside PrefetchMissing).
+	/// </summary>
+	internal static void StageMissingForPiece(Player player, Piece piece)
+	{
+		if (!ModConfig.CraftFromNearbyChests.Value || (Object)(object)player != (Object)(object)Player.m_localPlayer)
+			return;
+		if ((Object)(object)piece == (Object)null)
+			return;
+		Requirement[] resources = piece.m_resources;
+		foreach (Requirement val in resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
+			{
+				string name = val.m_resItem.m_itemData.m_shared.m_name;
+				int localOnly = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
+				if (localOnly < val.m_amount)
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly);
+			}
+		}
 	}
 
 	internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)

@@ -1,3 +1,4 @@
+using System.Reflection;
 using BestAutoSort;
 using BestAutoSort.Runtime;
 using HarmonyLib;
@@ -6,15 +7,16 @@ using UnityEngine;
 namespace BestAutoSort.Patches;
 
 /// <summary>
-/// Conservation gate for building: the menu/list show chest-inclusive availability,
-/// but placement may only consume synchronously-available stock (inventory +
-/// self-owned chests, incl. just-staged prefetches). Without this, a click whose
-/// prefetch has not landed yet would place at a discount (vanilla spawns the piece
-/// after partial consumption). Silent deny like vanilla failed checks.
+/// Deferred placement: the click stages missing mats first (nothing is pulled
+/// while browsing); the piece is placed at the stored aim transform once staged.
+/// Conservation gate included: without staged stock the click is swallowed instead
+/// of placing at a discount (vanilla spawns the piece after partial consumption).
 /// </summary>
 [HarmonyPatch(typeof(Player), "TryPlacePiece")]
 internal static class NearbyPlaceGatePatch
 {
+	private static readonly FieldInfo PlacementStatusField = AccessTools.Field(typeof(Player), "m_placementStatus");
+
 	private static bool Prefix(Player __instance, Piece piece)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value)
@@ -35,29 +37,26 @@ internal static class NearbyPlaceGatePatch
 		catch
 		{
 		}
-		string missing;
-		if (!NearbyResourceService.HasStagedMatsForPiece(__instance, piece, out missing))
+		if (NearbyResourceService.HasStagedMatsForPiece(__instance, piece))
+			return true;
+		// Not staged: the click's own HaveRequirements already submitted the
+		// prefetch (selected piece). Defer placement until mats land, unless the
+		// ghost spot itself is invalid (let vanilla report it).
+		try
 		{
-			string needNames = "?";
-			try
-			{
-				Piece.Requirement[] reqs = piece.m_resources;
-				System.Text.StringBuilder sb = new System.Text.StringBuilder();
-				for (int i = 0; i < reqs.Length; i++)
-				{
-					if (i > 0)
-						sb.Append("+");
-					sb.Append(reqs[i].m_resItem != null && reqs[i].m_resItem.m_itemData != null && reqs[i].m_resItem.m_itemData.m_shared != null ? reqs[i].m_resItem.m_itemData.m_shared.m_name : "?");
-					sb.Append("x").Append(reqs[i].m_amount);
-				}
-				needNames = sb.ToString();
-			}
-			catch
-			{
-			}
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] place gated: staged mats not landed yet need=" + needNames + " missing=" + missing));
-			return false;
+			if (PlacementStatusField != null && (Player.PlacementStatus)PlacementStatusField.GetValue(__instance) != Player.PlacementStatus.Valid)
+				return true;
 		}
-		return true;
+		catch
+		{
+		}
+		if (NearbyPlaceIntent.HasIntentFor(piece))
+			return false;
+		NearbyResourceService.StageMissingForPiece(__instance, piece);
+		string missing;
+		NearbyResourceService.HasStagedMatsForPiece(__instance, piece, out missing);
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] place deferred, staging mats: " + missing));
+		NearbyPlaceIntent.Store(__instance, piece);
+		return false;
 	}
 }

@@ -97,6 +97,7 @@ public sealed class Plugin : BaseUnityPlugin
 		}
 		ChestTxService.Pump();
 		AutoFeedService.Update();
+		NearbyPlaceIntent.Pump();
 		NearbyResourceService.RepairInvalidPlayerInventoryPositions();
 		if (ChestUpgradeService.UpdateLegacyMigration())
 		{

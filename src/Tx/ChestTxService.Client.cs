@@ -325,16 +325,37 @@ namespace BestAutoSort.Tx
             LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
             {
+                int count = 0;
                 try
                 {
-                    int count = pkg.ReadInt();
-                    for (int i = 0; i < count; i++)
+                    count = pkg.ReadInt();
+                }
+                catch (Exception ex)
+                {
+                    TxLog.Error("take completion decode failed: " + ex.Message);
+                }
+                // Per-item isolation: one broken entry must not void the rest —
+                // anything uncredited is sent back instead of being lost.
+                for (int i = 0; i < count; i++)
+                {
+                    int prefabHash = 0;
+                    ZPackage inner = null;
+                    int accepted = 0;
+                    try
                     {
-                        int prefabHash = pkg.ReadInt();
-                        ZPackage inner = pkg.ReadPackage();
-                        int accepted = pkg.ReadInt();
-                        if (accepted <= 0)
-                            continue;
+                        prefabHash = pkg.ReadInt();
+                        inner = pkg.ReadPackage();
+                        accepted = pkg.ReadInt();
+                    }
+                    catch (Exception ex)
+                    {
+                        TxLog.Error("take completion entry " + i + " unreadable (" + ex.Message + "), aborting rest");
+                        break;
+                    }
+                    if (accepted <= 0)
+                        continue;
+                    try
+                    {
                         ItemData item = TxCodec.ResolvePrefab(prefabHash, inner);
                         CustomDataTags.StripBenign(item);
                         if (item == null)
@@ -354,10 +375,18 @@ namespace BestAutoSort.Tx
                             CompensateTakeBackItem(container, prefabHash, back);
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    TxLog.Error("take completion decode failed: " + ex.Message);
+                    catch (Exception ex)
+                    {
+                        TxLog.Error("take completion entry " + i + " failed (" + ex.Message + "), compensating " + accepted);
+                        try
+                        {
+                            CompensateTakeBack(container, prefabHash, inner, accepted);
+                        }
+                        catch (Exception ex2)
+                        {
+                            TxLog.Error("take completion entry " + i + " compensation failed: " + ex2.Message);
+                        }
+                    }
                 }
             }
             if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)

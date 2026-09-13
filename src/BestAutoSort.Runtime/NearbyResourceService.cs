@@ -159,13 +159,35 @@ internal static class NearbyResourceService
 			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
 			{
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
-				int local = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
+				// Display/button check: foreign stock counts (staged on aim, gated at placement).
+				int local = CountAvailable(player, name, -1, ((Component)player).transform.position);
 				if (local < val.m_amount)
 				{
 					if (global::BestAutoSort.Patches.CraftingFromChestsContext.IsSelectedPiece(piece))
 						PrefetchMissing(player, name, -1, val.m_amount - local);
 					return false;
 				}
+			}
+		}
+		return true;
+	}
+
+	/// <summary>
+	/// Strict gate for TryPlacePiece: every requirement covered by the player
+	/// inventory plus self-owned chests (synchronously consumable). Blocks
+	/// discount placement while prefetched mats are still in flight.
+	/// </summary>
+	internal static bool HasStagedMatsForPiece(Player player, Piece piece)
+	{
+		if ((Object)(object)player == (Object)null || (Object)(object)piece == (Object)null)
+			return false;
+		Requirement[] resources = piece.m_resources;
+		foreach (Requirement val in resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
+			{
+				if (CountAvailable(player, val.m_resItem.m_itemData.m_shared.m_name, -1, ((Component)player).transform.position, true) < val.m_amount)
+					return false;
 			}
 		}
 		return true;

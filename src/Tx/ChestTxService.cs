@@ -503,6 +503,8 @@ namespace BestAutoSort.Tx
                         try
                         {
                             body = EncodeResultBody(call, r);
+                            if (body != null)
+                                body.SetPos(0);
                         }
                         catch
                         {

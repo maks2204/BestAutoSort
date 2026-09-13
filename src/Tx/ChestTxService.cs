@@ -450,7 +450,10 @@ namespace BestAutoSort.Tx
         {
             if (!Plugin.IsActive || !IsShared(container))
             {
-                TellPlayer("Shared chest is not available.");
+                if (AutoFeedService.IsLocked(container))
+                    TellPlayer("Chest is busy (animal feeding in progress). Try again shortly.");
+                else
+                    TellPlayer("Shared chest is not available.");
                 return;
             }
             if (container.IsOwner())

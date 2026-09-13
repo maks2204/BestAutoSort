@@ -16,13 +16,12 @@ namespace BestAutoSort.Patches
     {
         private static bool Prefix(Container __instance, long uid, long playerID)
         {
-            if (AutoFeedService.IsLocked(__instance))
+            bool leased = AutoFeedService.IsLocked(__instance);
+            if (leased)
             {
-                Plugin.LogInstance.LogInfo((object)("[ChestTX] open denied (autofeed lease, taming in progress) for peer=" + uid));
-                ZNetView component = ((Component)__instance).GetComponent<ZNetView>();
-                if (component != null)
-                    component.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
-                return false;
+                // View-only open during feeding: watching is harmless (viewer reloads
+                // bytes, flicker at worst); mutations stay lease-gated in Submit/IsShared.
+                Plugin.LogInstance.LogInfo((object)("[ChestTX] open granted during autofeed lease (view-only) for peer=" + uid));
             }
             if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
             {

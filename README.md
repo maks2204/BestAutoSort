@@ -61,15 +61,15 @@ Details: `docs/CHEST_TX.md`.
 
 ### Take one stack (GUI drag)
 
-<img src="https://raw.githubusercontent.com/maks2204/BestAutoSort/main/docs/images/protocol-take.png" width="480" alt="Take one stack: client-manager sequence">
+<img src="docs/images/protocol-take.png" width="480" alt="Take one stack: client-manager sequence">
 
 ### Deposit batch (quick-stack, per chest)
 
-<img src="https://raw.githubusercontent.com/maks2204/BestAutoSort/main/docs/images/protocol-deposit-failures.png" width="1050" alt="Deposit batch and client completion">
+<img src="docs/images/protocol-deposit-failures.png" width="1050" alt="Deposit batch and client completion">
 
 ### Viewers (many GUIs, one chest) + feeding
 
-<img src="https://raw.githubusercontent.com/maks2204/BestAutoSort/main/docs/images/protocol-packets-viewers.png" width="1050" alt="Viewers and feeding cheat-sheet">
+<img src="docs/images/protocol-packets-viewers.png" width="1050" alt="Viewers and feeding cheat-sheet">
 
 ## Install
 

@@ -52,6 +52,16 @@ if (-not (Test-Path $dllPath)) {
     throw "Expected output missing: $dllPath"
 }
 
+# Packaged README points images at GitHub (repo README keeps relative paths).
+$readmePath = Join-Path $pkgDir "README.md"
+if (Test-Path $readmePath) {
+    $base = "https://raw.githubusercontent.com/maks2204/BestAutoSort/main/docs/images/"
+    $text = Get-Content $readmePath -Raw
+    $text = $text.Replace('src="docs/images/', "src=`"$base")
+    Set-Content $readmePath $text -NoNewline
+    Write-Host "README.md image links rewritten to GitHub." -ForegroundColor Gray
+}
+
 $zipPath = Join-Path $root "BestAutoSort-$version.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath }
 Compress-Archive -Path "$pkgDir/*" -DestinationPath $zipPath

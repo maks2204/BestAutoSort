@@ -58,6 +58,8 @@ if (Test-Path $readmePath) {
     $base = "https://raw.githubusercontent.com/maks2204/BestAutoSort/main/docs/images/"
     $text = Get-Content $readmePath -Raw
     $text = $text.Replace('src="docs/images/', "src=`"$base")
+    $iconBase = "https://raw.githubusercontent.com/maks2204/BestAutoSort/main/"
+    $text = $text.Replace('](icon.png)', "]($iconBaseicon.png)")
     Set-Content $readmePath $text -NoNewline
     Write-Host "README.md image links rewritten to GitHub." -ForegroundColor Gray
 }

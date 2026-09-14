@@ -11,6 +11,8 @@ Updated and tested for **Valheim 1.0.12**.
 - **Crafting and building:** materials from nearby chests within radius
 - **Fuel and ingredients:** machines, cooking stations, kilns, smelters, fermenters pull from nearby chests
 - **Animal feeding:** hungry tame animals fed automatically from nearby chests
+> **Every player can open the same chest at the same time** — no ownership ping-pong, no "in use" lockouts. All mutations are serialized as idempotent transactions by the chest manager (see ChestTX below).
+
 - **Shared chests:** multiple players use the same chest at once
 - **Chest upgrades:** wooden → Reinforced / Black Metal / Grausten tiers, contents kept
 - **Sort and trash:** LeftAlt + S sorts the open chest, Trash button deletes

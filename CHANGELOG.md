@@ -2,6 +2,10 @@
 
 - Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
 
+## 0.1.9
+
+- Simultaneous chest access highlight, protocol docs with diagrams, packaging fixes.
+
 ## 0.1.8
 
 - Transport-safe batching, feeder on transactions, deferred placement, conservation gates.

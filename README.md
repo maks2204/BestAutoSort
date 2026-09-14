@@ -61,15 +61,15 @@ Details: `docs/CHEST_TX.md`.
 
 ### Take one stack (GUI drag)
 
-![Take one stack: client-manager sequence](docs/images/protocol-take.png)
+<img src="docs/images/protocol-take.png" width="320" alt="Take one stack: client-manager sequence">
 
 ### Deposit batch (quick-stack, per chest)
 
-![Deposit batch and client completion](docs/images/protocol-deposit-failures.png)
+<img src="docs/images/protocol-deposit-failures.png" width="700" alt="Deposit batch and client completion">
 
 ### Viewers (many GUIs, one chest) + feeding
 
-![Viewers and feeding cheat-sheet](docs/images/protocol-packets-viewers.png)
+<img src="docs/images/protocol-packets-viewers.png" width="700" alt="Viewers and feeding cheat-sheet">
 
 ## Install
 

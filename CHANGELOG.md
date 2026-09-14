@@ -1,6 +1,4 @@
-## 0.1.3
-
-- Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
+# Changelog
 
 ## 0.1.9
 
@@ -15,6 +13,22 @@
 - Pull-on-press crafting (no browse-time floods), chest-inclusive craft/build display, DoCrafting conservation gate.
 - In-flight Add deduplication, drag/grid-inventory fixes, monotonic viewer, GearSlots tag handling.
 - Verified against **Valheim 1.0.12**.
+
+## 0.1.6
+
+- Wire protocol v2 (client-stamped actor position), build commit hash baked into the DLL.
+
+## 0.1.5
+
+- Quick-stack outcome visibility and skip diagnostics, build tag in startup log.
+
+## 0.1.4
+
+- Owner quick-stack through the tx queue (broadcasts for all), quick-stack entry logging.
+
+## 0.1.3
+
+- Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
 
 ## 0.1.2
 

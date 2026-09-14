@@ -28,6 +28,8 @@ internal sealed class QuickStackService
 	private static int _totalMoved;
 	private static int _submitted;
 
+	private static int _cascadePending;
+
 	private int _session;
 
 	private Action? _onCompleted;
@@ -92,6 +94,7 @@ internal sealed class QuickStackService
 		}
 		_routine = null;
 		_targets.Clear();
+		_cascadePending = 0;
 		_onCompleted = null;
 	}
 
@@ -149,8 +152,10 @@ internal sealed class QuickStackService
 		WaitForSeconds spacing = ((!(ModConfig.RequestSpacing.Value > 0f)) ? ((WaitForSeconds)null) : new WaitForSeconds(ModConfig.RequestSpacing.Value));
 		float deadline = Time.realtimeSinceStartup + 5f;
 		Player player = Player.m_localPlayer;
-		foreach (Container chest in _targets.ToArray())
+		Container[] targets = _targets.ToArray();
+		for (int ci = 0; ci < targets.Length; ci++)
 		{
+			Container chest = targets[ci];
 			if (session != _session)
 				yield break;
 			if ((Object)(object)chest == (Object)null || (Object)(object)player == (Object)null)
@@ -176,15 +181,13 @@ internal sealed class QuickStackService
 			call.Items.AddRange(candidates);
 			call.EnforceRule = true;
 			_submitted++;
-			ChestTxService.SubmitCall(chest, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records)
-				{
-					int movedHere = 0;
-					for (int i = 0; i < records.Count; i++)
-						movedHere += records[i].Amount;
-					_totalMoved += movedHere;
-					if (session == _session && records.Count > 0)
-						TransferVisuals.Play(records, chest);
-				});
+			List<Container> rest = new List<Container>();
+			for (int ri = ci + 1; ri < targets.Length; ri++)
+			{
+				if ((Object)(object)targets[ri] != (Object)null)
+					rest.Add(targets[ri]);
+			}
+			SubmitCascade(chest, call, player, session, rest);
 			if (spacing != null)
 			{
 				yield return spacing;
@@ -194,11 +197,113 @@ internal sealed class QuickStackService
 		}
 		if (session != _session)
 			yield break;
+		float cascadeDeadline = Time.realtimeSinceStartup + 3f;
+		while (_cascadePending > 0 && Time.realtimeSinceStartup < cascadeDeadline)
+		{
+			if (spacing != null)
+				yield return spacing;
+			else
+				yield return null;
+		}
+		if (session != _session)
+			yield break;
 		_routine = null;
 		Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack session done moved=" + _totalMoved + " submitted=" + _submitted));
-		if (_totalMoved == 0 && _submitted == 0)
+		if (_totalMoved == 0)
 			TellPlayer("Quick stack moved nothing (no matching items, chest full, or rules block them).");
 		CompleteSession();
+	}
+
+	/// <summary>
+	/// Submit one chest; whatever it does not accept cascades to the next untried
+	/// chest (fill the first, rest to the second). Remainder is re-snapshotted from
+	/// live inventory synchronously inside the completion (no interleave window).
+	/// </summary>
+	private void SubmitCascade(Container chest, TxOpCall call, Player player, int session, List<Container> rest)
+	{
+		Inventory playerInv = ((Humanoid)player).GetInventory();
+		_cascadePending++;
+		ChestTxService.SubmitCallDetailed(chest, call, playerInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status)
+		{
+			try
+			{
+				int movedHere = 0;
+				for (int i = 0; i < records.Count; i++)
+					movedHere += records[i].Amount;
+				_totalMoved += movedHere;
+				if (session == _session && records.Count > 0)
+					TransferVisuals.Play(records, chest);
+				if (rest == null || rest.Count == 0 || call == null || call.Items == null)
+					return;
+				TxOpCall next = new TxOpCall();
+				next.Op = TxOp.AddBatch;
+				next.EnforceRule = true;
+				for (int i = 0; i < call.Items.Count; i++)
+				{
+					TxOpItem sent = call.Items[i];
+					if (sent == null)
+						continue;
+					int got = (accepted != null && i < accepted.Count) ? accepted[i] : 0;
+					int rem = sent.Amount - got;
+					if (rem <= 0)
+						continue;
+					ItemData src = sent.SourceRef;
+					if (src == null || !playerInv.GetAllItems().Contains(src))
+						src = ResolveRemainder(playerInv, sent);
+					if (src == null)
+						continue;
+					TxOpItem op = ChestTxService.SnapshotAuto(src, rem < src.m_stack ? rem : src.m_stack);
+					if (op != null)
+						next.Items.Add(op);
+				}
+				if (next.Items.Count == 0)
+					return;
+				for (int r = 0; r < rest.Count; r++)
+				{
+					Container target = rest[r];
+					if ((Object)(object)target == (Object)null)
+						continue;
+					if (!target.IsOwner())
+					{
+						string why;
+						if (!ChestTxService.IsSharedVerbose(target, out why))
+							continue;
+					}
+					List<Container> nextRest = new List<Container>();
+					for (int k = r + 1; k < rest.Count; k++)
+					{
+						if ((Object)(object)rest[k] != (Object)null)
+							nextRest.Add(rest[k]);
+					}
+					Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack cascade " + next.Items.Count + " item(s) onward"));
+					_submitted++;
+					SubmitCascade(target, next, player, session, nextRest);
+					return;
+				}
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack cascade exhausted (no chest took the rest)");
+			}
+			finally
+			{
+				if (_cascadePending > 0)
+					_cascadePending--;
+			}
+		});
+	}
+
+	private static ItemData ResolveRemainder(Inventory playerInv, TxOpItem sent)
+	{
+		if (playerInv == null || sent == null || sent.Snapshot == null || sent.Snapshot.m_shared == null)
+			return null;
+		string name = sent.Snapshot.m_shared.m_name;
+		int quality = sent.Snapshot.m_quality;
+		foreach (ItemData it in playerInv.GetAllItems())
+		{
+			if (it == null || it.m_shared == null || it.m_stack <= 0)
+				continue;
+			if (it.m_shared.m_name == name && (quality < 0 || it.m_quality == quality))
+				return it;
+		}
+		return null;
 	}
 
 	private static bool StackIntoOpenContainer(Player player, ICollection<Container> containers)

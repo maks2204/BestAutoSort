@@ -522,6 +522,19 @@ namespace BestAutoSort.Tx
 
         internal static void SubmitCall(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>> onDone)
         {
+            SubmitCallDetailed(container, call, srcInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status)
+            {
+                if (onDone != null)
+                    onDone(records);
+            });
+        }
+
+        /// <summary>
+        /// Detailed batch submit: per-item accepted counts + status for cascade retry.
+        /// Chunking applies inside (each chunk reports separately).
+        /// </summary>
+        internal static void SubmitCallDetailed(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>, List<int>, TxStatus> onDone)
+        {
             if (call != null && call.Items.Count > BatchChunkSize)
             {
                 // Split big batches: each chunk is an independent tx (own txId,
@@ -536,7 +549,7 @@ namespace BestAutoSort.Tx
                     part.RespectReserves = call.RespectReserves;
                     for (int j = i; j < call.Items.Count && j < i + BatchChunkSize; j++)
                         part.Items.Add(call.Items[j]);
-                    SubmitCall(container, part, srcInv, onDone);
+                    SubmitCallDetailed(container, part, srcInv, onDone);
                     i += BatchChunkSize;
                 }
                 return;
@@ -545,9 +558,13 @@ namespace BestAutoSort.Tx
             {
                 MutateLocal(container, call, delegate (StoredResult r)
                 {
+                    List<int> acc = new List<int>();
+                    for (int i = 0; i < call.Items.Count; i++)
+                        acc.Add((r != null && r.Accepted != null && i < r.Accepted.Count) ? r.Accepted[i] : 0);
+                    TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
                     List<TransferRecord> records = FinishBatchCompletion(container, srcInv, call, r);
                     if (onDone != null)
-                        onDone(records);
+                        onDone(records, acc, st);
                 });
                 return;
             }
@@ -564,7 +581,7 @@ namespace BestAutoSort.Tx
                 }
                 RefreshNow(container);
                 if (onDone != null)
-                    onDone(records);
+                    onDone(records, accepted, status);
             });
         }
 

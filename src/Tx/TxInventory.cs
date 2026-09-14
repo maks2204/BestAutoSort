@@ -20,9 +20,53 @@ namespace BestAutoSort.Tx
             int requested = clone.m_stack;
             if (requested <= 0)
                 return 0;
+            if (!CanPlace(inv, clone))
+                return 0;
             bool flag = inv.AddItem(clone);
             int remaining = inv.ContainsItem(clone) ? 0 : (flag ? 0 : clone.m_stack);
             return requested - remaining;
+        }
+
+        /// <summary>
+        /// Mirror of vanilla merge rules (FindFreeStackItem: name+quality+room+world)
+        /// plus one free cell. When neither exists vanilla fails AND logs
+        /// "Trying to add item to occupied slot" noise — skip the call, same result.
+        /// </summary>
+        private static bool CanPlace(Inventory inv, ItemData clone)
+        {
+            try
+            {
+                if (clone.m_shared == null)
+                    return true;
+                string name = clone.m_shared.m_name;
+                int maxStack = clone.m_shared.m_maxStackSize;
+                System.Collections.Generic.List<ItemData> all = inv.GetAllItems();
+                foreach (ItemData it in all)
+                {
+                    if (it == null || it.m_shared == null)
+                        continue;
+                    if (it.m_shared.m_name == name && it.m_quality == clone.m_quality
+                        && it.m_stack < maxStack && it.m_worldLevel == clone.m_worldLevel)
+                        return true;
+                }
+                System.Collections.Generic.HashSet<int> used = new System.Collections.Generic.HashSet<int>();
+                int w = inv.GetWidth();
+                int h = inv.GetHeight();
+                foreach (ItemData it in all)
+                {
+                    if (it == null)
+                        continue;
+                    int x = it.m_gridPos.x;
+                    int y = it.m_gridPos.y;
+                    if (x >= 0 && y >= 0 && x < w && y < h)
+                        used.Add(y * w + x);
+                }
+                return used.Count < w * h;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         /// <summary>

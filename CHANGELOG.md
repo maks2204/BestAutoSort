@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.10
+
+- BepInExPack 5.4.2350, simultaneous-access highlight, protocol docs.
+
 ## 0.1.9
 
 - Simultaneous chest access highlight, protocol docs with diagrams, packaging fixes.

@@ -4,6 +4,6 @@
   "website_url": "https://github.com/maks2204/BestAutoSort",
   "description": "Standalone storage mod: shared chests, quick-stack, restock, rules, crafting from chests, autofeed, upgrades, sort.",
   "dependencies": [
-    "denikson-BepInExPack_Valheim-5.4.2333"
+    "denikson-BepInExPack_Valheim-5.4.2350"
   ]
 }

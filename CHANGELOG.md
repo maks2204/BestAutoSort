@@ -2,6 +2,10 @@
 
 - Flight visuals broadcast (TxFlights) + manager-side play for remote batches.
 
+## 0.1.8
+
+- Transport-safe batching, feeder on transactions, deferred placement, conservation gates.
+
 ## 0.1.7
 
 - Pull-on-press crafting (no browse-time floods), chest-inclusive craft/build display, DoCrafting conservation gate.

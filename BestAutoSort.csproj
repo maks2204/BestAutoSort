@@ -145,9 +145,5 @@
     <Copy SourceFiles="$(RepoRoot)/README.md" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(RepoRoot)/CHANGELOG.md" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" Condition="Exists('$(RepoRoot)/CHANGELOG.md')" />
     <Copy SourceFiles="$(RepoRoot)/icon.png" DestinationFolder="$(OutDir)/package" SkipUnchangedFiles="false" Condition="Exists('$(RepoRoot)/icon.png')" />
-    <ItemGroup>
-      <ProtocolImages Include="$(RepoRoot)/docs/images/*.png" />
-    </ItemGroup>
-    <Copy SourceFiles="@(ProtocolImages)" DestinationFolder="$(OutDir)/package/docs/images" SkipUnchangedFiles="false" />
   </Target>
 </Project>

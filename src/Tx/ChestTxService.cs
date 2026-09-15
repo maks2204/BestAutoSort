@@ -160,6 +160,15 @@ namespace BestAutoSort.Tx
                 TellPlayer("Item cannot be sent (no prefab).");
                 return;
             }
+            if (wantX < 0 || wantY < 0)
+            {
+                // No explicit cell: SnapshotItem defaults X/Y to the SOURCE grid
+                // pos (needed for Takes), but for Adds that is the player-grid
+                // slot — the manager would read it as a positional want and park
+                // the item in the same chest cell (ctrl-click lands in-slot).
+                opItem.X = -1;
+                opItem.Y = -1;
+            }
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.Add;
             call.Items.Add(opItem);

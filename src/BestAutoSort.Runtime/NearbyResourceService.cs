@@ -365,19 +365,13 @@ internal static class NearbyResourceService
 		CraftingStation currentCraftingStation = player.GetCurrentCraftingStation();
 		foreach (Requirement val in requirements)
 		{
-			// TEMP-DIAG(upgrade-free): always-on logs, remove after diagnosis.
-			string reqName = (val?.m_resItem?.m_itemData?.m_shared != null) ? val.m_resItem.m_itemData.m_shared.m_name : "<null>";
-			bool applies = AppliesToStation(val, currentCraftingStation);
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] CONSUME-DIAG req=" + reqName + " applies=" + applies + " station=" + (((Object)(object)currentCraftingStation != (Object)null) ? ((Object)currentCraftingStation).name : "<none>")));
-			if (!applies)
+			if (AppliesToStation(val, currentCraftingStation))
 			{
-				continue;
-			}
-			int num = val.GetAmount(qualityLevel) * multiplier;
-			if (num > 0)
-			{
-				int taken = ConsumeItem(player, reqName, num, itemQuality);
-				Plugin.LogInstance.LogInfo((object)("[ChestTX] CONSUME-DIAG req=" + reqName + " wanted=" + num + " taken=" + taken));
+				int num = val.GetAmount(qualityLevel) * multiplier;
+				if (num > 0)
+				{
+					ConsumeItem(player, val.m_resItem.m_itemData.m_shared.m_name, num, itemQuality);
+				}
 			}
 		}
 	}
@@ -389,7 +383,6 @@ internal static class NearbyResourceService
 			return 0;
 		}
 		int num = RemoveFromInventory(((Humanoid)player).GetInventory(), name, amount, quality);
-		int fromInv = num;
 		int num2 = amount - num;
 		if (num2 <= 0 || !ModConfig.CraftFromNearbyChests.Value)
 		{
@@ -409,8 +402,6 @@ internal static class NearbyResourceService
 				break;
 			}
 		}
-		// TEMP-DIAG(upgrade-free): always-on log, remove after diagnosis.
-		Plugin.LogInstance.LogInfo((object)("[ChestTX] CONSUME-DIAG split name=" + name + " wanted=" + amount + " fromInv=" + fromInv + " total=" + num));
 		return num;
 	}
 

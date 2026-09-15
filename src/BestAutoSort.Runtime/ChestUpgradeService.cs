@@ -202,12 +202,9 @@ internal static class ChestUpgradeService
 			// HaveRequirements counts nearby chests, but ConsumeResources only
 			// sees the player inventory: stage the missing part first (async tx
 			// pull), and gate the upgrade until it lands. Next press succeeds.
-			// TEMP-DIAG(upgrade-free): always-on logs, remove after diagnosis.
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] UPGRADE-DIAG press tier=" + num + "->" + targetTier + " owner=" + component.IsOwner()));
 			NearbyResourceService.StageMissingForPiece(localPlayer, piece);
 			string missing;
 			bool staged = NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out missing);
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] UPGRADE-DIAG staged=" + staged + " missing=" + missing));
 			if (!staged)
 			{
 				ShowMessage("Gathering " + missing + " from nearby chests. Press Upgrade again.");

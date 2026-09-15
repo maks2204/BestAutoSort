@@ -302,6 +302,7 @@ internal static class AutoFeedService
 		FeedingAnimals[animalId] = now + 15f;
 		List<TxOpItem> items = new List<TxOpItem>();
 		items.Add(op);
+		// Flights must end at the ANIMAL, not at the feeder: stamp its position.
 		ChestTxService.RequestTakeCustom(container, items, true, delegate(List<DecodedTake> decoded, TxStatus status, uint rev)
 		{
 			FeedingAnimals.Remove(animalId);
@@ -344,7 +345,7 @@ internal static class AutoFeedService
 				back2.m_stack = got.Accepted;
 				ChestTxService.CompensateTakeBackItem(container, got.PrefabHash, back2);
 			}
-		});
+		}, 0L, animalPos);
 	}
 
 	private static void TrackContainer(Container container)

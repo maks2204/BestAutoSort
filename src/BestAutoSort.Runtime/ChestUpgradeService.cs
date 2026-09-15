@@ -211,7 +211,11 @@ internal static class ChestUpgradeService
 		}
 		if (!flag)
 		{
-			localPlayer.ConsumeResources(piece.m_resources, 0, -1, 1);
+			// Chest-aware consumption: vanilla ConsumeResources only sees the
+			// player inventory, so stock sitting in owned chests would survive
+			// (free upgrade). This consumes inventory first, then self-owned
+			// chests synchronously; foreign stock was staged above by the gate.
+			NearbyResourceService.ConsumeRequirements(localPlayer, piece.m_resources, 0, -1, 1);
 		}
 		InventoryGui instance = InventoryGui.instance;
 		if (instance != null)

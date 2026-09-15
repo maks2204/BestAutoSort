@@ -54,6 +54,7 @@ namespace BestAutoSort.Tx
                 // InvokeRoutedRPC(name, params) без target шлёт ТОЛЬКО серверу!
                 rpc.InvokeRoutedRPC(0L, FlightsRpc, pkg);
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + job.TxId + " flights broadcast entries=" + written);
+                Plugin.LogInstance.LogInfo((object)("[ChestTX] FLIGHT-DIAG tx=" + job.TxId + " broadcast from=" + from + " toPlayer=" + (job.Call.Op == TxOp.TakeBatch)));
             }
             catch (Exception ex)
             {
@@ -131,6 +132,7 @@ namespace BestAutoSort.Tx
                 if (records.Count > 0)
                 {
                     TxLog.Info("flights rx tx=" + txId + " playing entries=" + records.Count);
+                    Plugin.LogInstance.LogInfo((object)("[ChestTX] FLIGHT-DIAG rx tx=" + txId + " from=" + from + " toPlayer=" + toPlayer + " localPlayer=" + (((Object)Player.m_localPlayer != (Object)null) ? ((Component)Player.m_localPlayer).transform.position.ToString() : "<none>")));
                     TransferVisuals.PlayFrom(records, container, toPlayer, from);
                 }
                 else

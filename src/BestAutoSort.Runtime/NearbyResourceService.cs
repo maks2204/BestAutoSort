@@ -389,6 +389,7 @@ internal static class NearbyResourceService
 			return 0;
 		}
 		int num = RemoveFromInventory(((Humanoid)player).GetInventory(), name, amount, quality);
+		int fromInv = num;
 		int num2 = amount - num;
 		if (num2 <= 0 || !ModConfig.CraftFromNearbyChests.Value)
 		{
@@ -408,6 +409,8 @@ internal static class NearbyResourceService
 				break;
 			}
 		}
+		// TEMP-DIAG(upgrade-free): always-on log, remove after diagnosis.
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] CONSUME-DIAG split name=" + name + " wanted=" + amount + " fromInv=" + fromInv + " total=" + num));
 		return num;
 	}
 
@@ -764,6 +767,14 @@ internal static class NearbyResourceService
 						break;
 					}
 				}
+			}
+			if (num > 0)
+			{
+				// Direct live mutation bypasses the tx queue: persist like the manager
+				// does (rows + Save), otherwise the ZDO keeps the pre-consume stock
+				// and viewers/rejoins resurrect it.
+				TxReflect.UpdateRows(container);
+				TxReflect.SaveContainer(container);
 			}
 			return num;
 		}

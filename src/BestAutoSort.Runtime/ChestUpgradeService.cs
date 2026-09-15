@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using BestAutoSort.Core;
+using BestAutoSort.Tx;
 using HarmonyLib;
 using Splatform;
 using UnityEngine;
@@ -392,6 +393,11 @@ internal static class ChestUpgradeService
 			{
 				Plugin.LogInstance.LogWarning((object)("The replacement chest is safe but could not be compacted: " + ex));
 			}
+			// Persist the moved contents: a fresh spawn has an empty ZDO, and
+			// without Save the items live only in memory (ghosts for viewers,
+			// rejoins, and anything dropped from this chest later).
+			TxReflect.UpdateRows(replacement);
+			TxReflect.SaveContainer(replacement);
 			try
 			{
 				component.Destroy();

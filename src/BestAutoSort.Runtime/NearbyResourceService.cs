@@ -759,6 +759,14 @@ internal static class NearbyResourceService
 					}
 				}
 			}
+			if (num > 0)
+			{
+				// Direct live mutation bypasses the tx queue: persist like the manager
+				// does (rows + Save), otherwise the ZDO keeps the pre-consume stock
+				// and viewers/rejoins resurrect it.
+				TxReflect.UpdateRows(container);
+				TxReflect.SaveContainer(container);
+			}
 			return num;
 		}
 		int num3 = Mathf.Min(requested, inventory.CountItems(name, quality, true));

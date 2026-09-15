@@ -97,7 +97,7 @@ internal static class InventoryButtons
 		}
 		((UnityEvent)onClick).AddListener((UnityAction)obj);
 		VanillaTooltip.Attach(((Component)_trashButton).gameObject, (Component)(object)gui, "Trash", "Permanently destroy the item stack currently held by the cursor. This cannot be undone.");
-		_sortButton = CloneButton(val, val2, "BestAutoSort_SortChest", "Sort Chest");
+		_sortButton = CloneButton(val, val2, "BestAutoSort_SortChest", "Sort");
 		RectTransform val6 = (RectTransform)((Component)_sortButton).transform;
 		val6.anchorMin = val3.anchorMin;
 		val6.anchorMax = val3.anchorMax;
@@ -268,6 +268,20 @@ internal static class InventoryButtons
 				num = (rect).width;
 			}
 			float num2 = Mathf.Min(145f, num);
+			// Chest column matches the Trash/Stack width (player-side layout runs first).
+			if ((Object)(object)_trashButton != (Object)null)
+			{
+				RectTransform trashRect = (RectTransform)((Component)_trashButton).transform;
+				float trashWidth = trashRect.rect.width;
+				if (trashWidth <= 0f)
+				{
+					trashWidth = trashRect.sizeDelta.x;
+				}
+				if (trashWidth > 0f)
+				{
+					num2 = trashWidth;
+				}
+			}
 			rect = val.rect;
 			float num3;
 			if (!((rect).height > 0f))

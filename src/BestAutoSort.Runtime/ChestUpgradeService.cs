@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using BestAutoSort.Core;
+using BestAutoSort.Tx;
 using HarmonyLib;
 using Splatform;
 using UnityEngine;
@@ -198,7 +199,25 @@ internal static class ChestUpgradeService
 		}
 		if (!flag)
 		{
-			localPlayer.ConsumeResources(piece.m_resources, 0, -1, 1);
+			// HaveRequirements counts nearby chests, but ConsumeResources only
+			// sees the player inventory: stage the missing part first (async tx
+			// pull), and gate the upgrade until it lands. Next press succeeds.
+			NearbyResourceService.StageMissingForPiece(localPlayer, piece);
+			string missing;
+			bool staged = NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out missing);
+			if (!staged)
+			{
+				ShowMessage("Gathering " + missing + " from nearby chests. Press Upgrade again.");
+				return;
+			}
+		}
+		if (!flag)
+		{
+			// Chest-aware consumption: vanilla ConsumeResources only sees the
+			// player inventory, so stock sitting in owned chests would survive
+			// (free upgrade). This consumes inventory first, then self-owned
+			// chests synchronously; foreign stock was staged above by the gate.
+			NearbyResourceService.ConsumeRequirements(localPlayer, piece.m_resources, 0, -1, 1);
 		}
 		InventoryGui instance = InventoryGui.instance;
 		if (instance != null)
@@ -371,6 +390,11 @@ internal static class ChestUpgradeService
 			{
 				Plugin.LogInstance.LogWarning((object)("The replacement chest is safe but could not be compacted: " + ex));
 			}
+			// Persist the moved contents: a fresh spawn has an empty ZDO, and
+			// without Save the items live only in memory (ghosts for viewers,
+			// rejoins, and anything dropped from this chest later).
+			TxReflect.UpdateRows(replacement);
+			TxReflect.SaveContainer(replacement);
 			try
 			{
 				component.Destroy();

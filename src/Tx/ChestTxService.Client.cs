@@ -495,7 +495,7 @@ namespace BestAutoSort.Tx
                     uint rev = (r != null) ? r.Revision : CurrentRevision(container);
                     if (onDone != null)
                         onDone(direct, st, rev);
-                }, playerId);
+                }, playerId, actorPos);
                 return;
             }
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)

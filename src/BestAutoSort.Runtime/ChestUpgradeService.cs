@@ -198,6 +198,19 @@ internal static class ChestUpgradeService
 		}
 		if (!flag)
 		{
+			// HaveRequirements counts nearby chests, but ConsumeResources only
+			// sees the player inventory: stage the missing part first (async tx
+			// pull), and gate the upgrade until it lands. Next press succeeds.
+			NearbyResourceService.StageMissingForPiece(localPlayer, piece);
+			string missing;
+			if (!NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out missing))
+			{
+				ShowMessage("Gathering " + missing + " from nearby chests. Press Upgrade again.");
+				return;
+			}
+		}
+		if (!flag)
+		{
 			localPlayer.ConsumeResources(piece.m_resources, 0, -1, 1);
 		}
 		InventoryGui instance = InventoryGui.instance;

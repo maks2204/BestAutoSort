@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Feeder flights target the animal, not the player.
+- Upgrade button stages chest stock and consumes owned-chest resources; replacement chest contents persisted (no more ghost items).
+- Chest buttons narrowed to Trash/Stack width; Sort Chest renamed to Sort.
+
 ## 0.1.10
 
 - BepInExPack 5.4.2350, simultaneous-access highlight, protocol docs.

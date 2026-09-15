@@ -300,8 +300,6 @@ internal static class AutoFeedService
 		if (op == null)
 			return;
 		FeedingAnimals[animalId] = now + 15f;
-		// TEMP-DIAG(feed-flight): remove after diagnosis.
-		Plugin.LogInstance.LogInfo((object)("[ChestTX] FEED-DIAG submit animalPos=" + animalPos + " feederPos=" + ((Component)Player.m_localPlayer).transform.position));
 		List<TxOpItem> items = new List<TxOpItem>();
 		items.Add(op);
 		// Flights must end at the ANIMAL, not at the feeder: stamp its position.

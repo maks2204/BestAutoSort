@@ -234,7 +234,7 @@ namespace BestAutoSort.Tx
             return opItem;
         }
 
-        internal static void RequestTake(Container container, Inventory dstInv, ItemData snapshot, int amount, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestTake(Container container, Inventory dstInv, ItemData snapshot, int amount, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1)
         {
             TxOpItem opItem = SnapshotItem(snapshot, amount, -1, -1);
             if (opItem == null)
@@ -244,7 +244,7 @@ namespace BestAutoSort.Tx
             call.Items.Add(opItem);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, onDone);
+                CompleteTake(dstInv, pkg, status, rev, container, onDone, wantDstX, wantDstY);
             });
         }
 

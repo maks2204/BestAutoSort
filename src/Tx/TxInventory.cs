@@ -28,6 +28,34 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
+        /// Take crediting with an optional drop cell (drag&amp;drop): free or
+        /// mergeable cell goes positional (vanilla AddItem semantics, merge included),
+        /// anything else (occupied by other, out of grid) falls back to auto-place.
+        /// </summary>
+        public static int AddTakeAndCount(Inventory inv, ItemData clone, int wantX, int wantY)
+        {
+            if (wantX < 0 || wantY < 0)
+                return AddAndCount(inv, clone);
+            if (clone != null && clone.m_shared != null && wantX < inv.GetWidth() && wantY < inv.GetHeight())
+            {
+                ItemData occupant = inv.GetItemAt(wantX, wantY);
+                if (occupant == null || (occupant.m_shared != null
+                    && occupant.m_shared.m_name == clone.m_shared.m_name && occupant.m_quality == clone.m_quality
+                    && occupant.m_stack < occupant.m_shared.m_maxStackSize && occupant.m_worldLevel == clone.m_worldLevel))
+                {
+                    int requested = clone.m_stack;
+                    Vector2i pos = new Vector2i(wantX, wantY);
+                    bool flag = inv.AddItem(clone, pos);
+                    int remaining = inv.ContainsItem(clone) ? 0 : (flag ? 0 : clone.m_stack);
+                    int placed = requested - remaining;
+                    if (placed > 0)
+                        return placed;
+                }
+            }
+            return AddAndCount(inv, clone);
+        }
+
+        /// <summary>
         /// Mirror of vanilla merge rules (FindFreeStackItem: name+quality+room+world)
         /// plus one free cell. When neither exists vanilla fails AND logs
         /// "Trying to add item to occupied slot" noise — skip the call, same result.

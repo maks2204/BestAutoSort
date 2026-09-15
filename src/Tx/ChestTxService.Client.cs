@@ -334,7 +334,7 @@ namespace BestAutoSort.Tx
             });
         }
 
-        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone)
+        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1)
         {
             LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
@@ -386,7 +386,7 @@ namespace BestAutoSort.Tx
                             CompensateTakeBack(container, prefabHash, inner, accepted);
                             continue;
                         }
-                        int placed = TxInventory.AddAndCount(dstInv, item);
+                        int placed = TxInventory.AddTakeAndCount(dstInv, item, wantDstX, wantDstY);
                         if (placed < accepted)
                         {
                             // Did not fit the inventory: send the remainder back to the chest.

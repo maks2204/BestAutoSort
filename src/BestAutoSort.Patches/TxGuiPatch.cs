@@ -199,7 +199,7 @@ namespace BestAutoSort.Patches
             }
             if (targetInv != chestInv && dragInv == chestInv)
             {
-                ChestTxService.RequestTake(container, targetInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null);
+                ChestTxService.RequestTake(container, targetInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null, pos.x, pos.y);
                 TxGui.CancelDrag(gui);
                 return;
             }

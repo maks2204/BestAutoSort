@@ -491,6 +491,12 @@ internal static class InventoryButtons
 				((Character)Player.m_localPlayer).Message((MessageType)2, "The item could not be destroyed safely.", 0, (Sprite)null, false);
 				return;
 			}
+			// Direct destroy from an owned chest (no tx queue): persist like the manager.
+			if ((Object)(object)trashContainer != (Object)null && trashContainer.IsOwner())
+			{
+				TxReflect.UpdateRows(trashContainer);
+				TxReflect.SaveContainer(trashContainer);
+			}
 			SetupDragItemMethod.Invoke(_gui, new object[3] { null, null, 1 });
 			((Character)Player.m_localPlayer).Message((MessageType)2, $"Destroyed {destroyAmount} × {Localization.instance.Localize(val.m_shared.m_name)}.", 0, (Sprite)null, false);
 		}

@@ -261,6 +261,8 @@ internal static class NearbyResourceService
 		}
 	}
 
+	internal static void ReturnAheadStock(Piece newPiece)
+	{
 		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)
 			return;
 		Player player = Player.m_localPlayer;

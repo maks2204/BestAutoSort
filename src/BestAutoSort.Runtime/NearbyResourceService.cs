@@ -446,6 +446,8 @@ internal static class NearbyResourceService
 						{
 							loan = new ProductionItemLoan(container, val, loanedItem);
 							LogProductionDiagnostic(production, "Pulled " + name + " from " + ((Object)container).name + " for " + ((Object)production).name + ".", warning: false);
+							TxReflect.UpdateRows(container);
+							TxReflect.SaveContainer(container);
 							return true;
 						}
 						num3++;
@@ -494,6 +496,8 @@ internal static class NearbyResourceService
 							{
 								loan = new ProductionItemLoan(container, val, loanedItem);
 								LogProductionDiagnostic(production, "Pulled " + preferredName + " from " + ((Object)container).name + " for " + ((Object)production).name + ".", warning: false);
+								TxReflect.UpdateRows(container);
+								TxReflect.SaveContainer(container);
 								return true;
 							}
 							num3++;

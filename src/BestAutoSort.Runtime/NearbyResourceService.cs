@@ -268,6 +268,7 @@ internal static class NearbyResourceService
 					keep.Add(val.m_resItem.m_itemData.m_shared.m_name);
 			}
 		}
+		System.Collections.Generic.List<Container> nearby = new System.Collections.Generic.List<Container>(GetEligibleContainers(((Component)player).transform.position));
 		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);
 		foreach (string name in names)
 		{
@@ -281,40 +282,80 @@ internal static class NearbyResourceService
 			_aheadSource.Remove(name);
 			if (amt <= 0)
 				continue;
-			if ((Object)(object)src == (Object)null || src.GetInventory() == null)
-				continue;
-			if (!ChestTxService.IsShared(src) && !src.IsOwner())
-				continue;
 			int give = playerInv.CountItems(name, -1, true);
 			if (give > amt)
 				give = amt;
 			if (give <= 0)
 				continue;
-			TxOpCall call = new TxOpCall();
-			call.Op = TxOp.AddBatch;
-			call.EnforceRule = true;
-			foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
+			// Cascade like quick-stack: source first, then other nearby chests
+			// (source may be full, rule-locked or gone). Whatever fits nowhere
+			// stays in the player inventory — never voided, never forced.
+			System.Collections.Generic.List<Container> targets = new System.Collections.Generic.List<Container>();
+			if (IsReturnTarget(src))
+				targets.Add(src);
+			foreach (Container c in nearby)
 			{
-				if (give <= 0)
-					break;
-				if (item == null || item.m_shared == null || item.m_shared.m_questItem)
-					continue;
-				if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
-					continue;
-				int n = give < item.m_stack ? give : item.m_stack;
-				TxOpItem op = ChestTxService.SnapshotAuto(item, n);
-				if (op == null)
-					continue;
-				call.Items.Add(op);
-				give -= n;
+				if ((Object)(object)c != (Object)null && (Object)(object)c != (Object)(object)src && IsReturnTarget(c) && !targets.Contains(c))
+					targets.Add(c);
 			}
-			if (call.Items.Count == 0)
+			if (targets.Count == 0)
 				continue;
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] returning ahead-staged " + name + " to chest"));
-			ChestTxService.SubmitCall(src, call, playerInv, null);
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] returning ahead-staged " + name + " to " + targets.Count + " chest(s)"));
+			ReturnToChests(playerInv, name, give, targets, 0);
 		}
 	}
 
+	private static bool IsReturnTarget(Container c)
+	{
+		if ((Object)(object)c == (Object)null || c.GetInventory() == null)
+			return false;
+		return ChestTxService.IsShared(c) || c.IsOwner();
+	}
+
+	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index)
+	{
+		if ((Object)(object)playerInv == (Object)null || remaining <= 0)
+			return;
+		while (index < targets.Count && !IsReturnTarget(targets[index]))
+			index++;
+		if (index >= targets.Count)
+			return;
+		Container dst = targets[index];
+		TxOpCall call = new TxOpCall();
+		call.Op = TxOp.AddBatch;
+		call.EnforceRule = true;
+		int want = remaining;
+		foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
+		{
+			if (want <= 0)
+				break;
+			if (item == null || item.m_shared == null || item.m_shared.m_questItem)
+				continue;
+			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
+				continue;
+			int n = want < item.m_stack ? want : item.m_stack;
+			TxOpItem op = ChestTxService.SnapshotAuto(item, n);
+			if (op == null)
+				continue;
+			call.Items.Add(op);
+			want -= n;
+		}
+		if (call.Items.Count == 0)
+			return;
+		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records)
+		{
+			int moved = 0;
+			if (records != null)
+			{
+				foreach (TransferRecord r in records)
+				{
+					if (r != null)
+						moved += r.Amount;
+				}
+			}
+			ReturnToChests(playerInv, name, remaining - moved, targets, index + 1);
+		});
+	}
 internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)
 	{
 		missing = "";

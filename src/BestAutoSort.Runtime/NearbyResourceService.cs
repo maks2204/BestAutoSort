@@ -204,8 +204,13 @@ internal static class NearbyResourceService
 	}
 
 	// TEMP-DIAG(build-stall): remove after diagnosis.
+	private static float _stagedSplitNext;
 	internal static void LogStagedSplit(Player player, Piece piece)
 	{
+		float now = UnityEngine.Time.realtimeSinceStartup;
+		if (now < _stagedSplitNext)
+			return;
+		_stagedSplitNext = now + 1f;
 		try
 		{
 			Requirement[] resources = piece.m_resources;

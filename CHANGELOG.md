@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Absolute tx idempotency (no re-apply after handoff), retry-or-loud client, no-void compensation.
+- Owned-chest persistence everywhere (restock, loans, quick-stack into open, trash, sort, replacement).
+- Deferred builds and upgrades consume chest stock; quest items never leak via TakeAll/drop/right-click.
+- Shared-mode deny for direct TakeAll RPC; lease-safe chest open; drag-take lands in the drop cell.
+
 ## 0.2.0
 
 - Feeder flights target the animal, not the player.

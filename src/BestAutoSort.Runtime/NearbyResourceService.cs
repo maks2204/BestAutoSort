@@ -356,21 +356,33 @@ internal static class NearbyResourceService
 		Container dst = targets[index];
 		System.Collections.Generic.List<TxOpItem> ops = new System.Collections.Generic.List<TxOpItem>();
 		int want = remaining;
+		// TEMP-DIAG(return-silent): remove after diagnosis.
+		int scanned = 0;
+		int skippedNull = 0;
+		int skippedQuest = 0;
+		int skippedName = 0;
+		int skippedSnap = 0;
 		foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
 		{
 			if (want <= 0)
 				break;
-			if (item == null || item.m_shared == null || item.m_shared.m_questItem)
-				continue;
-			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
-				continue;
+			scanned++;
+			if (item == null || item.m_shared == null) { skippedNull++; continue; }
+			if (item.m_shared.m_questItem) { skippedQuest++; continue; }
+			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal)) { skippedName++; continue; }
 			int n = want < item.m_stack ? want : item.m_stack;
 			TxOpItem op = ChestTxService.SnapshotAuto(item, n);
 			if (op == null)
+			{
+				skippedSnap++;
+				Plugin.LogInstance.LogWarning((object)("[ChestTX] RETURN-DIAG snapshot null name=" + name + " hasPrefab=" + ((Object)(object)item.m_dropPrefab != (Object)null)));
 				continue;
+			}
 			ops.Add(op);
 			want -= n;
 		}
+		// TEMP-DIAG(return-silent): remove after diagnosis.
+		Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG collect name=" + name + " want=" + remaining + " scanned=" + scanned + " ops=" + ops.Count + " skipNull=" + skippedNull + " skipQuest=" + skippedQuest + " skipName=" + skippedName + " skipSnap=" + skippedSnap));
 		if (ops.Count == 0)
 			return;
 		// SubmitCall fans out Items.Count>4 into parallel chunk submits with one

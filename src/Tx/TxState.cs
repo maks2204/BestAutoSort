@@ -138,6 +138,10 @@ namespace BestAutoSort.Tx
         public float NextTryAt;
         public float Deadline;
         public bool QuerySent;
+        /// <summary>Last-chance query already spent (decode failure / deadline): no more extensions.</summary>
+        public bool FinalQuerySent;
+        /// <summary>Item arity the response body must carry (-1 = unknown, legacy behavior).</summary>
+        public int ExpectedItems = -1;
         /// <summary>Completion context (closures over live refs — valid only until the deadline).</summary>
         public System.Action<ZPackage, TxStatus, uint> OnResponse;
         /// <summary>Source items claimed by the in-flight deduplicator (Add/AddBatch).</summary>

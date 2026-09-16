@@ -48,6 +48,10 @@ namespace BestAutoSort.Patches
                 return true;
             if (!ModConfig.AllowConcurrentChestUse.Value)
                 return false;
+            // Lease-aware: already-open viewers keep rendering while feeding
+            // (opens are denied authoritatively, mutations stay lease-gated).
+            if (AutoFeedService.IsLocked(container))
+                return true;
             return ChestTxService.IsShared(container);
         }
     }

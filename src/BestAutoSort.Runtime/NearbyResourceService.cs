@@ -213,6 +213,115 @@ internal static class NearbyResourceService
 		}
 	}
 
+	// Ahead-stage ledger: pipelined (post-click/post-place) stages request full sets
+	// that land in the player inventory. When the selected piece changes, the
+	// unconsumed remainder goes back to the source chest instead of lingering.
+	private static readonly System.Collections.Generic.Dictionary<string, int> _aheadStock = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
+	private static readonly System.Collections.Generic.Dictionary<string, Container> _aheadSource = new System.Collections.Generic.Dictionary<string, Container>(System.StringComparer.Ordinal);
+
+	internal static void NoteAheadLanded(string name, int amount, Container source)
+	{
+		if (string.IsNullOrEmpty(name) || amount <= 0)
+			return;
+		int cur;
+		_aheadStock.TryGetValue(name, out cur);
+		_aheadStock[name] = cur + amount;
+		if ((Object)(object)source != (Object)null)
+			_aheadSource[name] = source;
+	}
+
+	internal static void NoteAheadConsumed(Piece piece)
+	{
+		if ((Object)(object)piece == (Object)null || _aheadStock.Count == 0)
+			return;
+		Requirement[] resources = piece.m_resources;
+		if (resources == null)
+			return;
+		foreach (Requirement val in resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared == null || val.m_amount <= 0)
+				continue;
+			string name = val.m_resItem.m_itemData.m_shared.m_name;
+			int cur;
+			if (!_aheadStock.TryGetValue(name, out cur))
+				continue;
+			cur -= val.m_amount;
+			if (cur <= 0)
+			{
+				_aheadStock.Remove(name);
+				_aheadSource.Remove(name);
+			}
+			else
+			{
+				_aheadStock[name] = cur;
+			}
+		}
+	}
+
+	internal static void ReturnAheadStock(Piece newPiece)
+	{
+		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)
+			return;
+		Player player = Player.m_localPlayer;
+		if ((Object)(object)player == (Object)null)
+			return;
+		Inventory playerInv = ((Humanoid)player).GetInventory();
+		if (playerInv == null)
+			return;
+		System.Collections.Generic.HashSet<string> keep = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+		if ((Object)(object)newPiece != (Object)null && newPiece.m_resources != null)
+		{
+			foreach (Requirement val in newPiece.m_resources)
+			{
+				if (val?.m_resItem?.m_itemData?.m_shared != null)
+					keep.Add(val.m_resItem.m_itemData.m_shared.m_name);
+			}
+		}
+		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);
+		foreach (string name in names)
+		{
+			int amt;
+			_aheadStock.TryGetValue(name, out amt);
+			_aheadStock.Remove(name);
+			Container src;
+			_aheadSource.TryGetValue(name, out src);
+			_aheadSource.Remove(name);
+			if (keep.Contains(name) || amt <= 0)
+				continue;
+			if ((Object)(object)src == (Object)null || src.GetInventory() == null)
+				continue;
+			if (!ChestTxService.IsShared(src) && !src.IsOwner())
+				continue;
+			int give = playerInv.CountItems(name, -1, true);
+			if (give > amt)
+				give = amt;
+			if (give <= 0)
+				continue;
+			TxOpCall call = new TxOpCall();
+			call.Op = TxOp.AddBatch;
+			call.EnforceRule = true;
+			foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
+			{
+				if (give <= 0)
+					break;
+				if (item == null || item.m_shared == null || item.m_shared.m_questItem)
+					continue;
+				if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
+					continue;
+				int n = give < item.m_stack ? give : item.m_stack;
+				TxOpItem op = ChestTxService.SnapshotAuto(item, n);
+				if (op == null)
+					continue;
+				call.Items.Add(op);
+				give -= n;
+			}
+			if (call.Items.Count == 0)
+				continue;
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] returning ahead-staged " + name + " to chest"));
+			ChestTxService.SubmitCall(src, call, playerInv, null);
+		}
+	}
+
 	// TEMP-DIAG(build-stall): remove after diagnosis.
 	private static float _stagedSplitNext;
 	internal static void LogStagedSplit(Player player, Piece piece)
@@ -766,7 +875,22 @@ internal static class NearbyResourceService
 				call.Items.Add(op);
 				call.RespectReserves = true;
 				Inventory playerInv = ((Humanoid)player).GetInventory();
-				ChestTxService.SubmitTakePrefetch(container, call, playerInv);
+				if (ignoreCooldown)
+				{
+					Container srcBox = container;
+					string wantName = name;
+					ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
+					{
+						if (landed == null)
+							return;
+						foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
+							NoteAheadLanded(kv.Key, kv.Value, srcBox);
+					});
+				}
+				else
+				{
+					ChestTxService.SubmitTakePrefetch(container, call, playerInv);
+				}
 				missing -= n;
 			}
 		}

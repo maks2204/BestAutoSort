@@ -477,7 +477,7 @@ namespace BestAutoSort.Tx
             });
         }
 
-        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1)
+        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1, Action<System.Collections.Generic.Dictionary<string, int>> onPlaced = null)
         {
             LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
@@ -501,6 +501,7 @@ namespace BestAutoSort.Tx
                 }
                 // Per-item isolation: one broken entry must not void the rest —
                 // anything uncredited is sent back instead of being lost.
+                System.Collections.Generic.Dictionary<string, int> _placedByName = null;
                 for (int i = 0; i < count; i++)
                 {
                     int prefabHash = 0;
@@ -530,6 +531,14 @@ namespace BestAutoSort.Tx
                             continue;
                         }
                         int placed = TxInventory.AddTakeAndCount(dstInv, item, wantDstX, wantDstY);
+                        if (placed > 0 && onPlaced != null && item.m_shared != null)
+                        {
+                            if (_placedByName == null)
+                                _placedByName = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
+                            int cur;
+                            _placedByName.TryGetValue(item.m_shared.m_name, out cur);
+                            _placedByName[item.m_shared.m_name] = cur + placed;
+                        }
                         if (placed < accepted)
                         {
                             // Did not fit the inventory: send the remainder back to the chest.
@@ -552,6 +561,10 @@ namespace BestAutoSort.Tx
                             TxLog.Error("take completion entry " + i + " compensation failed: " + ex2.Message);
                         }
                     }
+                }
+                if (_placedByName != null && _placedByName.Count > 0 && onPlaced != null)
+                {
+                    try { onPlaced(_placedByName); } catch { }
                 }
             }
             if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
@@ -633,11 +646,11 @@ namespace BestAutoSort.Tx
         /// Take for prefetch/automation: received items land in dstInv (CompleteTake),
         /// shortfall/failure handled via compensation and refresh inside.
         /// </summary>
-        internal static void SubmitTakePrefetch(Container container, TxOpCall call, Inventory dstInv)
+        internal static void SubmitTakePrefetch(Container container, TxOpCall call, Inventory dstInv, Action<System.Collections.Generic.Dictionary<string, int>> onLanded = null)
         {
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, null);
+                CompleteTake(dstInv, pkg, status, rev, container, null, -1, -1, onLanded);
             });
         }
 

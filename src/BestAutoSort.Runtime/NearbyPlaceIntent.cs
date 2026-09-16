@@ -43,6 +43,8 @@ internal static class NearbyPlaceIntent
 		return (Object)(object)_piece != (Object)null && (Object)(object)_piece == (Object)(object)piece && Time.realtimeSinceStartup < _deadline;
 	}
 
+	private static Piece? _lastSelected;
+
 	internal static void Pump()
 	{
 		if ((Object)(object)_piece == (Object)null)
@@ -52,6 +54,18 @@ internal static class NearbyPlaceIntent
 		{
 			Clear();
 			return;
+		}
+		try
+		{
+			Piece cur = player.GetSelectedPiece();
+			if ((Object)(object)cur != (Object)(object)_lastSelected)
+			{
+				_lastSelected = cur;
+				NearbyResourceService.ReturnAheadStock(cur);
+			}
+		}
+		catch
+		{
 		}
 		if (Time.realtimeSinceStartup >= _deadline)
 		{
@@ -95,6 +109,7 @@ internal static class NearbyPlaceIntent
 			// counts player + owned chests, but vanilla ConsumeResources only sees
 			// the player inventory (free/discount build otherwise).
 			NearbyResourceService.ConsumeRequirements(player, piece.m_resources, 0, -1, 1);
+			NearbyResourceService.NoteAheadConsumed(piece);
 			// Pipeline the next piece: the just-consumed stock must be re-staged
 			// NOW, otherwise the next click inside the 2 s prefetch window submits
 			// nothing (throttled) and its intent starves until the deadline.

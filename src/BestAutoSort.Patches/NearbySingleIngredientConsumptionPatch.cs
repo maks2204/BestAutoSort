@@ -26,7 +26,8 @@ internal static class NearbySingleIngredientConsumptionPatch
 		{
 			return true;
 		}
-		NearbyResourceService.ConsumeItem(player, name, amount, itemQuality);
+		int taken = NearbyResourceService.ConsumeItem(player, name, amount, itemQuality);
+		NearbyResourceService.DecrementAhead(name, taken);
 		return false;
 	}
 }

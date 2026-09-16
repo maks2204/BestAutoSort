@@ -45,6 +45,8 @@ internal static class NearbyPlaceIntent
 
 	private static Piece? _lastSelected;
 
+	private static bool _hadGhost;
+
 	internal static void Pump()
 	{
 		Player player = Player.m_localPlayer;
@@ -64,6 +66,20 @@ internal static class NearbyPlaceIntent
 				_lastSelected = cur;
 				NearbyResourceService.ReturnAheadStock(cur);
 			}
+		}
+		catch
+		{
+		}
+		// Hammer put away (or weapon equipped): the selected piece persists, so
+		// the change tracker above never fires — watch the placement ghost.
+		// Ghost gone while ahead stock lingers: return everything.
+		try
+		{
+			GameObject ghost = (PlacementGhostField != null) ? (PlacementGhostField.GetValue(player) as GameObject) : null;
+			bool ghostNow = (Object)(object)ghost != (Object)null;
+			if (_hadGhost && !ghostNow)
+				NearbyResourceService.ReturnAheadStock(null);
+			_hadGhost = ghostNow;
 		}
 		catch
 		{

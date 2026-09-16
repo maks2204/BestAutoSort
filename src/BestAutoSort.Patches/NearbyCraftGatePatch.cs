@@ -32,6 +32,7 @@ internal static class NearbyCraftGatePatch
 			if (!NearbyResourceService.HasStagedMats(player, recipe, quality, multi))
 			{
 				Plugin.LogInstance.LogInfo((object)"[ChestTX] craft gated: staged mats not landed yet, press again");
+				TxGui.TellPlayer("Fetching mats from nearby chests - press Craft again");
 				return false;
 			}
 			return true;

@@ -182,7 +182,8 @@ internal static class NearbyResourceService
 
 	/// <summary>
 	/// Press-time staging: submit Take prefetches for the locally-missing part.
-	/// Called once per placement click (2s per-name throttle inside PrefetchMissing).
+	/// Called once per placement click (2s per-name throttle inside PrefetchMissing,
+	/// bypassed but stamp-refreshed when ignoreCooldown stages a full set ahead).
 	/// </summary>
 	internal static void StageMissingForPiece(Player player, Piece piece, bool ignoreCooldown = false)
 	{

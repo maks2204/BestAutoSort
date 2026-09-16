@@ -37,11 +37,8 @@ internal static class NearbyPlaceGatePatch
 		catch
 		{
 		}
-		if (NearbyResourceService.HasStagedMatsForPiece(__instance, piece))
-			return true;
-		// Not staged: the click's own HaveRequirements already submitted the
-		// prefetch (selected piece). Defer placement until mats land, unless the
-		// ghost spot itself is invalid (let vanilla report it).
+		// Invalid ghost first: vanilla rejects without consuming, so no ahead
+		// staging for such clicks (or every obstructed click would strand a set).
 		try
 		{
 			if (PlacementStatusField != null && (Player.PlacementStatus)PlacementStatusField.GetValue(__instance) != Player.PlacementStatus.Valid)
@@ -50,6 +47,15 @@ internal static class NearbyPlaceGatePatch
 		catch
 		{
 		}
+		if (NearbyResourceService.HasStagedMatsForPiece(__instance, piece))
+		{
+			// Gate passed: vanilla places AND consumes NOW (Pump uninvolved), so
+			// pipeline the next full set here — otherwise the next click starves.
+			NearbyResourceService.StageMissingForPiece(__instance, piece, true);
+			return true;
+		}
+		// Not staged: the click's own HaveRequirements already submitted the
+		// prefetch (selected piece). Defer placement until mats land.
 		if (NearbyPlaceIntent.HasIntentFor(piece))
 			return false;
 		NearbyResourceService.StageMissingForPiece(__instance, piece);

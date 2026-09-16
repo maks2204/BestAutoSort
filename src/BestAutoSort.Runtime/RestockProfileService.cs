@@ -266,6 +266,7 @@ internal static class RestockProfileService
 		Inventory inventory2 = container.GetInventory();
 		if (inventory2 == null)
 			return num;
+		bool moved = false;
 		foreach (ItemData item3 in new List<ItemData>(inventory2.GetAllItems()))
 		{
 			if (num == 0)
@@ -288,7 +289,14 @@ internal static class RestockProfileService
 					dictionary.Add(container, value);
 				}
 				value.Add(new TransferRecord(item3.m_shared.m_name, item3.GetIcon(), num2, item3.m_shared.m_maxStackSize));
+				moved = true;
 			}
+		}
+		if (moved)
+		{
+			// Owned chest mutated directly (no tx queue): persist like the manager.
+			TxReflect.UpdateRows(container);
+			TxReflect.SaveContainer(container);
 		}
 		return num;
 	}

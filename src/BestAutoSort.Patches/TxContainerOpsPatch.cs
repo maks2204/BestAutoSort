@@ -52,6 +52,9 @@ namespace BestAutoSort.Patches
             List<TxOpItem> items = new List<TxOpItem>();
             foreach (ItemData item in new List<ItemData>(chestInv.GetAllItems()))
             {
+                // Quest items stay: click-move paths block them, TakeAll must agree.
+                if (item != null && item.m_shared != null && item.m_shared.m_questItem)
+                    continue;
                 TxOpItem op = ChestTxService.SnapshotItem(item, item.m_stack, -1, -1);
                 if (op != null)
                     items.Add(op);
@@ -154,6 +157,27 @@ namespace BestAutoSort.Patches
             ZNetView denyView = TxReflect.GetNetView(__instance);
             if (denyView != null)
                 denyView.InvokeRPC(uid, "RPC_StackResponse", new object[1] { false });
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Guard: a direct RPC_RequestTakeAll in shared mode is denied —
+    /// take-all runs only through ChestTX (otherwise the mutation is unserialized).
+    /// Mirrors TxContainerStackRpcPatch.
+    /// </summary>
+    [HarmonyPatch(typeof(Container), "RPC_RequestTakeAll")]
+    internal static class TxContainerTakeAllRpcPatch
+    {
+        private static bool Prefix(Container __instance, long uid, long playerID)
+        {
+            if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+                return true;
+            if (TxOpsGuard.FeedBusy(__instance))
+                return false;
+            ZNetView denyView = TxReflect.GetNetView(__instance);
+            if (denyView != null)
+                denyView.InvokeRPC(uid, "RPC_TakeAllResponse", new object[1] { false });
             return false;
         }
     }

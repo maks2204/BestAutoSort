@@ -182,9 +182,10 @@ internal static class NearbyResourceService
 
 	/// <summary>
 	/// Press-time staging: submit Take prefetches for the locally-missing part.
-	/// Called once per placement click (2s per-name throttle inside PrefetchMissing).
+	/// Called once per placement click (2s per-name throttle inside PrefetchMissing,
+	/// bypassed but stamp-refreshed when ignoreCooldown stages a full set ahead).
 	/// </summary>
-	internal static void StageMissingForPiece(Player player, Piece piece)
+	internal static void StageMissingForPiece(Player player, Piece piece, bool ignoreCooldown = false)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value || (Object)(object)player != (Object)(object)Player.m_localPlayer)
 			return;
@@ -196,14 +197,208 @@ internal static class NearbyResourceService
 			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
 			{
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
+				if (ignoreCooldown)
+				{
+					// Ahead staging: the caller just consumed (or is consuming) one
+					// full set, so request a full set regardless of local stock.
+					// (On a staged gate-pass local stock trivially covers the set,
+					// so a missing-only request would always be a no-op here.)
+					PrefetchMissing(player, name, -1, val.m_amount, true);
+					continue;
+				}
 				int localOnly = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
 				if (localOnly < val.m_amount)
-					PrefetchMissing(player, name, -1, val.m_amount - localOnly);
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly, false);
 			}
 		}
 	}
 
-	internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)
+	// Ahead-stage ledger: pipelined (post-click/post-place) stages request full sets
+	// that land in the player inventory. When the selected piece changes, the
+	// unconsumed remainder goes back to the source chest instead of lingering.
+	private static readonly System.Collections.Generic.Dictionary<string, int> _aheadStock = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
+	private static readonly System.Collections.Generic.Dictionary<string, Container> _aheadSource = new System.Collections.Generic.Dictionary<string, Container>(System.StringComparer.Ordinal);
+
+	internal static void NoteAheadLanded(string name, int amount, Container source)
+	{
+		if (string.IsNullOrEmpty(name) || amount <= 0)
+			return;
+		int cur;
+		_aheadStock.TryGetValue(name, out cur);
+		_aheadStock[name] = cur + amount;
+		if ((Object)(object)source != (Object)null)
+			_aheadSource[name] = source;
+		// Late landing after a piece switch: the switch-time return already ran
+		// without this stock (it wasn't landed yet). Offer it back immediately —
+		// keep-set aware, so active building (same piece selected) is unaffected.
+		try
+		{
+			Player player = Player.m_localPlayer;
+			Piece selected = (Object)(object)player != (Object)null ? player.GetSelectedPiece() : null;
+			ReturnAheadStock(selected);
+		}
+		catch
+		{
+		}
+	}
+
+	internal static void DecrementAhead(string name, int amount)
+	{
+		if (string.IsNullOrEmpty(name) || amount <= 0 || _aheadStock.Count == 0)
+			return;
+		int cur;
+		if (!_aheadStock.TryGetValue(name, out cur))
+			return;
+		cur -= amount;
+		if (cur <= 0)
+		{
+			_aheadStock.Remove(name);
+			_aheadSource.Remove(name);
+		}
+		else
+		{
+			_aheadStock[name] = cur;
+		}
+	}
+
+	internal static void ReturnAheadStock(Piece newPiece)
+	{
+		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)
+			return;
+		Player player = Player.m_localPlayer;
+		if ((Object)(object)player == (Object)null)
+			return;
+		Inventory playerInv = ((Humanoid)player).GetInventory();
+		if (playerInv == null)
+			return;
+		System.Collections.Generic.HashSet<string> keep = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+		if ((Object)(object)newPiece != (Object)null && newPiece.m_resources != null)
+		{
+			foreach (Requirement val in newPiece.m_resources)
+			{
+				if (val?.m_resItem?.m_itemData?.m_shared != null)
+					keep.Add(val.m_resItem.m_itemData.m_shared.m_name);
+			}
+		}
+		System.Collections.Generic.List<Container> nearby = new System.Collections.Generic.List<Container>(GetEligibleContainers(((Component)player).transform.position));
+		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);
+		foreach (string name in names)
+		{
+			if (keep.Contains(name))
+				continue;
+			int amt;
+			_aheadStock.TryGetValue(name, out amt);
+			_aheadStock.Remove(name);
+			Container src;
+			_aheadSource.TryGetValue(name, out src);
+			_aheadSource.Remove(name);
+			if (amt <= 0)
+				continue;
+			int give = playerInv.CountItems(name, -1, true);
+			if (give > amt)
+				give = amt;
+			if (give <= 0)
+				continue;
+			// Cascade like quick-stack: source first, then other nearby chests
+			// (source may be full, rule-locked or gone). Whatever fits nowhere
+			// stays in the player inventory — never voided, never forced.
+			System.Collections.Generic.List<Container> targets = new System.Collections.Generic.List<Container>();
+			if (IsReturnTarget(src))
+				targets.Add(src);
+			foreach (Container c in nearby)
+			{
+				if ((Object)(object)c != (Object)null && (Object)(object)c != (Object)(object)src && IsReturnTarget(c) && !targets.Contains(c))
+					targets.Add(c);
+			}
+			if (targets.Count == 0)
+				continue;
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] returning ahead-staged " + name + " to " + targets.Count + " chest(s)"));
+			ReturnToChests(playerInv, name, give, targets, 0, src);
+		}
+	}
+
+	private static bool IsReturnTarget(Container c)
+	{
+		// Strictly IsShared: Submit drops non-shared containers without invoking
+		// onDone, which would stall the cascade (owner fast path lives behind
+		// the same gate). Remainder safely stays in the player inventory then.
+		if ((Object)(object)c == (Object)null || c.GetInventory() == null)
+			return false;
+		return ChestTxService.IsShared(c);
+	}
+
+	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)
+	{
+		if (playerInv == null || remaining <= 0)
+			return;
+		// The source chest gets an unconditional put-back: the stock was taken
+		// from there seconds ago (takes may have drained its last seed, so a
+		// rule check would now reject its own items everywhere). Others keep
+		// EnforceRule=true so ruled chests are never polluted.
+		while (index < targets.Count && !IsReturnTarget(targets[index]))
+			index++;
+		if (index >= targets.Count)
+			return;
+		Container dst = targets[index];
+		System.Collections.Generic.List<TxOpItem> ops = new System.Collections.Generic.List<TxOpItem>();
+		int want = remaining;
+		foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
+		{
+			if (want <= 0)
+				break;
+			if (item == null || item.m_shared == null || item.m_shared.m_questItem)
+				continue;
+			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
+				continue;
+			int n = want < item.m_stack ? want : item.m_stack;
+			TxOpItem op = ChestTxService.SnapshotAuto(item, n);
+			if (op == null)
+				continue;
+			ops.Add(op);
+			want -= n;
+		}
+		if (ops.Count == 0)
+			return;
+		// SubmitCall fans out Items.Count>4 into parallel chunk submits with one
+		// onDone per chunk — advancing the chest index per chunk would fork
+		// duplicate cascades with split remainders. Send <=4 sequentially and
+		// advance only after the whole chest share is accounted.
+		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index, source);
+	}
+
+	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)
+	{
+		if (playerInv == null || !IsReturnTarget(dst))
+		{
+			ReturnToChests(playerInv, name, remaining - movedSoFar, targets, index + 1, source);
+			return;
+		}
+		TxOpCall call = new TxOpCall();
+		call.Op = TxOp.AddBatch;
+		call.EnforceRule = !((Object)(object)dst != (Object)null && (Object)(object)dst == (Object)(object)source);
+		int to = from + 4;
+		if (to > ops.Count)
+			to = ops.Count;
+		for (int i = from; i < to; i++)
+			call.Items.Add(ops[i]);
+		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records)
+		{
+			int moved = movedSoFar;
+			if (records != null)
+			{
+				foreach (TransferRecord r in records)
+				{
+					if (r != null)
+						moved += r.Amount;
+				}
+			}
+			if (to < ops.Count)
+				SendReturnChunks(playerInv, dst, name, ops, to, moved, remaining, targets, index, source);
+			else
+				ReturnToChests(playerInv, name, remaining - moved, targets, index + 1, source);
+		});
+	}
+internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)
 	{
 		missing = "";
 		if ((Object)(object)player == (Object)null || (Object)(object)piece == (Object)null)
@@ -370,7 +565,13 @@ internal static class NearbyResourceService
 				int num = val.GetAmount(qualityLevel) * multiplier;
 				if (num > 0)
 				{
-					ConsumeItem(player, val.m_resItem.m_itemData.m_shared.m_name, num, itemQuality);
+					// Single source of truth for the ahead ledger: every chest-aware
+					// consumption (craft, upgrade, build, single-ingredient) decrements
+					// what it actually took, so a later piece-switch never returns
+					// stock consumed elsewhere.
+					string reqName = val.m_resItem.m_itemData.m_shared.m_name;
+					int taken = ConsumeItem(player, reqName, num, itemQuality);
+					DecrementAhead(reqName, taken);
 				}
 			}
 		}
@@ -446,6 +647,8 @@ internal static class NearbyResourceService
 						{
 							loan = new ProductionItemLoan(container, val, loanedItem);
 							LogProductionDiagnostic(production, "Pulled " + name + " from " + ((Object)container).name + " for " + ((Object)production).name + ".", warning: false);
+							TxReflect.UpdateRows(container);
+							TxReflect.SaveContainer(container);
 							return true;
 						}
 						num3++;
@@ -494,6 +697,8 @@ internal static class NearbyResourceService
 							{
 								loan = new ProductionItemLoan(container, val, loanedItem);
 								LogProductionDiagnostic(production, "Pulled " + preferredName + " from " + ((Object)container).name + " for " + ((Object)production).name + ".", warning: false);
+								TxReflect.UpdateRows(container);
+								TxReflect.SaveContainer(container);
 								return true;
 							}
 							num3++;
@@ -653,16 +858,22 @@ internal static class NearbyResourceService
 	/// Prefetch missing material from foreign chests into the player inventory.
 	/// Called from requirement checks (2s throttle per name). The manager re-validates.
 	/// </summary>
-	internal static void PrefetchMissing(Player player, string name, int quality, int missing)
+	internal static void PrefetchMissing(Player player, string name, int quality, int missing, bool ignoreCooldown = false)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value || missing <= 0)
 			return;
 		if ((Object)(object)player != (Object)(object)Player.m_localPlayer)
 			return;
 		float now = Time.realtimeSinceStartup;
-		float next;
-		if (PrefetchCooldown.TryGetValue(name, out next) && now < next)
-			return;
+		if (!ignoreCooldown)
+		{
+			float next;
+			if (PrefetchCooldown.TryGetValue(name, out next) && now < next)
+				return;
+		}
+		// The stamp is always refreshed: a pipelined (post-placement) stage counts
+		// as the in-flight request, so the next click inside the window does not
+		// submit a duplicate on top of mats that are already coming.
 		PrefetchCooldown[name] = now + 2f;
 		int wanted = missing;
 		int skippedLease = 0;
@@ -714,7 +925,18 @@ internal static class NearbyResourceService
 				call.Items.Add(op);
 				call.RespectReserves = true;
 				Inventory playerInv = ((Humanoid)player).GetInventory();
-				ChestTxService.SubmitTakePrefetch(container, call, playerInv);
+				// Every prefetch landing is ledger-tracked (ahead AND first-click
+				// defer stages): consumption decrements globally, so an abandoned
+				// stock — built or not — is returnable. Production borrows use
+				// their own path (invisibly consumed) and stay untracked.
+				Container srcBox = container;
+				ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
+				{
+					if (landed == null)
+						return;
+					foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
+						NoteAheadLanded(kv.Key, kv.Value, srcBox);
+				});
 				missing -= n;
 			}
 		}

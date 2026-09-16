@@ -43,16 +43,52 @@ internal static class NearbyPlaceIntent
 		return (Object)(object)_piece != (Object)null && (Object)(object)_piece == (Object)(object)piece && Time.realtimeSinceStartup < _deadline;
 	}
 
+	private static Piece? _lastSelected;
+
+	private static bool _hadGhost;
+
 	internal static void Pump()
 	{
-		if ((Object)(object)_piece == (Object)null)
-			return;
 		Player player = Player.m_localPlayer;
 		if ((Object)(object)player == (Object)null || player.IsTeleporting() || ((Humanoid)player).IsDead())
 		{
 			Clear();
 			return;
 		}
+		// Selection tracking runs independent of any pending intent: the common
+		// gate-pass pipeline (place → stage, no Store) would otherwise never
+		// trigger the return when the piece changes.
+		try
+		{
+			Piece cur = player.GetSelectedPiece();
+			if ((Object)(object)cur != (Object)(object)_lastSelected)
+			{
+				_lastSelected = cur;
+				NearbyResourceService.ReturnAheadStock(cur);
+			}
+		}
+		catch
+		{
+		}
+		// Hammer put away (or weapon equipped): the selected piece persists, so
+		// the change tracker above never fires — watch the placement ghost.
+		// Ghost gone while ahead stock lingers: return everything.
+		try
+		{
+			GameObject ghost = (PlacementGhostField != null) ? (PlacementGhostField.GetValue(player) as GameObject) : null;
+			bool ghostNow = (Object)(object)ghost != (Object)null;
+			if (_hadGhost && !ghostNow)
+			{
+				NearbyResourceService.ReturnAheadStock(null);
+				Clear();
+			}
+			_hadGhost = ghostNow;
+		}
+		catch
+		{
+		}
+		if ((Object)(object)_piece == (Object)null)
+			return;
 		if (Time.realtimeSinceStartup >= _deadline)
 		{
 			Clear();
@@ -86,7 +122,18 @@ internal static class NearbyPlaceIntent
 		{
 		}
 		if (!free)
-			player.ConsumeResources(piece.m_resources, 0);
+		{
+			// Chest-aware consumption (same as the upgrade path): the gate above
+			// counts player + owned chests, but vanilla ConsumeResources only sees
+			// the player inventory (free/discount build otherwise).
+			NearbyResourceService.ConsumeRequirements(player, piece.m_resources, 0, -1, 1);
+			// Pipeline the next piece: the just-consumed stock must be re-staged
+			// NOW, otherwise the next click inside the 2 s prefetch window submits
+			// nothing (throttled) and its intent starves until the deadline.
+			// Cooldown check is bypassed (the want is certain), the stamp is kept
+			// so the next click does not duplicate the in-flight request.
+			NearbyResourceService.StageMissingForPiece(player, piece, true);
+		}
 	}
 
 	internal static void Clear()

@@ -19,9 +19,15 @@ namespace BestAutoSort.Patches
             bool leased = AutoFeedService.IsLocked(__instance);
             if (leased)
             {
-                // View-only open during feeding: watching is harmless (viewer reloads
-                // bytes, flicker at worst); mutations stay lease-gated in Submit/IsShared.
-                Plugin.LogInstance.LogInfo((object)("[ChestTX] open granted during autofeed lease (view-only) for peer=" + uid));
+                // Authoritative deny during feeding: falling through would run the
+                // vanilla path (IsShared is false under lease) and transfer ZDO
+                // ownership mid-feed. Watching stays available to already-open
+                // viewers via lease-aware ShouldRender; mutations stay lease-gated.
+                Plugin.LogInstance.LogInfo((object)("[ChestTX] open denied (autofeed lease) for peer=" + uid));
+                ZNetView leaseView = TxReflect.GetNetView(__instance);
+                if (leaseView != null)
+                    leaseView.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
+                return false;
             }
             if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
             {

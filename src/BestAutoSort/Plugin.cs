@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace BestAutoSort;
 
-[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.2.0")]
+[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.3.1")]
 [BepInProcess("valheim.exe")]
 [BepInProcess("valheim_server.exe")]
 [BepInIncompatibility("goldenrevolver.quick_stack_store")]
@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.2.0";
+	internal const string PluginVersion = "0.3.1";
 
 
 	private Harmony? _harmony;
@@ -171,6 +171,9 @@ public sealed class Plugin : BaseUnityPlugin
 	internal static void SortLocal(Container container)
 	{
 		int num = InventorySorter.Sort(container.GetInventory(), ModConfig.ChestSortMode.Value, ModConfig.SortDescending.Value);
+		// Owned chest mutated directly: persist the new order like the manager.
+		TxReflect.UpdateRows(container);
+		TxReflect.SaveContainer(container);
 		Player localPlayer2 = Player.m_localPlayer;
 		if (localPlayer2 != null)
 		{

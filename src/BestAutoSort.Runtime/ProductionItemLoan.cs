@@ -53,6 +53,9 @@ internal sealed class ProductionItemLoan
 		if ((Object)(object)_source != (Object)null && _source.IsOwner())
 		{
 			_source.GetInventory().MoveItemToThis(inventory, _item, _item.m_stack, -1, -1);
+			// Owned chest mutated directly (no tx queue): persist like the manager.
+			TxReflect.UpdateRows(_source);
+			TxReflect.SaveContainer(_source);
 			if (!inventory.GetAllItems().Contains(_item))
 			{
 				return;

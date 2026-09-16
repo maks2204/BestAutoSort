@@ -150,8 +150,9 @@ namespace BestAutoSort.Tx
                 TxLog.Info("tx=" + txId + " late-duplicate ignored (already completed)");
                 return;
             }
-            Pending.Remove(txId);
-            ReleaseClaimed(pending.Claimed);
+            // NOTE: Pending is removed only by a terminal completion below. Decode
+            // failures keep it alive and force a re-query: the manager still holds
+            // the cached result, so dropping the bytes must never void items.
             TxLog.Info("tx=" + txId + " response status=" + status + " rev=" + revision + (totalsOnly ? " totals-only" : ""));
             ZPackage body;
             try
@@ -162,16 +163,52 @@ namespace BestAutoSort.Tx
             {
                 TxLog.Warn("tx=" + txId + " response body unreadable: " + ex.Message);
                 RefreshNow(pending.Container);
+                if (!ForceRefetch(txId))
+                    FinalizeUnknownTx(txId);
                 return;
             }
             pkg = body;
             if (totalsOnly && IsTakeOp(pending.Op))
             {
-                // Totals-only Take results after handoff carry no items: nothing to complete with.
-                TellPlayer("Could not confirm chest contents after reconnect. Check the chest.");
+                // Totals-only Take results after handoff carry no items: nothing to
+                // complete with. Loud, never silent: the chest was debited and the
+                // client holds nothing.
+                Pending.Remove(txId);
+                ReleaseClaimed(pending.Claimed);
+                TxLog.Warn("tx=" + txId + " totals-only Take: applied but items unrecoverable from cache");
+                TellPlayer("Chest applied the move but the items cannot be recovered. Check the chest.");
                 RefreshNow(pending.Container);
                 return;
             }
+            if (totalsOnly && !IsTakeOp(pending.Op) && pending.ExpectedItems > 1)
+            {
+                // A totals-only AddBatch body is [1][total]: unattributable across
+                // items. Removing [total,0,...] would over-remove the first key.
+                Pending.Remove(txId);
+                ReleaseClaimed(pending.Claimed);
+                TxLog.Warn("tx=" + txId + " totals-only multi-add: applied but per-item counts unknown");
+                TellPlayer("Chest applied the move but per-item counts are unknown. Check the chest before retrying.");
+                RefreshNow(pending.Container);
+                return;
+            }
+            if (!totalsOnly && IsTakeOp(pending.Op) && !TakeBodyReadable(pkg))
+            {
+                TxLog.Warn("tx=" + txId + " take body corrupt: re-querying instead of voiding");
+                RefreshNow(pending.Container);
+                if (!ForceRefetch(txId))
+                    FinalizeUnknownTx(txId);
+                return;
+            }
+            if (!totalsOnly && !IsTakeOp(pending.Op) && pending.ExpectedItems >= 0 && !AddBodyMatchesArity(pkg, pending.ExpectedItems))
+            {
+                TxLog.Warn("tx=" + txId + " add body corrupt: re-querying instead of misattributing");
+                RefreshNow(pending.Container);
+                if (!ForceRefetch(txId))
+                    FinalizeUnknownTx(txId);
+                return;
+            }
+            Pending.Remove(txId);
+            ReleaseClaimed(pending.Claimed);
             try
             {
                 if (pending.OnResponse != null)
@@ -185,6 +222,100 @@ namespace BestAutoSort.Tx
         }
 
         // ============================ client: completions ============================
+
+        /// <summary>
+        /// Re-fetch a cached result for an undecided tx: sends one last Query and
+        /// extends the deadline once. Returns false when no query is left to spend
+        /// (caller must finalize loud).
+        /// </summary>
+        internal static bool ForceRefetch(long txId)
+        {
+            PendingTx p;
+            if (!Pending.TryGetValue(txId, out p) || p.FinalQuerySent)
+                return false;
+            if ((Object)p.Container == (Object)null)
+                return false;
+            p.FinalQuerySent = true;
+            p.QuerySent = true;
+            SendQuery(p);
+            p.Attempts++;
+            p.Deadline = Time.realtimeSinceStartup + RequestTimeout;
+            p.NextTryAt = Time.realtimeSinceStartup + RequestTimeout;
+            TxLog.Warn("tx=" + txId + " forced re-query (decode/timeout), deadline extended once");
+            return true;
+        }
+
+        /// <summary>
+        /// Terminal indeterminate outcome: loud, never silent. Completions keep the
+        /// safe direction (no credit, no removal); the user must verify the chest.
+        /// Removes the pending entry and releases claims.
+        /// </summary>
+        internal static void FinalizeUnknownTx(long txId)
+        {
+            PendingTx p;
+            if (!Pending.TryGetValue(txId, out p))
+                return;
+            Pending.Remove(txId);
+            ReleaseClaimed(p.Claimed);
+            RefreshNow(p.Container);
+            TxLog.Warn("tx=" + p.TxId + " UNKNOWN op=" + p.Op + " (applied-or-not indeterminate, no queries left)");
+            TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+            try
+            {
+                if (p.OnResponse != null)
+                    p.OnResponse(null, TxStatus.UnknownTx, 0u);
+            }
+            catch (Exception ex)
+            {
+                TxLog.Error("tx=" + p.TxId + " unknown completion failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>Structural walk of a Take body ([count](prefab,item,accepted)); resets pos.</summary>
+        private static bool TakeBodyReadable(ZPackage body)
+        {
+            try
+            {
+                if (body == null)
+                    return false;
+                int n = body.ReadInt();
+                if (n < 0 || n > 4096)
+                    return false;
+                for (int i = 0; i < n; i++)
+                {
+                    body.ReadInt();
+                    body.ReadPackage();
+                    body.ReadInt();
+                }
+                body.SetPos(0);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Structural walk of an Add body ([count][accepted...]); resets pos.</summary>
+        private static bool AddBodyMatchesArity(ZPackage body, int expected)
+        {
+            try
+            {
+                if (body == null)
+                    return false;
+                int n = body.ReadInt();
+                if (n != expected)
+                    return false;
+                for (int i = 0; i < n; i++)
+                    body.ReadInt();
+                body.SetPos(0);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         private static int ReadAcceptedAt(ZPackage pkg, int index)
         {
@@ -264,7 +395,9 @@ namespace BestAutoSort.Tx
             {
                 string name = sent.Snapshot != null && sent.Snapshot.m_shared != null ? sent.Snapshot.m_shared.m_name : null;
                 int quality = sent.Snapshot != null ? sent.Snapshot.m_quality : -1;
-                int removed = TxInventory.RemoveForTake(srcInv, itemRef, name, quality, accepted);
+                int variant = sent.Snapshot != null ? sent.Snapshot.m_variant : -1;
+                float world = sent.Snapshot != null ? sent.Snapshot.m_worldLevel : -1f;
+                int removed = TxInventory.RemoveForTake(srcInv, itemRef, name, quality, accepted, variant, world);
                 TxLog.Info("add-remove accepted=" + accepted + " removed=" + removed);
                 if (removed < accepted)
                 {
@@ -305,36 +438,46 @@ namespace BestAutoSort.Tx
 
         private static void CompensateAddBack(Container container, TxOpItem sent, int amount)
         {
-            if (amount <= 0 || sent == null || sent.Snapshot == null)
+            // Short-removal: the chest materialized `accepted` items but the client
+            // removed fewer. Re-adding the excess would inflate the total (the chest
+            // already holds it). Instead burn the excess chest-side with a corrective
+            // Take: chest C+N-excess + player P-removed == exact conservation in all
+            // cases, wherever the unfound items actually are.
+            if (amount <= 0 || sent == null || sent.Snapshot == null || sent.Snapshot.m_shared == null)
                 return;
-            Player player = Player.m_localPlayer;
-            if ((Object)player == (Object)null)
+            TxOpItem burn = SnapshotAuto(sent.Snapshot, amount);
+            if (burn == null)
                 return;
-            Inventory playerInv = ((Humanoid)player).GetInventory();
-            if (playerInv == null)
-                return;
-            // Find the excess in the player inventory (it is there since removal fell short) and send it back.
-            ItemData live = TxCodec.ResolveIn(playerInv, sent.Snapshot.m_shared.m_name,
-                sent.Snapshot.m_quality, sent.Snapshot.m_variant, sent.Snapshot.m_worldLevel, -1, -1);
-            if (live == null)
+            List<TxOpItem> items = new List<TxOpItem>();
+            items.Add(burn);
+            RequestTakeCustom(container, items, false, delegate (List<DecodedTake> decoded, TxStatus status, uint rev)
             {
-                TxLog.Error("compensation failed: item not found in player inventory");
-                return;
-            }
-            TxOpItem back = SnapshotAuto(live, Math.Min(amount, live.m_stack));
-            if (back == null)
-                return;
-            TxOpCall call = new TxOpCall();
-            call.Op = TxOp.Add;
-            call.Items.Add(back);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
-            {
-                int acc = ReadAcceptedAt(pkg, 0);
-                CompleteAdd(playerInv, live, back, acc, status, rev, container, null);
+                int took = 0;
+                if (decoded != null)
+                {
+                    foreach (DecodedTake dt in decoded)
+                    {
+                        if (dt != null && dt.Accepted > 0)
+                            took += dt.Accepted;
+                    }
+                }
+                if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
+                {
+                    TxLog.Warn("short-removal burn rejected (" + status + "), excess stays in chest");
+                    TellPlayer("Chest could not correct an over-deposit. Check the chest.");
+                }
+                else if (took < amount)
+                {
+                    TxLog.Warn("short-removal burn partial: burned=" + took + " of " + amount);
+                    TellPlayer("Chest could not correct an over-deposit. Check the chest.");
+                }
+                else
+                    TxLog.Info("short-removal burn ok: " + took);
+                RefreshNow(container);
             });
         }
 
-        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone)
+        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1, Action<System.Collections.Generic.Dictionary<string, int>> onPlaced = null)
         {
             LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
@@ -358,6 +501,7 @@ namespace BestAutoSort.Tx
                 }
                 // Per-item isolation: one broken entry must not void the rest —
                 // anything uncredited is sent back instead of being lost.
+                System.Collections.Generic.Dictionary<string, int> _placedByName = null;
                 for (int i = 0; i < count; i++)
                 {
                     int prefabHash = 0;
@@ -386,7 +530,15 @@ namespace BestAutoSort.Tx
                             CompensateTakeBack(container, prefabHash, inner, accepted);
                             continue;
                         }
-                        int placed = TxInventory.AddAndCount(dstInv, item);
+                        int placed = TxInventory.AddTakeAndCount(dstInv, item, wantDstX, wantDstY);
+                        if (placed > 0 && onPlaced != null && item.m_shared != null)
+                        {
+                            if (_placedByName == null)
+                                _placedByName = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
+                            int cur;
+                            _placedByName.TryGetValue(item.m_shared.m_name, out cur);
+                            _placedByName[item.m_shared.m_name] = cur + placed;
+                        }
                         if (placed < accepted)
                         {
                             // Did not fit the inventory: send the remainder back to the chest.
@@ -410,6 +562,10 @@ namespace BestAutoSort.Tx
                         }
                     }
                 }
+                if (_placedByName != null && _placedByName.Count > 0 && onPlaced != null)
+                {
+                    try { onPlaced(_placedByName); } catch { }
+                }
             }
             if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
                 TellPlayer("The shared chest changed. Try again.");
@@ -430,6 +586,7 @@ namespace BestAutoSort.Tx
 
         internal static void CompensateTakeBackItem(Container container, int prefabHash, ItemData item)
         {
+            int wanted = (item != null) ? item.m_stack : 0;
             TxOpItem back = SnapshotAuto(item, item.m_stack);
             if (back == null)
                 return;
@@ -438,9 +595,49 @@ namespace BestAutoSort.Tx
             call.Items.Add(back);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
-                TxLog.Info("compensate-add status=" + status + " accepted=" + ReadAcceptedAt(pkg, 0));
+                int acc = ReadAcceptedAt(pkg, 0);
+                TxLog.Info("compensate-add status=" + status + " accepted=" + acc + " of " + wanted);
+                if (acc < wanted)
+                {
+                    // The orphan must never be voided: keep the unaccepted
+                    // remainder in the player inventory, loudly.
+                    RestoreCompensateLeftover(item, acc);
+                }
                 RefreshNow(container);
             });
+        }
+
+        /// <summary>
+        /// Leftover of a failed compensate-add goes back to the player inventory
+        /// (or drops at their feet when full). Never silently dropped.
+        /// </summary>
+        private static void RestoreCompensateLeftover(ItemData item, int accepted)
+        {
+            if (item == null)
+                return;
+            int leftover = item.m_stack - accepted;
+            if (leftover <= 0)
+                return;
+            Player player = Player.m_localPlayer;
+            Inventory playerInv = (player != null) ? ((Humanoid)player).GetInventory() : null;
+            if (playerInv == null)
+            {
+                TxLog.Error("compensate restore failed: no player inventory, items lost: " + leftover);
+                return;
+            }
+            ItemData rest = item.Clone();
+            rest.m_stack = leftover;
+            CustomDataTags.StripBenign(rest);
+            if (TxInventory.AddAndCount(playerInv, rest) < leftover)
+            {
+                ((Humanoid)player).DropItem(playerInv, rest, leftover);
+                TxLog.Warn("compensate leftover did not fit, dropped at feet: " + leftover);
+            }
+            else
+            {
+                TxLog.Warn("compensate-add short, restored to player: " + leftover);
+            }
+            TellPlayer("Chest could not take back some items. They were returned to you.");
         }
 
         // ============================ client: timeouts / retry / query ============================
@@ -449,11 +646,11 @@ namespace BestAutoSort.Tx
         /// Take for prefetch/automation: received items land in dstInv (CompleteTake),
         /// shortfall/failure handled via compensation and refresh inside.
         /// </summary>
-        internal static void SubmitTakePrefetch(Container container, TxOpCall call, Inventory dstInv)
+        internal static void SubmitTakePrefetch(Container container, TxOpCall call, Inventory dstInv, Action<System.Collections.Generic.Dictionary<string, int>> onLanded = null)
         {
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, null);
+                CompleteTake(dstInv, pkg, status, rev, container, null, -1, -1, onLanded);
             });
         }
 
@@ -582,7 +779,7 @@ namespace BestAutoSort.Tx
                 RefreshNow(container);
                 if (onDone != null)
                     onDone(records, accepted, status);
-            });
+            }, 0L, null, call.Items.Count);
         }
 
         private static List<TransferRecord> FinishBatchCompletion(Container container, Inventory srcInv, TxOpCall call, StoredResult r)
@@ -596,7 +793,9 @@ namespace BestAutoSort.Tx
                 {
                     string name = sent.Snapshot != null && sent.Snapshot.m_shared != null ? sent.Snapshot.m_shared.m_name : null;
                     int quality = sent.Snapshot != null ? sent.Snapshot.m_quality : -1;
-                    int removed = TxInventory.RemoveForTake(srcInv, sent.SourceRef, name, quality, accepted);
+                    int variant = sent.Snapshot != null ? sent.Snapshot.m_variant : -1;
+                    float world = sent.Snapshot != null ? sent.Snapshot.m_worldLevel : -1f;
+                    int removed = TxInventory.RemoveForTake(srcInv, sent.SourceRef, name, quality, accepted, variant, world);
                     if (removed < accepted)
                     {
                         int excess = accepted - removed;
@@ -630,22 +829,23 @@ namespace BestAutoSort.Tx
                 }
                 if (now >= p.Deadline)
                 {
+                    if (!p.FinalQuerySent && (Object)p.Container != (Object)null)
+                    {
+                        // One last query before giving up: a lost response is still
+                        // sitting in the manager cache in the common case.
+                        p.FinalQuerySent = true;
+                        p.QuerySent = true;
+                        SendQuery(p);
+                        p.Attempts++;
+                        p.Deadline = now + RequestTimeout;
+                        p.NextTryAt = now + RequestTimeout;
+                        TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op + " final query sent");
+                        continue;
+                    }
                     if (done == null)
                         done = new List<long>();
                     done.Add(kv.Key);
-                    ReleaseClaimed(p.Claimed);
-                    RefreshNow(p.Container);
-                    TellPlayer("Shared chest request timed out. Try again.");
-                    TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op);
-                    try
-                    {
-                        if (p.OnResponse != null)
-                            p.OnResponse(null, TxStatus.UnknownTx, 0u);
-                    }
-                    catch (Exception ex)
-                    {
-                        TxLog.Error("tx=" + p.TxId + " timeout completion failed: " + ex.Message);
-                    }
+                    FinalizeUnknownTx(kv.Key);
                     continue;
                 }
                 if (now < p.NextTryAt)
@@ -903,6 +1103,7 @@ namespace BestAutoSort.Tx
                     TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(state.Container);
                 }
+                RejectQueued(state);
                 state.Queue.Clear();
                 state.Processed.Clear();
                 state.ProcOrder.Clear();
@@ -918,6 +1119,42 @@ namespace BestAutoSort.Tx
             catch (Exception ex)
             {
                 TxLog.Error("takeover failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Answer queued-but-unapplied jobs before the queue is dropped (handoff /
+        /// structural acquire). Rejected is safe: nothing was applied, so the sender
+        /// retries as a NEW tx instead of hanging to its deadline.
+        /// </summary>
+        internal static void RejectQueued(ChestState state)
+        {
+            if (state == null)
+                return;
+            while (state.Queue.Count > 0)
+            {
+                TxJob job = state.Queue.Dequeue();
+                try
+                {
+                    StoredResult r = new StoredResult();
+                    r.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                    r.Status = TxStatus.Rejected;
+                    try
+                    {
+                        ZNetView nv = TxReflect.GetNetView(state.Container);
+                        r.Revision = (nv != null && nv.IsValid()) ? nv.GetZDO().DataRevision : 0u;
+                    }
+                    catch
+                    {
+                        r.Revision = 0u;
+                    }
+                    if (job.Complete != null)
+                        job.Complete(r);
+                }
+                catch (Exception ex)
+                {
+                    TxLog.Error("tx=" + job.TxId + " reject-queued failed: " + ex.Message);
+                }
             }
         }
 

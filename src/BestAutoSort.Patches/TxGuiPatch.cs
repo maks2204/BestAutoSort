@@ -84,6 +84,25 @@ namespace BestAutoSort.Patches
             }
             return null;
         }
+
+        /// <summary>
+        /// Total stack of an exact key (name+quality+variant+world). Used to measure
+        /// what a Take actually placed: before/after delta, never name+quality alone.
+        /// </summary>
+        internal static int CountInPlayer(Inventory playerInv, string name, int quality, int variant, int world)
+        {
+            if (playerInv == null || string.IsNullOrEmpty(name))
+                return 0;
+            int total = 0;
+            foreach (ItemData it in playerInv.GetAllItems())
+            {
+                if (it != null && it.m_shared != null
+                    && string.Equals(it.m_shared.m_name, name, StringComparison.Ordinal)
+                    && it.m_quality == quality && it.m_variant == variant && it.m_worldLevel == world)
+                    total += it.m_stack;
+            }
+            return total;
+        }
     }
 
     [HarmonyPatch(typeof(InventoryGui), "OnSelectedItem")]
@@ -199,7 +218,7 @@ namespace BestAutoSort.Patches
             }
             if (targetInv != chestInv && dragInv == chestInv)
             {
-                ChestTxService.RequestTake(container, targetInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null);
+                ChestTxService.RequestTake(container, targetInv, dragItem, Math.Min(dragAmount, dragItem.m_stack), null, pos.x, pos.y);
                 TxGui.CancelDrag(gui);
                 return;
             }
@@ -236,6 +255,9 @@ namespace BestAutoSort.Patches
             List<TxOpItem> items = new List<TxOpItem>();
             foreach (ItemData it in new List<ItemData>(chestInv.GetAllItems()))
             {
+                // Quest items stay: click-move paths block them, TakeAll must agree.
+                if (it != null && it.m_shared != null && it.m_shared.m_questItem)
+                    continue;
                 TxOpItem op = ChestTxService.SnapshotItem(it, it.m_stack, -1, -1);
                 if (op != null)
                     items.Add(op);
@@ -342,6 +364,8 @@ namespace BestAutoSort.Patches
                 return false;
             if (grid.GetInventory() != container.GetInventory())
                 return true;
+            if (item != null && item.m_shared != null && item.m_shared.m_questItem)
+                return true;
             if (container.IsOwner())
             {
                 ChestTxService.DrainForLocal(container);
@@ -356,12 +380,20 @@ namespace BestAutoSort.Patches
             // Use from the chest: Take the full stack, then Use your own copy.
             string name = item.m_shared != null ? item.m_shared.m_name : null;
             int quality = item.m_quality;
+            int variant = item.m_variant;
+            int world = item.m_worldLevel;
+            int before = TxGui.CountInPlayer(playerInv, name, quality, variant, world);
             ChestTxService.RequestTake(container, playerInv, item, item.m_stack,
                 delegate (ZPackage pkg, TxStatus status, uint rev)
                 {
                     if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
                         return;
-                    ItemData mine = TxGui.FindInPlayer(playerInv, name, quality);
+                    // Only Use what this take actually placed: a compensated take
+                    // (full inventory) must not consume the player's own stack.
+                    int placed = TxGui.CountInPlayer(playerInv, name, quality, variant, world) - before;
+                    if (placed <= 0)
+                        return;
+                    ItemData mine = TxCodec.ResolveIn(playerInv, name, quality, variant, world, -1, -1);
                     if (mine != null)
                         player.UseItem(playerInv, mine, true);
                 });

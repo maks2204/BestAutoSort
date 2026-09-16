@@ -26,6 +26,8 @@ namespace BestAutoSort.Patches
                 return true;
             if (dragInv != container.GetInventory())
                 return true;
+            if (dragItem.m_shared != null && dragItem.m_shared.m_questItem)
+                return true;
             if (container.IsOwner())
             {
                 ChestTxService.DrainForLocal(container);
@@ -39,17 +41,28 @@ namespace BestAutoSort.Patches
             Inventory playerInv = ((Humanoid)player).GetInventory();
             string name = dragItem.m_shared != null ? dragItem.m_shared.m_name : null;
             int quality = dragItem.m_quality;
+            int variant = dragItem.m_variant;
+            int world = dragItem.m_worldLevel;
             int amount = dragAmount < dragItem.m_stack ? dragAmount : dragItem.m_stack;
+            int before = TxGui.CountInPlayer(playerInv, name, quality, variant, world);
             TxGui.CancelDrag(__instance);
             ChestTxService.RequestTake(container, playerInv, dragItem, amount,
                 delegate (ZPackage pkg, TxStatus status, uint rev)
                 {
                     if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
                         return;
-                    ItemData mine = TxGui.FindInPlayer(playerInv, name, quality);
+                    // Drop at most what this take actually placed (before/after delta
+                    // on the exact key): a compensated take (full inventory) must not
+                    // drop the player's own pre-existing stack.
+                    int placed = TxGui.CountInPlayer(playerInv, name, quality, variant, world) - before;
+                    if (placed <= 0)
+                        return;
+                    ItemData mine = TxCodec.ResolveIn(playerInv, name, quality, variant, world, -1, -1);
                     if (mine != null)
                     {
                         int drop = mine.m_stack < amount ? mine.m_stack : amount;
+                        if (drop > placed)
+                            drop = placed;
                         player.DropItem(playerInv, mine, drop);
                     }
                 });

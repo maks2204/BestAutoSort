@@ -47,14 +47,15 @@ internal static class NearbyPlaceIntent
 
 	internal static void Pump()
 	{
-		if ((Object)(object)_piece == (Object)null)
-			return;
 		Player player = Player.m_localPlayer;
 		if ((Object)(object)player == (Object)null || player.IsTeleporting() || ((Humanoid)player).IsDead())
 		{
 			Clear();
 			return;
 		}
+		// Selection tracking runs independent of any pending intent: the common
+		// gate-pass pipeline (place → stage, no Store) would otherwise never
+		// trigger the return when the piece changes.
 		try
 		{
 			Piece cur = player.GetSelectedPiece();
@@ -67,6 +68,8 @@ internal static class NearbyPlaceIntent
 		catch
 		{
 		}
+		if ((Object)(object)_piece == (Object)null)
+			return;
 		if (Time.realtimeSinceStartup >= _deadline)
 		{
 			Clear();
@@ -109,7 +112,6 @@ internal static class NearbyPlaceIntent
 			// counts player + owned chests, but vanilla ConsumeResources only sees
 			// the player inventory (free/discount build otherwise).
 			NearbyResourceService.ConsumeRequirements(player, piece.m_resources, 0, -1, 1);
-			NearbyResourceService.NoteAheadConsumed(piece);
 			// Pipeline the next piece: the just-consumed stock must be re-staged
 			// NOW, otherwise the next click inside the 2 s prefetch window submits
 			// nothing (throttled) and its intent starves until the deadline.

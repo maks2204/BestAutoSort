@@ -230,31 +230,22 @@ internal static class NearbyResourceService
 			_aheadSource[name] = source;
 	}
 
-	internal static void NoteAheadConsumed(Piece piece)
+	internal static void DecrementAhead(string name, int amount)
 	{
-		if ((Object)(object)piece == (Object)null || _aheadStock.Count == 0)
+		if (string.IsNullOrEmpty(name) || amount <= 0 || _aheadStock.Count == 0)
 			return;
-		Requirement[] resources = piece.m_resources;
-		if (resources == null)
+		int cur;
+		if (!_aheadStock.TryGetValue(name, out cur))
 			return;
-		foreach (Requirement val in resources)
+		cur -= amount;
+		if (cur <= 0)
 		{
-			if (val?.m_resItem?.m_itemData?.m_shared == null || val.m_amount <= 0)
-				continue;
-			string name = val.m_resItem.m_itemData.m_shared.m_name;
-			int cur;
-			if (!_aheadStock.TryGetValue(name, out cur))
-				continue;
-			cur -= val.m_amount;
-			if (cur <= 0)
-			{
-				_aheadStock.Remove(name);
-				_aheadSource.Remove(name);
-			}
-			else
-			{
-				_aheadStock[name] = cur;
-			}
+			_aheadStock.Remove(name);
+			_aheadSource.Remove(name);
+		}
+		else
+		{
+			_aheadStock[name] = cur;
 		}
 	}
 
@@ -280,13 +271,15 @@ internal static class NearbyResourceService
 		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);
 		foreach (string name in names)
 		{
+			if (keep.Contains(name))
+				continue;
 			int amt;
 			_aheadStock.TryGetValue(name, out amt);
 			_aheadStock.Remove(name);
 			Container src;
 			_aheadSource.TryGetValue(name, out src);
 			_aheadSource.Remove(name);
-			if (keep.Contains(name) || amt <= 0)
+			if (amt <= 0)
 				continue;
 			if ((Object)(object)src == (Object)null || src.GetInventory() == null)
 				continue;
@@ -521,7 +514,13 @@ internal static class NearbyResourceService
 				int num = val.GetAmount(qualityLevel) * multiplier;
 				if (num > 0)
 				{
-					ConsumeItem(player, val.m_resItem.m_itemData.m_shared.m_name, num, itemQuality);
+					// Single source of truth for the ahead ledger: every chest-aware
+					// consumption (craft, upgrade, build, single-ingredient) decrements
+					// what it actually took, so a later piece-switch never returns
+					// stock consumed elsewhere.
+					string reqName = val.m_resItem.m_itemData.m_shared.m_name;
+					int taken = ConsumeItem(player, reqName, num, itemQuality);
+					DecrementAhead(reqName, taken);
 				}
 			}
 		}

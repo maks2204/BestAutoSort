@@ -52,7 +52,6 @@ internal static class NearbyPlaceGatePatch
 			// Gate passed: vanilla places AND consumes NOW (Pump uninvolved), so
 			// pipeline the next full set here — otherwise the next click starves.
 			NearbyResourceService.StageMissingForPiece(__instance, piece, true);
-			NearbyResourceService.NoteAheadConsumed(piece);
 			return true;
 		}
 		// Not staged: the click's own HaveRequirements already submitted the

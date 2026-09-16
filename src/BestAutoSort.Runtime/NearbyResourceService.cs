@@ -261,26 +261,6 @@ internal static class NearbyResourceService
 		}
 	}
 
-	// TEMP-DIAG(staged-return): remove after diagnosis.
-	private static float _returnDiagNext;
-	internal static void ReturnAheadStock(Piece newPiece)
-	{
-		float now0 = UnityEngine.Time.realtimeSinceStartup;
-		bool diag = now0 >= _returnDiagNext;
-		if (diag)
-		{
-			_returnDiagNext = now0 + 1f;
-			try
-			{
-				System.Text.StringBuilder lb = new System.Text.StringBuilder();
-				foreach (System.Collections.Generic.KeyValuePair<string, int> kv in _aheadStock)
-					lb.Append(" [" + kv.Key + "=" + kv.Value + "]");
-				Player dp = Player.m_localPlayer;
-				Inventory di = (dp != null) ? ((Humanoid)dp).GetInventory() : null;
-				Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG trigger newPiece=" + (((Object)(object)newPiece != (Object)null) ? ((Object)newPiece).name : "<none>") + " ledger:" + lb + " invEye=" + ((di != null) ? di.CountItems("$item_greydwarfeye", -1, true).ToString() : "?") + " invWood=" + ((di != null) ? di.CountItems("$item_wood", -1, true).ToString() : "?") + " invCore=" + ((di != null) ? di.CountItems("$item_surtlingcore", -1, true).ToString() : "?")));
-			}
-			catch { }
-		}
 		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)
 			return;
 		Player player = Player.m_localPlayer;
@@ -347,61 +327,34 @@ internal static class NearbyResourceService
 
 	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)
 	{
-		// TEMP-DIAG(return-ex): remove after diagnosis.
-		try
-		{
 		if (playerInv == null || remaining <= 0)
 			return;
 		// The source chest gets an unconditional put-back: the stock was taken
 		// from there seconds ago (takes may have drained its last seed, so a
 		// rule check would now reject its own items everywhere). Others keep
 		// EnforceRule=true so ruled chests are never polluted.
-		// TEMP-DIAG(return-targets): remove after diagnosis.
-		int skippedTargets = 0;
-		System.Text.StringBuilder whySample = new System.Text.StringBuilder();
 		while (index < targets.Count && !IsReturnTarget(targets[index]))
-		{
-			string why;
-			try { ChestTxService.IsSharedVerbose(targets[index], out why); } catch { why = "<threw>"; }
-			if (skippedTargets < 3)
-				whySample.Append(" [" + why + "]");
-			skippedTargets++;
 			index++;
-		}
-		if (skippedTargets > 0)
-			Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG targets skipped=" + skippedTargets + " of " + targets.Count + " why:" + whySample));
 		if (index >= targets.Count)
 			return;
 		Container dst = targets[index];
 		System.Collections.Generic.List<TxOpItem> ops = new System.Collections.Generic.List<TxOpItem>();
 		int want = remaining;
-		// TEMP-DIAG(return-silent): remove after diagnosis.
-		int scanned = 0;
-		int skippedNull = 0;
-		int skippedQuest = 0;
-		int skippedName = 0;
-		int skippedSnap = 0;
 		foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
 		{
 			if (want <= 0)
 				break;
-			scanned++;
-			if (item == null || item.m_shared == null) { skippedNull++; continue; }
-			if (item.m_shared.m_questItem) { skippedQuest++; continue; }
-			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal)) { skippedName++; continue; }
+			if (item == null || item.m_shared == null || item.m_shared.m_questItem)
+				continue;
+			if (!string.Equals(item.m_shared.m_name, name, System.StringComparison.Ordinal))
+				continue;
 			int n = want < item.m_stack ? want : item.m_stack;
 			TxOpItem op = ChestTxService.SnapshotAuto(item, n);
 			if (op == null)
-			{
-				skippedSnap++;
-				Plugin.LogInstance.LogWarning((object)("[ChestTX] RETURN-DIAG snapshot null name=" + name + " hasPrefab=" + ((Object)(object)item.m_dropPrefab != (Object)null)));
 				continue;
-			}
 			ops.Add(op);
 			want -= n;
 		}
-		// TEMP-DIAG(return-silent): remove after diagnosis.
-		Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG collect name=" + name + " want=" + remaining + " scanned=" + scanned + " ops=" + ops.Count + " skipNull=" + skippedNull + " skipQuest=" + skippedQuest + " skipName=" + skippedName + " skipSnap=" + skippedSnap));
 		if (ops.Count == 0)
 			return;
 		// SubmitCall fans out Items.Count>4 into parallel chunk submits with one
@@ -409,11 +362,6 @@ internal static class NearbyResourceService
 		// duplicate cascades with split remainders. Send <=4 sequentially and
 		// advance only after the whole chest share is accounted.
 		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index, source);
-		}
-		catch (System.Exception ex)
-		{
-			Plugin.LogInstance.LogError((object)("[ChestTX] RETURN-DIAG EX name=" + name + ": " + ex.GetType().Name + ": " + ex.Message + " " + ex.StackTrace));
-		}
 	}
 
 	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)

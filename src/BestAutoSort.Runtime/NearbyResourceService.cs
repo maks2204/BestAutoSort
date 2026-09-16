@@ -261,8 +261,26 @@ internal static class NearbyResourceService
 		}
 	}
 
+	// TEMP-DIAG(staged-return): remove after diagnosis.
+	private static float _returnDiagNext;
 	internal static void ReturnAheadStock(Piece newPiece)
 	{
+		float now0 = UnityEngine.Time.realtimeSinceStartup;
+		bool diag = now0 >= _returnDiagNext;
+		if (diag)
+		{
+			_returnDiagNext = now0 + 1f;
+			try
+			{
+				System.Text.StringBuilder lb = new System.Text.StringBuilder();
+				foreach (System.Collections.Generic.KeyValuePair<string, int> kv in _aheadStock)
+					lb.Append(" [" + kv.Key + "=" + kv.Value + "]");
+				Player dp = Player.m_localPlayer;
+				Inventory di = (dp != null) ? ((Humanoid)dp).GetInventory() : null;
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG trigger newPiece=" + (((Object)(object)newPiece != (Object)null) ? ((Object)newPiece).name : "<none>") + " ledger:" + lb + " invEye=" + ((di != null) ? di.CountItems("$item_greydwarfeye", -1, true).ToString() : "?") + " invWood=" + ((di != null) ? di.CountItems("$item_wood", -1, true).ToString() : "?") + " invCore=" + ((di != null) ? di.CountItems("$item_surtlingcore", -1, true).ToString() : "?")));
+			}
+			catch { }
+		}
 		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)
 			return;
 		Player player = Player.m_localPlayer;

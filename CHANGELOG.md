@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Deferred building pipelines the next set (no more multi-click starvation); unused staged stock returns to chests on selection change, hammer put-away, or late landing.
+
 ## 0.3.0
 
 - Absolute tx idempotency (no re-apply after handoff), retry-or-loud client, no-void compensation.

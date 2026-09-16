@@ -307,9 +307,12 @@ internal static class NearbyResourceService
 
 	private static bool IsReturnTarget(Container c)
 	{
+		// Strictly IsShared: Submit drops non-shared containers without invoking
+		// onDone, which would stall the cascade (owner fast path lives behind
+		// the same gate). Remainder safely stays in the player inventory then.
 		if ((Object)(object)c == (Object)null || c.GetInventory() == null)
 			return false;
-		return ChestTxService.IsShared(c) || c.IsOwner();
+		return ChestTxService.IsShared(c);
 	}
 
 	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index)
@@ -321,9 +324,7 @@ internal static class NearbyResourceService
 		if (index >= targets.Count)
 			return;
 		Container dst = targets[index];
-		TxOpCall call = new TxOpCall();
-		call.Op = TxOp.AddBatch;
-		call.EnforceRule = true;
+		System.Collections.Generic.List<TxOpItem> ops = new System.Collections.Generic.List<TxOpItem>();
 		int want = remaining;
 		foreach (ItemData item in new System.Collections.Generic.List<ItemData>(playerInv.GetAllItems()))
 		{
@@ -337,14 +338,36 @@ internal static class NearbyResourceService
 			TxOpItem op = ChestTxService.SnapshotAuto(item, n);
 			if (op == null)
 				continue;
-			call.Items.Add(op);
+			ops.Add(op);
 			want -= n;
 		}
-		if (call.Items.Count == 0)
+		if (ops.Count == 0)
 			return;
+		// SubmitCall fans out Items.Count>4 into parallel chunk submits with one
+		// onDone per chunk — advancing the chest index per chunk would fork
+		// duplicate cascades with split remainders. Send <=4 sequentially and
+		// advance only after the whole chest share is accounted.
+		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index);
+	}
+
+	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index)
+	{
+		if ((Object)(object)playerInv == (Object)null || !IsReturnTarget(dst))
+		{
+			ReturnToChests(playerInv, name, remaining - movedSoFar, targets, index + 1);
+			return;
+		}
+		TxOpCall call = new TxOpCall();
+		call.Op = TxOp.AddBatch;
+		call.EnforceRule = true;
+		int to = from + 4;
+		if (to > ops.Count)
+			to = ops.Count;
+		for (int i = from; i < to; i++)
+			call.Items.Add(ops[i]);
 		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records)
 		{
-			int moved = 0;
+			int moved = movedSoFar;
 			if (records != null)
 			{
 				foreach (TransferRecord r in records)
@@ -353,7 +376,10 @@ internal static class NearbyResourceService
 						moved += r.Amount;
 				}
 			}
-			ReturnToChests(playerInv, name, remaining - moved, targets, index + 1);
+			if (to < ops.Count)
+				SendReturnChunks(playerInv, dst, name, ops, to, moved, remaining, targets, index);
+			else
+				ReturnToChests(playerInv, name, remaining - moved, targets, index + 1);
 		});
 	}
 internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)

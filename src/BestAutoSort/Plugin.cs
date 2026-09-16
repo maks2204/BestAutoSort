@@ -171,6 +171,9 @@ public sealed class Plugin : BaseUnityPlugin
 	internal static void SortLocal(Container container)
 	{
 		int num = InventorySorter.Sort(container.GetInventory(), ModConfig.ChestSortMode.Value, ModConfig.SortDescending.Value);
+		// Owned chest mutated directly: persist the new order like the manager.
+		TxReflect.UpdateRows(container);
+		TxReflect.SaveContainer(container);
 		Player localPlayer2 = Player.m_localPlayer;
 		if (localPlayer2 != null)
 		{

@@ -350,7 +350,7 @@ internal static class NearbyResourceService
 		// TEMP-DIAG(return-ex): remove after diagnosis.
 		try
 		{
-		if ((Object)(object)playerInv == (Object)null || remaining <= 0)
+		if (playerInv == null || remaining <= 0)
 			return;
 		// TEMP-DIAG(return-targets): remove after diagnosis.
 		int skippedTargets = 0;
@@ -414,7 +414,7 @@ internal static class NearbyResourceService
 
 	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index)
 	{
-		if ((Object)(object)playerInv == (Object)null || !IsReturnTarget(dst))
+		if (playerInv == null || !IsReturnTarget(dst))
 		{
 			ReturnToChests(playerInv, name, remaining - movedSoFar, targets, index + 1);
 			return;

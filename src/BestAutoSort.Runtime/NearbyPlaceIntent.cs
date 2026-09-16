@@ -86,7 +86,10 @@ internal static class NearbyPlaceIntent
 		{
 		}
 		if (!free)
-			player.ConsumeResources(piece.m_resources, 0);
+			// Chest-aware consumption (same as the upgrade path): the gate above
+			// counts player + owned chests, but vanilla ConsumeResources only sees
+			// the player inventory (free/discount build otherwise).
+			NearbyResourceService.ConsumeRequirements(player, piece.m_resources, 0, -1, 1);
 	}
 
 	internal static void Clear()

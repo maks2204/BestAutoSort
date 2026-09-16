@@ -349,8 +349,20 @@ internal static class NearbyResourceService
 	{
 		if ((Object)(object)playerInv == (Object)null || remaining <= 0)
 			return;
+		// TEMP-DIAG(return-targets): remove after diagnosis.
+		int skippedTargets = 0;
+		System.Text.StringBuilder whySample = new System.Text.StringBuilder();
 		while (index < targets.Count && !IsReturnTarget(targets[index]))
+		{
+			string why;
+			try { ChestTxService.IsSharedVerbose(targets[index], out why); } catch { why = "<threw>"; }
+			if (skippedTargets < 3)
+				whySample.Append(" [" + why + "]");
+			skippedTargets++;
 			index++;
+		}
+		if (skippedTargets > 0)
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] RETURN-DIAG targets skipped=" + skippedTargets + " of " + targets.Count + " why:" + whySample));
 		if (index >= targets.Count)
 			return;
 		Container dst = targets[index];

@@ -415,16 +415,31 @@ internal static class ChestUpgradeService
 		{
 			if (!flag && (Object)(object)val3 != (Object)null)
 			{
-				ZNetView component5 = val3.GetComponent<ZNetView>();
-				if ((Object)(object)component5 != (Object)null && component5.IsValid() && component5.IsOwner())
+				Container shell = val3.GetComponent<Container>();
+				Inventory shellInv = (shell != null) ? shell.GetInventory() : null;
+				if (shellInv != null && shellInv.GetAllItems().Count > 0)
 				{
-					component5.Destroy();
+					// Never destroy a shell holding stranded stacks: persist it
+					// and keep it standing next to the original chest.
+					TxReflect.UpdateRows(shell);
+					TxReflect.SaveContainer(shell);
+					Plugin.LogInstance.LogError((object)"Chest upgrade failed with items stranded in the new shell; shell kept, nothing voided.");
+					if (error.Length == 0)
+						error = "items were left in the new chest shell, which was kept standing.";
 				}
 				else
 				{
-					Object.Destroy((Object)(object)val3);
+					ZNetView component5 = val3.GetComponent<ZNetView>();
+					if ((Object)(object)component5 != (Object)null && component5.IsValid() && component5.IsOwner())
+					{
+						component5.Destroy();
+					}
+					else
+					{
+						Object.Destroy((Object)(object)val3);
+					}
+					replacement = null;
 				}
-				replacement = null;
 			}
 		}
 	}
@@ -452,7 +467,8 @@ internal static class ChestUpgradeService
 			int stack = item.Item.m_stack;
 			if (!targetInventory.MoveItemToThis(inventory, item.Item, stack, item.Position.x, item.Position.y))
 			{
-				RollBackMovedItems(inventory, targetInventory, list2);
+				if (!RecoverAfterMoveFailure(inventory, targetInventory, list2, target, out error))
+					return false;
 				error = "an inventory stack could not be transferred safely.";
 				return false;
 			}
@@ -460,20 +476,65 @@ internal static class ChestUpgradeService
 		}
 		if (inventory.GetAllItems().Count != 0)
 		{
-			RollBackMovedItems(inventory, targetInventory, list2);
+			if (!RecoverAfterMoveFailure(inventory, targetInventory, list2, target, out error))
+				return false;
 			error = "the original chest was not empty after transfer.";
 			return false;
 		}
 		return true;
 	}
 
-	private static void RollBackMovedItems(Inventory sourceInventory, Inventory targetInventory, IReadOnlyList<ItemPosition> moved)
+	/// <summary>
+	/// Move failure recovery: roll moved stacks back, then drop anything still
+	/// stranded in the target on the ground (never void). Returns false only if
+	/// the target shell still holds items and must not be destroyed.
+	/// </summary>
+	private static bool RecoverAfterMoveFailure(Inventory sourceInventory, Inventory targetInventory, IReadOnlyList<ItemPosition> moved, Container target, out string error)
 	{
+		error = string.Empty;
+		RollBackMovedItems(sourceInventory, targetInventory, moved);
+		List<ItemData> stranded = new List<ItemData>(targetInventory.GetAllItems());
+		if (stranded.Count == 0)
+			return true;
+		Vector3 dropAt = ((Component)target).transform.position + Vector3.up;
+		int dropped = 0;
+		foreach (ItemData item in stranded)
+		{
+			if (item == null)
+				continue;
+			int stack = item.m_stack;
+			if (stack <= 0)
+				continue;
+			if (targetInventory.RemoveItem(item, stack))
+			{
+				ItemData drop = item.Clone();
+				drop.m_stack = stack;
+				Vector3 pos = dropAt + new Vector3((float)(dropped % 3) * 0.5f, 0.2f * (float)(dropped / 3), 0f);
+				ItemDrop.DropItem(drop, stack, pos, Quaternion.identity);
+				dropped++;
+			}
+		}
+		List<ItemData> left = new List<ItemData>(targetInventory.GetAllItems());
+		if (left.Count > 0)
+		{
+			error = "rollback incomplete: " + left.Count + " stack(s) remain in the new chest shell, which will be kept.";
+			Plugin.LogInstance.LogError((object)("Chest upgrade " + error));
+			return false;
+		}
+		Plugin.LogInstance.LogWarning((object)("Chest upgrade move failed: rolled back, dropped " + dropped + " stranded stack(s) on the ground."));
+		return true;
+	}
+
+	private static bool RollBackMovedItems(Inventory sourceInventory, Inventory targetInventory, IReadOnlyList<ItemPosition> moved)
+	{
+		bool ok = true;
 		for (int num = moved.Count - 1; num >= 0; num--)
 		{
 			ItemPosition itemPosition = moved[num];
-			sourceInventory.MoveItemToThis(targetInventory, itemPosition.Item, itemPosition.Item.m_stack, itemPosition.Position.x, itemPosition.Position.y);
+			if (!sourceInventory.MoveItemToThis(targetInventory, itemPosition.Item, itemPosition.Item.m_stack, itemPosition.Position.x, itemPosition.Position.y))
+				ok = false;
 		}
+		return ok;
 	}
 
 	private static void RefundRequirements(Player player, IEnumerable<Requirement> requirements)

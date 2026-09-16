@@ -139,7 +139,7 @@ namespace BestAutoSort.Tx
         /// Remove n units by reference with a name/quality scan fallback.
         /// Returns what was actually removed (for Add completion on the client).
         /// </summary>
-        public static int RemoveForTake(Inventory inv, ItemData itemRef, string name, int quality, int amount)
+        public static int RemoveForTake(Inventory inv, ItemData itemRef, string name, int quality, int amount, int variant = -1, float world = -1f)
         {
             if (inv == null || amount <= 0)
                 return 0;
@@ -155,6 +155,10 @@ namespace BestAutoSort.Tx
                 if (!string.Equals(it.m_shared.m_name, name, System.StringComparison.Ordinal))
                     continue;
                 if (quality >= 0 && it.m_quality != quality)
+                    continue;
+                if (variant >= 0 && it.m_variant != variant)
+                    continue;
+                if (world >= 0f && it.m_worldLevel != world)
                     continue;
                 remaining -= RemoveExact(inv, it, remaining);
             }

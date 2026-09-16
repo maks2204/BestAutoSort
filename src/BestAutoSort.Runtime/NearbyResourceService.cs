@@ -921,22 +921,18 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 				call.Items.Add(op);
 				call.RespectReserves = true;
 				Inventory playerInv = ((Humanoid)player).GetInventory();
-				if (ignoreCooldown)
+				// Every prefetch landing is ledger-tracked (ahead AND first-click
+				// defer stages): consumption decrements globally, so an abandoned
+				// stock — built or not — is returnable. Production borrows use
+				// their own path (invisibly consumed) and stay untracked.
+				Container srcBox = container;
+				ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
 				{
-					Container srcBox = container;
-					string wantName = name;
-					ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
-					{
-						if (landed == null)
-							return;
-						foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
-							NoteAheadLanded(kv.Key, kv.Value, srcBox);
-					});
-				}
-				else
-				{
-					ChestTxService.SubmitTakePrefetch(container, call, playerInv);
-				}
+					if (landed == null)
+						return;
+					foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
+						NoteAheadLanded(kv.Key, kv.Value, srcBox);
+				});
 				missing -= n;
 			}
 		}

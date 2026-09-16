@@ -78,7 +78,10 @@ internal static class NearbyPlaceIntent
 			GameObject ghost = (PlacementGhostField != null) ? (PlacementGhostField.GetValue(player) as GameObject) : null;
 			bool ghostNow = (Object)(object)ghost != (Object)null;
 			if (_hadGhost && !ghostNow)
+			{
 				NearbyResourceService.ReturnAheadStock(null);
+				Clear();
+			}
 			_hadGhost = ghostNow;
 		}
 		catch

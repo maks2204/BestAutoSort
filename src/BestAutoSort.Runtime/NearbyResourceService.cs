@@ -184,7 +184,7 @@ internal static class NearbyResourceService
 	/// Press-time staging: submit Take prefetches for the locally-missing part.
 	/// Called once per placement click (2s per-name throttle inside PrefetchMissing).
 	/// </summary>
-	internal static void StageMissingForPiece(Player player, Piece piece)
+	internal static void StageMissingForPiece(Player player, Piece piece, bool ignoreCooldown = false)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value || (Object)(object)player != (Object)(object)Player.m_localPlayer)
 			return;
@@ -198,7 +198,7 @@ internal static class NearbyResourceService
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
 				int localOnly = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
 				if (localOnly < val.m_amount)
-					PrefetchMissing(player, name, -1, val.m_amount - localOnly);
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly, ignoreCooldown);
 			}
 		}
 	}
@@ -657,16 +657,22 @@ internal static class NearbyResourceService
 	/// Prefetch missing material from foreign chests into the player inventory.
 	/// Called from requirement checks (2s throttle per name). The manager re-validates.
 	/// </summary>
-	internal static void PrefetchMissing(Player player, string name, int quality, int missing)
+	internal static void PrefetchMissing(Player player, string name, int quality, int missing, bool ignoreCooldown = false)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value || missing <= 0)
 			return;
 		if ((Object)(object)player != (Object)(object)Player.m_localPlayer)
 			return;
 		float now = Time.realtimeSinceStartup;
-		float next;
-		if (PrefetchCooldown.TryGetValue(name, out next) && now < next)
-			return;
+		if (!ignoreCooldown)
+		{
+			float next;
+			if (PrefetchCooldown.TryGetValue(name, out next) && now < next)
+				return;
+		}
+		// The stamp is always refreshed: a pipelined (post-placement) stage counts
+		// as the in-flight request, so the next click inside the window does not
+		// submit a duplicate on top of mats that are already coming.
 		PrefetchCooldown[name] = now + 2f;
 		int wanted = missing;
 		int skippedLease = 0;

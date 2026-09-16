@@ -86,10 +86,18 @@ internal static class NearbyPlaceIntent
 		{
 		}
 		if (!free)
+		{
 			// Chest-aware consumption (same as the upgrade path): the gate above
 			// counts player + owned chests, but vanilla ConsumeResources only sees
 			// the player inventory (free/discount build otherwise).
 			NearbyResourceService.ConsumeRequirements(player, piece.m_resources, 0, -1, 1);
+			// Pipeline the next piece: the just-consumed stock must be re-staged
+			// NOW, otherwise the next click inside the 2 s prefetch window submits
+			// nothing (throttled) and its intent starves until the deadline.
+			// Cooldown check is bypassed (the want is certain), the stamp is kept
+			// so the next click does not duplicate the in-flight request.
+			NearbyResourceService.StageMissingForPiece(player, piece, true);
+		}
 	}
 
 	internal static void Clear()

@@ -176,7 +176,7 @@ namespace BestAutoSort.Tx
             {
                 int accepted = ReadAcceptedAt(pkg, 0);
                 CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone, alreadyRemoved);
-            });
+            }, 0L, null, 1);
         }
 
         internal static void RequestAddBatch(Container container, Inventory srcInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
@@ -194,7 +194,7 @@ namespace BestAutoSort.Tx
                 RefreshNow(container);
                 if (onDone != null)
                     onDone(pkg, status, rev);
-            });
+            }, 0L, null, items.Count);
         }
 
         /// <summary>
@@ -421,6 +421,7 @@ namespace BestAutoSort.Tx
                 ChestState state = GetState(container);
                 if (state != null)
                 {
+                    RejectQueued(state);
                     state.Queue.Clear();
                     state.Processed.Clear();
                     state.ProcOrder.Clear();
@@ -489,7 +490,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null)
+        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
         {
             if (!Plugin.IsActive || !IsShared(container))
             {
@@ -527,6 +528,20 @@ namespace BestAutoSort.Tx
             if (!TryClaimAddItems(call, out claimed))
             {
                 TxLog.Info("add submit skipped: all items already in flight");
+                if (onDone != null)
+                {
+                    // The live sibling tx carries these items; answer empty-accepted
+                    // so cascades/automation waiting on the callback do not stall.
+                    // Empty body reads as accepted=0: nothing is removed twice.
+                    try
+                    {
+                        onDone(new ZPackage(), TxStatus.Accepted, CurrentRevision(container));
+                    }
+                    catch (Exception ex)
+                    {
+                        TxLog.Error("pruned-add completion failed: " + ex.Message);
+                    }
+                }
                 return;
             }
             long txId = TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
@@ -547,6 +562,7 @@ namespace BestAutoSort.Tx
             pending.Op = call.Op;
             pending.Claimed = claimed;
             pending.Attempts = 0;
+            pending.ExpectedItems = expectedItems;
             pending.NextTryAt = 0f;
             pending.Deadline = Time.realtimeSinceStartup + FailDeadline;
             pending.OnResponse = onDone;
@@ -837,7 +853,21 @@ namespace BestAutoSort.Tx
                 {
                     n++;
                     TxJob job = state.Queue.Dequeue();
-                    StoredResult result = ApplyJob(state, job);
+                    StoredResult result;
+                    try
+                    {
+                        result = ApplyJob(state, job);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A throwing op (e.g. structural reflection) must not wedge
+                        // the queue with the sender hanging: answer Rejected.
+                        TxLog.Error("tx=" + job.TxId + " apply failed: " + ex.Message);
+                        result = new StoredResult();
+                        result.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                        result.Status = TxStatus.Rejected;
+                        result.Revision = CurrentRevision(state.Container);
+                    }
                     try
                     {
                         if (job.Complete != null)
@@ -868,8 +898,10 @@ namespace BestAutoSort.Tx
             StoredResult cached;
             if (state.Processed.TryGetValue(job.TxId, out cached))
             {
-                if (cached.TotalsOnly && IsTakeOp(job.Call.Op))
-                    return RedeliverTake(state, job, cached);
+                // Idempotency is absolute: a committed tx is NEVER re-applied, even
+                // when the cache entry is totals-only after a handoff. Re-pulling
+                // live stock for a Take retry double-debits the chest while the
+                // client credits once (or zero times on Query).
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " DUPLICATE returning cached result");
                 return CloneStored(cached, TxStatus.Duplicate);
             }
@@ -1205,28 +1237,6 @@ namespace BestAutoSort.Tx
         private static bool IsTakeOp(TxOp op)
         {
             return op == TxOp.Take || op == TxOp.TakeBatch;
-        }
-
-        /// <summary>
-        /// Take retry after handoff (ring holds totals only): pull the equivalent
-        /// from live state. Conservation holds — items come out of the chest now.
-        /// </summary>
-        private static StoredResult RedeliverTake(ChestState state, TxJob job, StoredResult cached)
-        {
-            Inventory inv = job.Container.GetInventory();
-            StoredResult fresh = ExecuteTake(inv, job.Call, state);
-            fresh.Revision = 0u;
-            if (fresh.AcceptedTotal() > 0)
-            {
-                TxReflect.SaveContainer(job.Container);
-                WriteRing(state);
-            }
-            fresh.Revision = CurrentRevision(job.Container);
-            state.Processed[job.TxId] = CloneStored(fresh, TxStatus.Duplicate);
-            TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId
-                + " DUPLICATE handoff-redelivery accepted=" + fresh.AcceptedTotal());
-            StoredResult r = CloneStored(fresh, TxStatus.Duplicate);
-            return r;
         }
 
         // ============================ manager: ring persist ============================

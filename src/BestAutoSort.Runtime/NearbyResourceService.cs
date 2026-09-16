@@ -196,9 +196,18 @@ internal static class NearbyResourceService
 			if (val?.m_resItem?.m_itemData?.m_shared != null && val.m_amount > 0)
 			{
 				string name = val.m_resItem.m_itemData.m_shared.m_name;
+				if (ignoreCooldown)
+				{
+					// Ahead staging: the caller just consumed (or is consuming) one
+					// full set, so request a full set regardless of local stock.
+					// (On a staged gate-pass local stock trivially covers the set,
+					// so a missing-only request would always be a no-op here.)
+					PrefetchMissing(player, name, -1, val.m_amount, true);
+					continue;
+				}
 				int localOnly = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
 				if (localOnly < val.m_amount)
-					PrefetchMissing(player, name, -1, val.m_amount - localOnly, ignoreCooldown);
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly, false);
 			}
 		}
 	}

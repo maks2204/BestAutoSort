@@ -77,6 +77,8 @@ internal static class NearbyPlaceIntent
 		{
 			GameObject ghost = (PlacementGhostField != null) ? (PlacementGhostField.GetValue(player) as GameObject) : null;
 			bool ghostNow = (Object)(object)ghost != (Object)null;
+			// TEMP-DIAG(ghost-return): remove after diagnosis.
+			NearbyResourceService.LogGhostDiag(ghostNow, _hadGhost, ghost);
 			if (_hadGhost && !ghostNow)
 				NearbyResourceService.ReturnAheadStock(null);
 			_hadGhost = ghostNow;

@@ -249,6 +249,30 @@ internal static class NearbyResourceService
 		}
 	}
 
+	// TEMP-DIAG(ghost-return): remove after diagnosis.
+	private static float _ghostDiagNext;
+	internal static void LogGhostDiag(bool ghostNow, bool hadGhost, UnityEngine.GameObject ghost)
+	{
+		float now = UnityEngine.Time.realtimeSinceStartup;
+		if (now < _ghostDiagNext)
+			return;
+		_ghostDiagNext = now + 1f;
+		try
+		{
+			Player player = Player.m_localPlayer;
+			string sel = "?";
+			try
+			{
+				Piece cur = (player != null) ? player.GetSelectedPiece() : null;
+				sel = ((Object)(object)cur != (Object)null) ? ((Object)cur).name : "<none>";
+			}
+			catch { sel = "<err>"; }
+			string gstate = ghostNow ? ("alive active=" + (((Object)(object)ghost != (Object)null) ? ghost.activeSelf.ToString() : "?")) : "null";
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] GHOST-DIAG ghost=" + gstate + " had=" + hadGhost + " ledger=" + _aheadStock.Count + " selected=" + sel));
+		}
+		catch { }
+	}
+
 	internal static void ReturnAheadStock(Piece newPiece)
 	{
 		if (_aheadStock.Count == 0 || !ModConfig.CraftFromNearbyChests.Value)

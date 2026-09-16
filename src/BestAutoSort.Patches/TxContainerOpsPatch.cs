@@ -160,4 +160,25 @@ namespace BestAutoSort.Patches
             return false;
         }
     }
+
+    /// <summary>
+    /// Guard: a direct RPC_RequestTakeAll in shared mode is denied —
+    /// take-all runs only through ChestTX (otherwise the mutation is unserialized).
+    /// Mirrors TxContainerStackRpcPatch.
+    /// </summary>
+    [HarmonyPatch(typeof(Container), "RPC_RequestTakeAll")]
+    internal static class TxContainerTakeAllRpcPatch
+    {
+        private static bool Prefix(Container __instance, long uid, long playerID)
+        {
+            if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+                return true;
+            if (TxOpsGuard.FeedBusy(__instance))
+                return false;
+            ZNetView denyView = TxReflect.GetNetView(__instance);
+            if (denyView != null)
+                denyView.InvokeRPC(uid, "RPC_TakeAllResponse", new object[1] { false });
+            return false;
+        }
+    }
 }

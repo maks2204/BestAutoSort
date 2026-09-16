@@ -34,6 +34,8 @@ namespace BestAutoSort.Tx
         /// </summary>
         public static int AddTakeAndCount(Inventory inv, ItemData clone, int wantX, int wantY)
         {
+            if (inv == null)
+                return 0;
             if (wantX < 0 || wantY < 0)
                 return AddAndCount(inv, clone);
             if (clone != null && clone.m_shared != null && wantX < inv.GetWidth() && wantY < inv.GetHeight())

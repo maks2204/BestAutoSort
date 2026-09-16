@@ -462,9 +462,15 @@ namespace BestAutoSort.Tx
                     }
                 }
                 if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
+                {
                     TxLog.Warn("short-removal burn rejected (" + status + "), excess stays in chest");
+                    TellPlayer("Chest could not correct an over-deposit. Check the chest.");
+                }
                 else if (took < amount)
+                {
                     TxLog.Warn("short-removal burn partial: burned=" + took + " of " + amount);
+                    TellPlayer("Chest could not correct an over-deposit. Check the chest.");
+                }
                 else
                     TxLog.Info("short-removal burn ok: " + took);
                 RefreshNow(container);

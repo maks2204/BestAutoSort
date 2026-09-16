@@ -228,6 +228,18 @@ internal static class NearbyResourceService
 		_aheadStock[name] = cur + amount;
 		if ((Object)(object)source != (Object)null)
 			_aheadSource[name] = source;
+		// Late landing after a piece switch: the switch-time return already ran
+		// without this stock (it wasn't landed yet). Offer it back immediately —
+		// keep-set aware, so active building (same piece selected) is unaffected.
+		try
+		{
+			Player player = Player.m_localPlayer;
+			Piece selected = (Object)(object)player != (Object)null ? player.GetSelectedPiece() : null;
+			ReturnAheadStock(selected);
+		}
+		catch
+		{
+		}
 	}
 
 	internal static void DecrementAhead(string name, int amount)

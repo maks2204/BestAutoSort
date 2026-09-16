@@ -26,6 +26,8 @@ namespace BestAutoSort.Patches
                 return true;
             if (dragInv != container.GetInventory())
                 return true;
+            if (dragItem.m_shared != null && dragItem.m_shared.m_questItem)
+                return true;
             if (container.IsOwner())
             {
                 ChestTxService.DrainForLocal(container);

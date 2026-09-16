@@ -364,6 +364,8 @@ namespace BestAutoSort.Patches
                 return false;
             if (grid.GetInventory() != container.GetInventory())
                 return true;
+            if (item != null && item.m_shared != null && item.m_shared.m_questItem)
+                return true;
             if (container.IsOwner())
             {
                 ChestTxService.DrainForLocal(container);

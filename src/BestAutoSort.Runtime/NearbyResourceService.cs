@@ -347,6 +347,9 @@ internal static class NearbyResourceService
 
 	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index)
 	{
+		// TEMP-DIAG(return-ex): remove after diagnosis.
+		try
+		{
 		if ((Object)(object)playerInv == (Object)null || remaining <= 0)
 			return;
 		// TEMP-DIAG(return-targets): remove after diagnosis.
@@ -402,6 +405,11 @@ internal static class NearbyResourceService
 		// duplicate cascades with split remainders. Send <=4 sequentially and
 		// advance only after the whole chest share is accounted.
 		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index);
+		}
+		catch (System.Exception ex)
+		{
+			Plugin.LogInstance.LogError((object)("[ChestTX] RETURN-DIAG EX name=" + name + ": " + ex.GetType().Name + ": " + ex.Message + " " + ex.StackTrace));
+		}
 	}
 
 	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index)

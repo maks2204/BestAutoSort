@@ -74,7 +74,11 @@ internal static class NearbyPlaceIntent
 			return;
 		}
 		if (!NearbyResourceService.HasStagedMatsForPiece(player, piece))
+		{
+			// TEMP-DIAG(build-stall): remove after diagnosis.
+			NearbyResourceService.LogStagedSplit(player, piece);
 			return;
+		}
 		Clear();
 		player.PlacePiece(piece, _pos, _rot, doAttack: true);
 		bool free = false;

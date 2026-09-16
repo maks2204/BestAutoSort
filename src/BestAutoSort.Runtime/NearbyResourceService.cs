@@ -203,6 +203,33 @@ internal static class NearbyResourceService
 		}
 	}
 
+	// TEMP-DIAG(build-stall): remove after diagnosis.
+	internal static void LogStagedSplit(Player player, Piece piece)
+	{
+		try
+		{
+			Requirement[] resources = piece.m_resources;
+			foreach (Requirement val in resources)
+			{
+				if (val?.m_resItem?.m_itemData?.m_shared == null || val.m_amount <= 0)
+					continue;
+				string name = val.m_resItem.m_itemData.m_shared.m_name;
+				int inInv = ((Humanoid)player).GetInventory().CountItems(name, -1, true);
+				System.Text.StringBuilder sb = new System.Text.StringBuilder();
+				foreach (Container c in GetEligibleContainers(((Component)player).transform.position))
+				{
+					int n = ChestReserveStore.Count(c, name, -1);
+					if (n > 0)
+						sb.Append(" [owned=" + c.IsOwner() + " n=" + n + "]");
+				}
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] STAGE-DIAG req=" + name + " need=" + val.m_amount + " inInv=" + inInv + " chests:" + sb));
+			}
+		}
+		catch
+		{
+		}
+	}
+
 	internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)
 	{
 		missing = "";

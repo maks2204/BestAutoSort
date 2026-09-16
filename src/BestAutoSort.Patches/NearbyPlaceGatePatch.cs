@@ -38,7 +38,13 @@ internal static class NearbyPlaceGatePatch
 		{
 		}
 		if (NearbyResourceService.HasStagedMatsForPiece(__instance, piece))
+		{
+			// Gate passed: vanilla places NOW (Pump uninvolved), so pipeline the
+			// next set here — otherwise the next click starves exactly like an
+			// unstaged one. Bypass: the want is certain (this click consumes).
+			NearbyResourceService.StageMissingForPiece(__instance, piece, true);
 			return true;
+		}
 		// Not staged: the click's own HaveRequirements already submitted the
 		// prefetch (selected piece). Defer placement until mats land, unless the
 		// ghost spot itself is invalid (let vanilla report it).

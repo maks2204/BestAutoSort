@@ -331,7 +331,7 @@ internal static class NearbyResourceService
 			if (targets.Count == 0)
 				continue;
 			Plugin.LogInstance.LogInfo((object)("[ChestTX] returning ahead-staged " + name + " to " + targets.Count + " chest(s)"));
-			ReturnToChests(playerInv, name, give, targets, 0);
+			ReturnToChests(playerInv, name, give, targets, 0, src);
 		}
 	}
 
@@ -345,13 +345,17 @@ internal static class NearbyResourceService
 		return ChestTxService.IsShared(c);
 	}
 
-	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index)
+	private static void ReturnToChests(Inventory playerInv, string name, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)
 	{
 		// TEMP-DIAG(return-ex): remove after diagnosis.
 		try
 		{
 		if (playerInv == null || remaining <= 0)
 			return;
+		// The source chest gets an unconditional put-back: the stock was taken
+		// from there seconds ago (takes may have drained its last seed, so a
+		// rule check would now reject its own items everywhere). Others keep
+		// EnforceRule=true so ruled chests are never polluted.
 		// TEMP-DIAG(return-targets): remove after diagnosis.
 		int skippedTargets = 0;
 		System.Text.StringBuilder whySample = new System.Text.StringBuilder();
@@ -404,7 +408,7 @@ internal static class NearbyResourceService
 		// onDone per chunk — advancing the chest index per chunk would fork
 		// duplicate cascades with split remainders. Send <=4 sequentially and
 		// advance only after the whole chest share is accounted.
-		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index);
+		SendReturnChunks(playerInv, dst, name, ops, 0, 0, remaining, targets, index, source);
 		}
 		catch (System.Exception ex)
 		{
@@ -412,16 +416,16 @@ internal static class NearbyResourceService
 		}
 	}
 
-	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index)
+	private static void SendReturnChunks(Inventory playerInv, Container dst, string name, System.Collections.Generic.List<TxOpItem> ops, int from, int movedSoFar, int remaining, System.Collections.Generic.List<Container> targets, int index, Container source)
 	{
 		if (playerInv == null || !IsReturnTarget(dst))
 		{
-			ReturnToChests(playerInv, name, remaining - movedSoFar, targets, index + 1);
+			ReturnToChests(playerInv, name, remaining - movedSoFar, targets, index + 1, source);
 			return;
 		}
 		TxOpCall call = new TxOpCall();
 		call.Op = TxOp.AddBatch;
-		call.EnforceRule = true;
+		call.EnforceRule = !((Object)(object)dst != (Object)null && (Object)(object)dst == (Object)(object)source);
 		int to = from + 4;
 		if (to > ops.Count)
 			to = ops.Count;
@@ -439,9 +443,9 @@ internal static class NearbyResourceService
 				}
 			}
 			if (to < ops.Count)
-				SendReturnChunks(playerInv, dst, name, ops, to, moved, remaining, targets, index);
+				SendReturnChunks(playerInv, dst, name, ops, to, moved, remaining, targets, index, source);
 			else
-				ReturnToChests(playerInv, name, remaining - moved, targets, index + 1);
+				ReturnToChests(playerInv, name, remaining - moved, targets, index + 1, source);
 		});
 	}
 internal static bool HasStagedMatsForPiece(Player player, Piece piece, out string missing)

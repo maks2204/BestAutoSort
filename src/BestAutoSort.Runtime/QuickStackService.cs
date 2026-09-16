@@ -319,6 +319,9 @@ internal sealed class QuickStackService
 				return true;
 			List<TransferRecord> records = new List<TransferRecord>();
 			QuickStackTransfer.MoveMatching(openContainer, ((Humanoid)player).GetInventory(), records);
+			// Owned chest mutated directly (no tx queue): persist like the manager.
+			TxReflect.UpdateRows(openContainer);
+			TxReflect.SaveContainer(openContainer);
 			TransferVisuals.Play(records, openContainer);
 			return true;
 		}

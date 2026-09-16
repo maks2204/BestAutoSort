@@ -255,6 +255,9 @@ namespace BestAutoSort.Patches
             List<TxOpItem> items = new List<TxOpItem>();
             foreach (ItemData it in new List<ItemData>(chestInv.GetAllItems()))
             {
+                // Quest items stay: click-move paths block them, TakeAll must agree.
+                if (it != null && it.m_shared != null && it.m_shared.m_questItem)
+                    continue;
                 TxOpItem op = ChestTxService.SnapshotItem(it, it.m_stack, -1, -1);
                 if (op != null)
                     items.Add(op);

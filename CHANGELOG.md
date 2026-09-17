@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Staged-stock return no longer breaks crafting (craft stages untracked) and no longer loops on upgrades (recent-upgrade keep window).
+
 ## 0.3.1
 
 - Deferred building pipelines the next set (no more multi-click starvation); unused staged stock returns to chests on selection change, hammer put-away, or late landing.

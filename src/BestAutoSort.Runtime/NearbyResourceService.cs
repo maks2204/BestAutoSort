@@ -203,12 +203,12 @@ internal static class NearbyResourceService
 					// full set, so request a full set regardless of local stock.
 					// (On a staged gate-pass local stock trivially covers the set,
 					// so a missing-only request would always be a no-op here.)
-					PrefetchMissing(player, name, -1, val.m_amount, true);
+					PrefetchMissing(player, name, -1, val.m_amount, true, true);
 					continue;
 				}
 				int localOnly = CountAvailable(player, name, -1, ((Component)player).transform.position, true);
 				if (localOnly < val.m_amount)
-					PrefetchMissing(player, name, -1, val.m_amount - localOnly, false);
+					PrefetchMissing(player, name, -1, val.m_amount - localOnly, false, true);
 			}
 		}
 	}
@@ -218,6 +218,27 @@ internal static class NearbyResourceService
 	// unconsumed remainder goes back to the source chest instead of lingering.
 	private static readonly System.Collections.Generic.Dictionary<string, int> _aheadStock = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
 	private static readonly System.Collections.Generic.Dictionary<string, Container> _aheadSource = new System.Collections.Generic.Dictionary<string, Container>(System.StringComparer.Ordinal);
+	// Recently requested upgrade stock: the upgrade flow has no "selection", so
+	// the keep-set would otherwise instantly return its just-landed staging
+	// (same failure craft had). Windowed: abandoned upgrades still return later.
+	private static float _upgradeKeepUntil;
+	private static readonly System.Collections.Generic.HashSet<string> _upgradeKeepNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+
+	internal static void NoteUpgradeStaged(Piece piece)
+	{
+		_upgradeKeepNames.Clear();
+		if ((Object)(object)piece == (Object)null || piece.m_resources == null)
+		{
+			_upgradeKeepUntil = 0f;
+			return;
+		}
+		foreach (Requirement val in piece.m_resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared != null)
+				_upgradeKeepNames.Add(val.m_resItem.m_itemData.m_shared.m_name);
+		}
+		_upgradeKeepUntil = UnityEngine.Time.realtimeSinceStartup + 15f;
+	}
 
 	internal static void NoteAheadLanded(string name, int amount, Container source)
 	{
@@ -279,6 +300,15 @@ internal static class NearbyResourceService
 				if (val?.m_resItem?.m_itemData?.m_shared != null)
 					keep.Add(val.m_resItem.m_itemData.m_shared.m_name);
 			}
+		}
+		if (UnityEngine.Time.realtimeSinceStartup < _upgradeKeepUntil)
+		{
+			foreach (string n in _upgradeKeepNames)
+				keep.Add(n);
+		}
+		else if (_upgradeKeepNames.Count > 0)
+		{
+			_upgradeKeepNames.Clear();
 		}
 		System.Collections.Generic.List<Container> nearby = new System.Collections.Generic.List<Container>(GetEligibleContainers(((Component)player).transform.position));
 		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);
@@ -858,7 +888,11 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 	/// Prefetch missing material from foreign chests into the player inventory.
 	/// Called from requirement checks (2s throttle per name). The manager re-validates.
 	/// </summary>
-	internal static void PrefetchMissing(Player player, string name, int quality, int missing, bool ignoreCooldown = false)
+	// trackLanding=true only for building stages (StageMissingForPiece): their
+	// landings feed the ahead ledger with consumption decrements covering every
+	// chest-aware sink. Craft-press stages stay untracked — the building keep-set
+	// would instantly return them and break crafting.
+	internal static void PrefetchMissing(Player player, string name, int quality, int missing, bool ignoreCooldown = false, bool trackLanding = false)
 	{
 		if (!ModConfig.CraftFromNearbyChests.Value || missing <= 0)
 			return;
@@ -925,18 +959,22 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 				call.Items.Add(op);
 				call.RespectReserves = true;
 				Inventory playerInv = ((Humanoid)player).GetInventory();
-				// Every prefetch landing is ledger-tracked (ahead AND first-click
-				// defer stages): consumption decrements globally, so an abandoned
-				// stock — built or not — is returnable. Production borrows use
-				// their own path (invisibly consumed) and stay untracked.
-				Container srcBox = container;
-				ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
+				if (trackLanding)
 				{
-					if (landed == null)
-						return;
-					foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
-						NoteAheadLanded(kv.Key, kv.Value, srcBox);
-				});
+					// Ledger-tracked landing (building stages only; see trackLanding).
+					Container srcBox = container;
+					ChestTxService.SubmitTakePrefetch(container, call, playerInv, delegate (System.Collections.Generic.Dictionary<string, int> landed)
+					{
+						if (landed == null)
+							return;
+						foreach (System.Collections.Generic.KeyValuePair<string, int> kv in landed)
+							NoteAheadLanded(kv.Key, kv.Value, srcBox);
+					});
+				}
+				else
+				{
+					ChestTxService.SubmitTakePrefetch(container, call, playerInv);
+				}
 				missing -= n;
 			}
 		}

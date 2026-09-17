@@ -218,6 +218,27 @@ internal static class NearbyResourceService
 	// unconsumed remainder goes back to the source chest instead of lingering.
 	private static readonly System.Collections.Generic.Dictionary<string, int> _aheadStock = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
 	private static readonly System.Collections.Generic.Dictionary<string, Container> _aheadSource = new System.Collections.Generic.Dictionary<string, Container>(System.StringComparer.Ordinal);
+	// Recently requested upgrade stock: the upgrade flow has no "selection", so
+	// the keep-set would otherwise instantly return its just-landed staging
+	// (same failure craft had). Windowed: abandoned upgrades still return later.
+	private static float _upgradeKeepUntil;
+	private static readonly System.Collections.Generic.HashSet<string> _upgradeKeepNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+
+	internal static void NoteUpgradeStaged(Piece piece)
+	{
+		_upgradeKeepNames.Clear();
+		if ((Object)(object)piece == (Object)null || piece.m_resources == null)
+		{
+			_upgradeKeepUntil = 0f;
+			return;
+		}
+		foreach (Requirement val in piece.m_resources)
+		{
+			if (val?.m_resItem?.m_itemData?.m_shared != null)
+				_upgradeKeepNames.Add(val.m_resItem.m_itemData.m_shared.m_name);
+		}
+		_upgradeKeepUntil = UnityEngine.Time.realtimeSinceStartup + 15f;
+	}
 
 	internal static void NoteAheadLanded(string name, int amount, Container source)
 	{
@@ -279,6 +300,15 @@ internal static class NearbyResourceService
 				if (val?.m_resItem?.m_itemData?.m_shared != null)
 					keep.Add(val.m_resItem.m_itemData.m_shared.m_name);
 			}
+		}
+		if (UnityEngine.Time.realtimeSinceStartup < _upgradeKeepUntil)
+		{
+			foreach (string n in _upgradeKeepNames)
+				keep.Add(n);
+		}
+		else if (_upgradeKeepNames.Count > 0)
+		{
+			_upgradeKeepNames.Clear();
 		}
 		System.Collections.Generic.List<Container> nearby = new System.Collections.Generic.List<Container>(GetEligibleContainers(((Component)player).transform.position));
 		System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>(_aheadStock.Keys);

@@ -203,6 +203,7 @@ internal static class ChestUpgradeService
 			// sees the player inventory: stage the missing part first (async tx
 			// pull), and gate the upgrade until it lands. Next press succeeds.
 			NearbyResourceService.StageMissingForPiece(localPlayer, piece);
+			NearbyResourceService.NoteUpgradeStaged(piece);
 			string missing;
 			bool staged = NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out missing);
 			if (!staged)

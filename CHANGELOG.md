@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Legacy chests no longer shrink a larger runtime inventory applied by other mods (final = max(current, template), issue #8).
+- Eating food from a shared chest as non-owner no longer pulls the whole stack into inventory (take 1 unit, issue #6).
+
 ## 0.3.2
 
 - Staged-stock return no longer breaks crafting (craft stages untracked) and no longer loops on upgrades (recent-upgrade keep window).

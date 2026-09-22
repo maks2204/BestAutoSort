@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using BestAutoSort.Core;
 using BestAutoSort.TxCore;
 
 namespace ChestTx.Tests
@@ -450,6 +451,22 @@ namespace ChestTx.Tests
             // Conservation: no spawning or consumption during the soak.
             Check.Equal(spawned, Total(chest, actors[0], actors[1], actors[2]), "soak conservation");
             Console.WriteLine("  600 ops across 3 actors, total=" + Total(chest, actors[0], actors[1], actors[2]));
+        }
+
+        public static void Test13_LegacyDimensions()
+        {
+            Console.WriteLine("Test13 legacy dimensions (issue #8)");
+            Resolve(5, 4, 5, 4, 5, 4);
+            Resolve(8, 6, 5, 4, 8, 6);
+            Resolve(5, 4, 8, 5, 8, 5);
+            Resolve(8, 4, 6, 6, 8, 6);
+        }
+
+        private static void Resolve(int curW, int curH, int tplW, int tplH, int expW, int expH)
+        {
+            ChestUpgradeDimensions.ResolveLegacyDimensions(curW, curH, tplW, tplH, out int finalW, out int finalH);
+            Check.Equal(expW, finalW, "width cur=" + curW + " tpl=" + tplW);
+            Check.Equal(expH, finalH, "height cur=" + curH + " tpl=" + tplH);
         }
     }
 }

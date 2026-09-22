@@ -14,4 +14,10 @@
   <ItemGroup>
     <ProjectReference Include="../../src/BestAutoSort.TxCore/BestAutoSort.TxCore.csproj" />
   </ItemGroup>
+
+  <!-- Pure legacy dimension helper (no Unity refs); linked so the net8.0 harness
+       can regress issue #8 without pulling the net472 game assembly. -->
+  <ItemGroup>
+    <Compile Include="../../src/BestAutoSort.Core/ChestUpgradeDimensions.cs" Link="ChestUpgradeDimensions.cs" />
+  </ItemGroup>
 </Project>

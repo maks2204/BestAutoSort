@@ -377,13 +377,15 @@ namespace BestAutoSort.Patches
             if ((Object)player == (Object)null)
                 return false;
             Inventory playerInv = ((Humanoid)player).GetInventory();
-            // Use from the chest: Take the full stack, then Use your own copy.
+            // Use from the chest: Take a single unit, then Use your own copy.
+            // Full-stack take would eat 1 and orphan N-1 in the player
+            // inventory (issue #6). Mirrors the PrefetchBorrow pattern.
             string name = item.m_shared != null ? item.m_shared.m_name : null;
             int quality = item.m_quality;
             int variant = item.m_variant;
             int world = item.m_worldLevel;
             int before = TxGui.CountInPlayer(playerInv, name, quality, variant, world);
-            ChestTxService.RequestTake(container, playerInv, item, item.m_stack,
+            ChestTxService.RequestTake(container, playerInv, item, 1,
                 delegate (ZPackage pkg, TxStatus status, uint rev)
                 {
                     if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)

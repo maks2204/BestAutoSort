@@ -967,18 +967,45 @@ namespace BestAutoSort.Tx
                     it.X = -1;
                     it.Y = -1;
                 }
+                // Conservation clamp: it.Amount was planned when the batch/cascade was
+                // built; an earlier operation may already have consumed part of the same
+                // physical source stack. For local/owner submissions SourceRef is the
+                // live client-side stack — never credit more than it still backs.
+                // Remote operations (SourceRef == null, never serialized) keep current
+                // behavior. This complements, not duplicates, the in-flight Claimed
+                // guard (TryClaimAddItems), which dedups the same ItemData within one
+                // submit but cannot see staleness across sequential operations.
+                int amount = it.Amount;
+                if (it.SourceRef != null)
+                {
+                    int liveStack = Math.Max(0, it.SourceRef.m_stack);
+                    int clamped = TxAddConservation.ClampAddAmount(amount, liveStack);
+                    if (clamped < amount)
+                    {
+                        TxLog.Warn("op=ADD source-clamp item=" + TxCodec.Describe(iname, it.Amount)
+                            + " requested=" + amount + " clamped=" + clamped
+                            + " liveSource=" + liveStack);
+                        amount = clamped;
+                    }
+                }
                 ItemData clone = it.Snapshot.Clone();
-                clone.m_stack = it.Amount;
+                clone.m_stack = amount;
                 int accepted = 0;
                 string why = "";
-                if (!call.EnforceRule || QuickStackTransfer.CanAcceptFromRule(rule, clone, destNames, destCats))
+                if (amount <= 0)
+                {
+                    // Source depleted after planning (cascade/batch consumed it):
+                    // credit nothing, record accepted 0, never count as full.
+                    why = "source-depleted";
+                }
+                else if (!call.EnforceRule || QuickStackTransfer.CanAcceptFromRule(rule, clone, destNames, destCats))
                 {
                     // Drag&drop with a requested cell goes strictly positional (like vanilla),
                     // otherwise merge/auto-place. No fallback: the remainder stays with the client.
                     if (it.X >= 0 && it.Y >= 0)
                     {
-                        accepted = TxInventory.AddPositional(inv, clone, it.Amount, it.X, it.Y);
-                        if (accepted < it.Amount)
+                        accepted = TxInventory.AddPositional(inv, clone, amount, it.X, it.Y);
+                        if (accepted < amount)
                         {
                             ItemData occupant = null;
                             string cell = "oob";
@@ -997,7 +1024,7 @@ namespace BestAutoSort.Tx
                     else
                     {
                         accepted = TxInventory.AddAndCount(inv, clone);
-                        if (accepted < it.Amount)
+                        if (accepted < amount)
                             why = accepted > 0 ? "partial-full" : "full";
                     }
                     if (accepted > 0 && call.EnforceRule)
@@ -1010,9 +1037,9 @@ namespace BestAutoSort.Tx
                 {
                     why = "rule";
                 }
-                TxLog.Info("op=ADD item=" + TxCodec.Describe(iname, it.Amount) + " want=(" + it.X + "," + it.Y + ") accepted=" + accepted + (why.Length > 0 ? " why=" + why : ""));
+                TxLog.Info("op=ADD item=" + TxCodec.Describe(iname, amount) + " want=(" + it.X + "," + it.Y + ") accepted=" + accepted + (why.Length > 0 ? " why=" + why : ""));
                 result.Accepted.Add(accepted);
-                if (accepted == it.Amount)
+                if (TxAddConservation.CountsAsFull(amount, accepted))
                     full++;
             }
             result.Status = full == result.Accepted.Count && result.Accepted.Count > 0

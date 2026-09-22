@@ -269,7 +269,7 @@ internal static class ChestUpgradeService
 			{
 				return;
 			}
-			ApplyContainerDefinition(container, container2);
+			ApplyContainerDefinition(container, container2, prefabName, markerTier);
 			flag = TryApplyLegacyVisual(container, container2, chestUpgradeVisualState);
 		}
 		else
@@ -642,21 +642,32 @@ internal static class ChestUpgradeService
 		}
 	}
 
-	private static void ApplyContainerDefinition(Container target, Container source)
+	// Legacy-only path (issue #8): the only caller is the IsLegacy branch of
+	// ApplyState. Never shrink a larger runtime inventory already applied by
+	// another mod: final = max(current, template). Since final >= current,
+	// existing item positions stay valid and nothing is lost or relocated.
+	private static void ApplyContainerDefinition(Container target, Container source, string prefabName, int markerTier)
 	{
+		Inventory inventory = target.GetInventory();
+		int currentWidth = ((inventory != null) ? inventory.GetWidth() : target.m_width);
+		int currentHeight = ((inventory != null) ? inventory.GetHeight() : target.m_height);
+		ChestUpgradeDimensions.ResolveLegacyDimensions(currentWidth, currentHeight, source.m_width, source.m_height, out int finalWidth, out int finalHeight);
 		target.m_name = source.m_name;
 		target.m_bkg = source.m_bkg;
-		target.m_width = source.m_width;
-		target.m_height = source.m_height;
+		target.m_width = finalWidth;
+		target.m_height = finalHeight;
 		target.m_openEffects = source.m_openEffects;
 		target.m_closeEffects = source.m_closeEffects;
-		Inventory inventory = target.GetInventory();
 		if (inventory != null)
 		{
 			InventoryNameField.SetValue(inventory, source.m_name);
 			InventoryBackgroundField.SetValue(inventory, source.m_bkg);
-			InventoryWidthField.SetValue(inventory, source.m_width);
-			InventoryHeightField.SetValue(inventory, source.m_height);
+			InventoryWidthField.SetValue(inventory, finalWidth);
+			InventoryHeightField.SetValue(inventory, finalHeight);
+		}
+		if (finalWidth != source.m_width || finalHeight != source.m_height)
+		{
+			Plugin.LogInstance.LogDebug((object)string.Format("[ChestCompat] legacy prefab={0} tier={1} current={2}x{3} template={4}x{5} final={6}x{7}", prefabName, markerTier, currentWidth, currentHeight, source.m_width, source.m_height, finalWidth, finalHeight));
 		}
 	}
 

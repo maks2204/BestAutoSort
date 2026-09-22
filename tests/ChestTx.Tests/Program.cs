@@ -19,6 +19,7 @@ namespace ChestTx.Tests
             TxTests.Test10_ManualMovePlusQuickStack();
             TxTests.Test11_AutoPullPlusPlayer();
             TxTests.Test12_ThreePlayerSoak();
+            TxTests.Test13_LegacyDimensions();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

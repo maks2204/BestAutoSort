@@ -36,7 +36,7 @@ internal static class QuickStackTransfer
 		{
 			return false;
 		}
-		if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
+		if (item.m_shared.m_questItem || !ValheimItemCategoryClassifier.IsAutoStackable(item))
 			return false;
 		if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 			return false;
@@ -110,7 +110,7 @@ internal static class QuickStackTransfer
 		{
 			return false;
 		}
-		if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
+		if (item.m_shared.m_questItem || !ValheimItemCategoryClassifier.IsAutoStackable(item))
 		{
 			return false;
 		}

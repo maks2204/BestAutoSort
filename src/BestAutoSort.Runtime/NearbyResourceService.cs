@@ -411,8 +411,16 @@ internal static class NearbyResourceService
 			to = ops.Count;
 		for (int i = from; i < to; i++)
 			call.Items.Add(ops[i]);
-		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records)
+		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records, TxCompletionKind disp)
 		{
+			if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+			{
+				// Terminal (issue #10): the chest committed but per-item counts are unknown.
+				// The stock is already stored — advancing the return chain with the full
+				// remainder would duplicate it into the next chest. Warned at the tx layer.
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] return details-unavailable: chain stopped (already stored)");
+				return;
+			}
 			int moved = movedSoFar;
 			if (records != null)
 			{
@@ -946,7 +954,7 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 					continue;
 				if (quality >= 0 && item.m_quality != quality)
 					continue;
-				if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
+				if (item.m_shared.m_questItem || !ValheimItemCategoryClassifier.IsAutoStackable(item))
 					continue;
 				if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(item))
 					continue;

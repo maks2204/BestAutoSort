@@ -168,27 +168,46 @@ namespace BestAutoSort.Tx
                 return;
             }
             pkg = body;
-            if (totalsOnly && IsTakeOp(pending.Op))
+            // Status-first (issue #10): Rejected/UnknownTx is never "applied", and a
+            // committed totals-only replay never fabricates per-item payloads.
+            TxCompletionKind disp = TxResponsePolicy.Classify(status, totalsOnly, pending.Op, pending.ExpectedItems);
+            if (disp == TxCompletionKind.FailedNotCommitted)
             {
-                // Totals-only Take results after handoff carry no items: nothing to
-                // complete with. Loud, never silent: the chest was debited and the
-                // client holds nothing.
-                Pending.Remove(txId);
-                ReleaseClaimed(pending.Claimed);
-                TxLog.Warn("tx=" + txId + " totals-only Take: applied but items unrecoverable from cache");
-                TellPlayer("Chest applied the move but the items cannot be recovered. Check the chest.");
-                RefreshNow(pending.Container);
+                // Nothing applied (or, for wire UnknownTx, nothing known): credit and
+                // remove nothing, complete terminally so no callback chain stalls.
+                if (status == TxStatus.UnknownTx)
+                {
+                    TxLog.Warn("tx=" + txId + " outcome UNKNOWN op=" + pending.Op + " (manager has no record, nothing credited/removed)");
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                }
+                else
+                {
+                    TxLog.Warn("tx=" + txId + " REJECTED op=" + pending.Op + " (nothing applied, nothing credited/removed)");
+                }
+                CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
                 return;
             }
-            if (totalsOnly && !IsTakeOp(pending.Op) && pending.ExpectedItems > 1)
+            if (disp == TxCompletionKind.CommittedTakeDetailsUnavailable)
+            {
+                // Totals-only Take after handoff carries no items: the chest was
+                // debited and the payload is gone. Loud, never silent — but the
+                // callback still fires with a valid empty Take result so
+                // automation (feed/restock/trash/prefetch) terminates instead of
+                // hanging. Credit nothing, fabricate nothing.
+                TxLog.Warn("tx=" + txId + " COMMITTED Take totals-only: applied but items unrecoverable from cache (nothing credited)");
+                TellPlayer("Chest applied the move but the items cannot be recovered. Check the chest.");
+                CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
+                return;
+            }
+            if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
             {
                 // A totals-only AddBatch body is [1][total]: unattributable across
-                // items. Removing [total,0,...] would over-remove the first key.
-                Pending.Remove(txId);
-                ReleaseClaimed(pending.Claimed);
-                TxLog.Warn("tx=" + txId + " totals-only multi-add: applied but per-item counts unknown");
+                // items. Removing [total,0,...] would over-remove the first key,
+                // and retrying/cascading would duplicate what is already stored.
+                // Terminal with zero removal; the Submit layer blocks the cascade.
+                TxLog.Warn("tx=" + txId + " COMMITTED multi-add totals-only: applied but per-item counts unknown (nothing removed, no auto-retry)");
                 TellPlayer("Chest applied the move but per-item counts are unknown. Check the chest before retrying.");
-                RefreshNow(pending.Container);
+                CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
                 return;
             }
             if (!totalsOnly && IsTakeOp(pending.Op) && !TakeBodyReadable(pkg))
@@ -207,18 +226,45 @@ namespace BestAutoSort.Tx
                     FinalizeUnknownTx(txId);
                 return;
             }
+            CompletePendingTerminal(txId, pkg, status, revision, disp);
+        }
+
+        /// <summary>
+        /// Exactly-once terminal completion (issue #10): remove from Pending before
+        /// invoking the callback, release claims once, invoke inside try/catch,
+        /// then refresh. A late duplicate finds no pending entry and touches nothing.
+        /// Decode failures still eligible for Query must stay pending; only
+        /// terminal paths use this helper.
+        /// </summary>
+        private static void CompletePendingTerminal(long txId, ZPackage body, TxStatus status, uint rev, TxCompletionKind disp)
+        {
+            PendingTx p;
+            if (!Pending.TryGetValue(txId, out p))
+                return;
             Pending.Remove(txId);
-            ReleaseClaimed(pending.Claimed);
+            ReleaseClaimed(p.Claimed);
             try
             {
-                if (pending.OnResponse != null)
-                    pending.OnResponse(pkg, status, revision);
+                if (p.OnResponse != null)
+                    p.OnResponse(body, status, rev, disp);
             }
             catch (Exception ex)
             {
                 TxLog.Error("tx=" + txId + " completion failed: " + ex.Message);
             }
-            RefreshNow(container);
+            RefreshNow(p.Container);
+        }
+
+        /// <summary>
+        /// Valid empty result body ([0]): decodes as zero takes / zero accepted
+        /// for every arity, so completions credit/remove nothing and still fire.
+        /// </summary>
+        private static ZPackage EmptyCountBody()
+        {
+            ZPackage body = new ZPackage();
+            body.Write(0);
+            body.SetPos(0);
+            return body;
         }
 
         // ============================ client: completions ============================
@@ -255,20 +301,9 @@ namespace BestAutoSort.Tx
             PendingTx p;
             if (!Pending.TryGetValue(txId, out p))
                 return;
-            Pending.Remove(txId);
-            ReleaseClaimed(p.Claimed);
-            RefreshNow(p.Container);
             TxLog.Warn("tx=" + p.TxId + " UNKNOWN op=" + p.Op + " (applied-or-not indeterminate, no queries left)");
             TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
-            try
-            {
-                if (p.OnResponse != null)
-                    p.OnResponse(null, TxStatus.UnknownTx, 0u);
-            }
-            catch (Exception ex)
-            {
-                TxLog.Error("tx=" + p.TxId + " unknown completion failed: " + ex.Message);
-            }
+            CompletePendingTerminal(txId, null, TxStatus.UnknownTx, 0u, TxCompletionKind.Indeterminate);
         }
 
         /// <summary>Structural walk of a Take body ([count](prefab,item,accepted)); resets pos.</summary>
@@ -593,7 +628,7 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.Add;
             call.Items.Add(back);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 int acc = ReadAcceptedAt(pkg, 0);
                 TxLog.Info("compensate-add status=" + status + " accepted=" + acc + " of " + wanted);
@@ -648,7 +683,7 @@ namespace BestAutoSort.Tx
         /// </summary>
         internal static void SubmitTakePrefetch(Container container, TxOpCall call, Inventory dstInv, Action<System.Collections.Generic.Dictionary<string, int>> onLanded = null)
         {
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 CompleteTake(dstInv, pkg, status, rev, container, null, -1, -1, onLanded);
             });
@@ -695,7 +730,7 @@ namespace BestAutoSort.Tx
                 }, playerId, actorPos);
                 return;
             }
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 List<DecodedTake> decoded = TxCodec.ReadTakeResults(pkg);
                 if (decoded == null)
@@ -717,20 +752,22 @@ namespace BestAutoSort.Tx
         /// <summary>Max items per tx: keeps request/response bodies far from transport truncation.</summary>
         internal const int BatchChunkSize = 4;
 
-        internal static void SubmitCall(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>> onDone)
+        internal static void SubmitCall(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>, TxCompletionKind> onDone)
         {
-            SubmitCallDetailed(container, call, srcInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status)
+            SubmitCallDetailed(container, call, srcInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status, TxCompletionKind disp)
             {
                 if (onDone != null)
-                    onDone(records);
+                    onDone(records, disp);
             });
         }
 
         /// <summary>
-        /// Detailed batch submit: per-item accepted counts + status for cascade retry.
+        /// Detailed batch submit: per-item accepted counts + status for cascade retry,
+        /// plus the completion disposition. CommittedMultiAddDetailsUnavailable is
+        /// terminal: the remainder must NOT cascade (it is already stored).
         /// Chunking applies inside (each chunk reports separately).
         /// </summary>
-        internal static void SubmitCallDetailed(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>, List<int>, TxStatus> onDone)
+        internal static void SubmitCallDetailed(Container container, TxOpCall call, Inventory srcInv, Action<List<TransferRecord>, List<int>, TxStatus, TxCompletionKind> onDone)
         {
             if (call != null && call.Items.Count > BatchChunkSize)
             {
@@ -761,12 +798,24 @@ namespace BestAutoSort.Tx
                     TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
                     List<TransferRecord> records = FinishBatchCompletion(container, srcInv, call, r);
                     if (onDone != null)
-                        onDone(records, acc, st);
+                        onDone(records, acc, st, TxCompletionKind.Normal);
                 });
                 return;
             }
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
+                if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+                {
+                    // Committed but per-item counts unknown (ring replay after handoff):
+                    // remove nothing from the source and report zero movement with the
+                    // disposition, so the caller terminates instead of cascading.
+                    TxLog.Warn("batch details-unavailable: committed but unattributed, nothing removed, no cascade");
+                    TellPlayer("Chest applied the move but per-item counts are unknown. Check the chest before retrying.");
+                    RefreshNow(container);
+                    if (onDone != null)
+                        onDone(new List<TransferRecord>(), ZeroAccepted(call.Items.Count), status, disp);
+                    return;
+                }
                 List<int> accepted = ReadAcceptedList(pkg, call.Items.Count);
                 List<TransferRecord> records = new List<TransferRecord>();
                 for (int i = 0; i < call.Items.Count && i < accepted.Count; i++)
@@ -778,8 +827,16 @@ namespace BestAutoSort.Tx
                 }
                 RefreshNow(container);
                 if (onDone != null)
-                    onDone(records, accepted, status);
+                    onDone(records, accepted, status, disp);
             }, 0L, null, call.Items.Count);
+        }
+
+        private static List<int> ZeroAccepted(int count)
+        {
+            List<int> res = new List<int>(count < 0 ? 0 : count);
+            for (int i = 0; i < count; i++)
+                res.Add(0);
+            return res;
         }
 
         private static List<TransferRecord> FinishBatchCompletion(Container container, Inventory srcInv, TxOpCall call, StoredResult r)

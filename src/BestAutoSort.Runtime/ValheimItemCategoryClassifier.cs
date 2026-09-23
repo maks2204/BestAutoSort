@@ -31,4 +31,18 @@ internal static class ValheimItemCategoryClassifier
 			FoodEitr = shared.m_foodEitr
 		});
 	}
+
+	/// <summary>
+	/// Player-side quick-stack eligibility. Vanilla sets m_autoStack=false on eggs;
+	/// when <see cref="ModConfig.TreatEggsAsAutoStack"/> is on, Egg-category items
+	/// (Asksvin/Chicken/Vulture) count as stackable. Scoped narrowly to eggs only.
+	/// </summary>
+	internal static bool IsAutoStackable(ItemData item)
+	{
+		if (item == null || item.m_shared == null)
+			return false;
+		if (item.m_shared.m_autoStack)
+			return true;
+		return ModConfig.TreatEggsAsAutoStack.Value && Classify(item) == ItemCategory.Egg;
+	}
 }

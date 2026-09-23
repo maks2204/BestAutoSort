@@ -333,7 +333,7 @@ namespace BestAutoSort.Patches
             call.Items.AddRange(items);
             call.EnforceRule = false;
             ChestTxService.SubmitCall(container, call, playerInv,
-                delegate (List<TransferRecord> records)
+                delegate (List<TransferRecord> records, TxCompletionKind disp)
                 {
                     int total = 0;
                     for (int i = 0; i < records.Count; i++)

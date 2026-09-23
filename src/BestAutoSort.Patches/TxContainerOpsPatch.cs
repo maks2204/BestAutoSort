@@ -131,7 +131,7 @@ namespace BestAutoSort.Patches
             stackCall.Items.AddRange(items);
             stackCall.EnforceRule = false;
             ChestTxService.SubmitCall(stackContainer, stackCall, playerInv,
-                delegate (List<TransferRecord> records)
+                delegate (List<TransferRecord> records, TxCompletionKind disp)
                 {
                     if (records.Count > 0)
                         TransferVisuals.Play(records, stackContainer);

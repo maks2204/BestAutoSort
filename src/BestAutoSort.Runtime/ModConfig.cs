@@ -19,6 +19,8 @@ internal static class ModConfig
 
 	internal static ConfigEntry<bool> ProtectHotbar { get; private set; }
 
+	internal static ConfigEntry<bool> TreatEggsAsAutoStack { get; private set; }
+
 	internal static ConfigEntry<bool> SkipCustomData { get; private set; }
 
 	internal static ConfigEntry<bool> IncludeVehicleContainers { get; private set; }
@@ -76,6 +78,7 @@ internal static class ModConfig
 		NearbyRange = config.Bind<float>("Quick Stack", "NearbyRange", 20f, new ConfigDescription("Maximum quick-stack radius in metres.", (AcceptableValueBase)(object)new AcceptableValueRange<float>(2f, 50f), Array.Empty<object>()));
 		RequestSpacing = config.Bind<float>("Quick Stack", "RequestSpacing", 0.06f, new ConfigDescription("Delay between vanilla container ownership requests.", (AcceptableValueBase)(object)new AcceptableValueRange<float>(0f, 0.5f), Array.Empty<object>()));
 		ProtectHotbar = config.Bind<bool>("Quick Stack", "ProtectHotbar", true, "Never move items currently placed in the first player-inventory row.");
+		TreatEggsAsAutoStack = config.Bind<bool>("Quick Stack", "TreatEggsAsAutoStack", true, "Treat eggs (Asksvin, Chicken, Vulture) as quick-stackable even though vanilla sets m_autoStack=false on them.");
 		SkipCustomData = config.Bind<bool>("Quick Stack", "SkipCustomData", true, "Skip items with custom data to avoid merging modded item state into an incompatible stack.");
 		IncludeVehicleContainers = config.Bind<bool>("Quick Stack", "IncludeVehicleContainers", true, "Include player-built cart and ship containers. Enabled by default; normal range, access, and in-use checks still apply.");
 		IncludeWorldContainers = config.Bind<bool>("Quick Stack", "IncludeWorldContainers", false, "Include loot chests and other physical containers not placed by a player.");

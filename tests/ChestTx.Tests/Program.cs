@@ -21,6 +21,7 @@ namespace ChestTx.Tests
             TxTests.Test12_ThreePlayerSoak();
             TxTests.Test13_LegacyDimensions();
             TxSourceClampTests.RunAll();
+            TxIssue10Tests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

@@ -43,7 +43,7 @@ internal sealed class ProductionItemLoan
 				call.EnforceRule = false;
 				Inventory srcInv = inventory;
 				ItemData itemRef = _item;
-				ChestTxService.SubmitCall(_source, call, srcInv, delegate (List<TransferRecord> records)
+				ChestTxService.SubmitCall(_source, call, srcInv, delegate (List<TransferRecord> records, TxCompletionKind disp)
 					{
 					NearbyResourceService.KeepLoanedItemSafe(_player, itemRef);
 				});

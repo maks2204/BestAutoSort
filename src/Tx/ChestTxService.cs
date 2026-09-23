@@ -172,7 +172,7 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.Add;
             call.Items.Add(opItem);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 int accepted = ReadAcceptedAt(pkg, 0);
                 CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone, alreadyRemoved);
@@ -186,8 +186,20 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.AddBatch;
             call.Items.AddRange(items);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
+                if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+                {
+                    // Committed but per-item counts unknown (ring replay after handoff):
+                    // the aggregate cannot be attributed, so remove nothing and let
+                    // the caller reconcile manually. Terminal: no cascade/retry.
+                    TxLog.Warn("addbatch details-unavailable: committed but unattributed, nothing removed");
+                    TellPlayer("Chest applied the move but per-item counts are unknown. Check the chest before retrying.");
+                    RefreshNow(container);
+                    if (onDone != null)
+                        onDone(EmptyCountBody(), status, rev);
+                    return;
+                }
                 List<int> accepted = ReadAcceptedList(pkg, items.Count);
                 for (int i = 0; i < items.Count && i < accepted.Count; i++)
                     CompleteAdd(srcInv, null, items[i], accepted[i], status, rev, container, null);
@@ -242,7 +254,7 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.Take;
             call.Items.Add(opItem);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 CompleteTake(dstInv, pkg, status, rev, container, onDone, wantDstX, wantDstY);
             });
@@ -273,7 +285,7 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.TakeBatch;
             call.Items.AddRange(items);
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 CompleteTake(dstInv, pkg, status, rev, container, onDone);
             });
@@ -289,7 +301,7 @@ namespace BestAutoSort.Tx
             call.Items.Add(opItem);
             call.DstX = dstX;
             call.DstY = dstY;
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
                 if (status == TxStatus.Rejected)
@@ -305,7 +317,7 @@ namespace BestAutoSort.Tx
             call.Op = TxOp.Sort;
             call.Mode = mode;
             call.Desc = desc;
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
                 if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
@@ -318,7 +330,7 @@ namespace BestAutoSort.Tx
             TxOpCall call = new TxOpCall();
             call.Op = TxOp.SetRule;
             call.Rule = rule ?? string.Empty;
-            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev)
+            Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
                 if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
@@ -490,7 +502,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
+        private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
         {
             if (!Plugin.IsActive || !IsShared(container))
             {
@@ -519,7 +531,7 @@ namespace BestAutoSort.Tx
                         catch
                         {
                         }
-                        onDone(body, r.Status, r.Revision);
+                        onDone(body, r.Status, r.Revision, TxCompletionKind.Normal);
                     }
                 }, playerId, actorPos);
                 return;
@@ -535,7 +547,7 @@ namespace BestAutoSort.Tx
                     // Empty body reads as accepted=0: nothing is removed twice.
                     try
                     {
-                        onDone(new ZPackage(), TxStatus.Accepted, CurrentRevision(container));
+                        onDone(new ZPackage(), TxStatus.Accepted, CurrentRevision(container), TxCompletionKind.Normal);
                     }
                     catch (Exception ex)
                     {
@@ -710,7 +722,7 @@ namespace BestAutoSort.Tx
             string accessWhy;
             if (!ChestAuthority.CanUse(container, sender, playerId, actorPos, out accessWhy))
             {
-                TxLog.Warn("tx=" + txId + " REJECT access(" + accessWhy + ") peer=" + sender);
+                LogAccessReject(container, txId, sender, playerId, call.Op, accessWhy);
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }
@@ -732,6 +744,59 @@ namespace BestAutoSort.Tx
             };
             state.Queue.Enqueue(job);
             Drain(state);
+        }
+
+        /// <summary>
+        /// Rejection diagnostics (issue #10): container/tx/sender/claimed/resolved/
+        /// server-sender/op/reason/owner/local-uid. Logged only on rejection.
+        /// </summary>
+        private static void LogAccessReject(Container container, long txId, long sender, long claimedPlayerId, TxOp op, string why)
+        {
+            string zid = "?";
+            long owner = 0L;
+            try
+            {
+                ZNetView nv = TxReflect.GetNetView(container);
+                if ((Object)nv != (Object)null && nv.IsValid())
+                {
+                    zid = TxLog.Zid(nv.GetZDO().m_uid);
+                    owner = nv.GetZDO().GetOwner();
+                }
+            }
+            catch
+            {
+            }
+            string resolved = "none";
+            try
+            {
+                long resolvedId;
+                Vector3 resolvedPos;
+                if (ChestAuthority.ResolveActor(sender, out resolvedId, out resolvedPos))
+                    resolved = resolvedId.ToString();
+            }
+            catch
+            {
+            }
+            bool senderIsServer = false;
+            try
+            {
+                senderIsServer = ChestAuthority.IsServerSenderOrSelf(sender);
+            }
+            catch
+            {
+            }
+            long localUid = 0L;
+            try
+            {
+                localUid = ZNet.GetUID();
+            }
+            catch
+            {
+            }
+            TxLog.Warn("tx=" + txId + " REJECT access(" + why + ") container=" + zid
+                + " sender=" + sender + " claimed=" + claimedPlayerId + " resolved=" + resolved
+                + " senderIsServer=" + senderIsServer + " op=" + op
+                + " owner=" + owner + " local=" + localUid);
         }
 
         private static bool DecodeCall(ZPackage payload, out TxOpCall call, out uint baseRev, out long playerId, out Vector3 actorPos)

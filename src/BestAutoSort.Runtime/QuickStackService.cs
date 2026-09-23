@@ -113,7 +113,7 @@ internal sealed class QuickStackService
 		{
 			if (item == null || item.m_shared == null)
 				continue;
-			if (item.m_shared.m_questItem || !item.m_shared.m_autoStack)
+			if (item.m_shared.m_questItem || !ValheimItemCategoryClassifier.IsAutoStackable(item))
 				continue;
 			if (((Humanoid)player).IsItemEquiped(item))
 				continue;
@@ -223,7 +223,7 @@ internal sealed class QuickStackService
 	{
 		Inventory playerInv = ((Humanoid)player).GetInventory();
 		_cascadePending++;
-		ChestTxService.SubmitCallDetailed(chest, call, playerInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status)
+		ChestTxService.SubmitCallDetailed(chest, call, playerInv, delegate (List<TransferRecord> records, List<int> accepted, TxStatus status, TxCompletionKind disp)
 		{
 			try
 			{
@@ -233,6 +233,14 @@ internal sealed class QuickStackService
 				_totalMoved += movedHere;
 				if (session == _session && records.Count > 0)
 					TransferVisuals.Play(records, chest);
+				if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+				{
+					// Terminal (issue #10): the chest committed but per-item counts are
+					// unknown. The remainder is already stored — cascading it onward as a
+					// new tx would duplicate items. Warned at the tx layer; stop here.
+					Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack details-unavailable: no cascade (already stored)");
+					return;
+				}
 				if (rest == null || rest.Count == 0 || call == null || call.Items == null)
 					return;
 				TxOpCall next = new TxOpCall();
@@ -334,7 +342,7 @@ internal sealed class QuickStackService
 		call.Items.AddRange(candidates);
 		call.EnforceRule = true;
 		_submitted++;
-		ChestTxService.SubmitCall(openContainer, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records2)
+		ChestTxService.SubmitCall(openContainer, call, ((Humanoid)player).GetInventory(), delegate (List<TransferRecord> records2, TxCompletionKind disp2)
 			{
 				if (records2.Count > 0)
 					TransferVisuals.Play(records2, openContainer);
@@ -347,7 +355,7 @@ internal sealed class QuickStackService
 	{
 		foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 		{
-			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
+			if (!allItem.m_shared.m_questItem && ValheimItemCategoryClassifier.IsAutoStackable(allItem) && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
 			{
 				return true;
 			}
@@ -417,6 +425,34 @@ internal sealed class QuickStackService
 			int quest = 0;
 			int custom = 0;
 			System.Collections.Generic.Dictionary<string, int> customKeys = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.Dictionary<string, int> movableStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.Dictionary<string, int> movableUnits = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> movableOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> equippedStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> equippedOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> hotbarStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> hotbarOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> noautoStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> noautoOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> lockedStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> lockedOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> reservedStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> reservedOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> questStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> questOrder = new System.Collections.Generic.List<string>();
+			System.Collections.Generic.Dictionary<string, int> customStacks = new System.Collections.Generic.Dictionary<string, int>();
+			System.Collections.Generic.List<string> customOrder = new System.Collections.Generic.List<string>();
+			System.Action<System.Collections.Generic.Dictionary<string, int>, System.Collections.Generic.List<string>, string> trackFiltered = delegate (System.Collections.Generic.Dictionary<string, int> stacks, System.Collections.Generic.List<string> order, string name)
+			{
+				if (name == null)
+					name = "?";
+				bool seen = stacks.ContainsKey(name);
+				int fc;
+				stacks.TryGetValue(name, out fc);
+				stacks[name] = fc + 1;
+				if (!seen)
+					order.Add(name);
+			};
 			foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 			{
 				if (allItem == null || allItem.m_shared == null)
@@ -424,36 +460,43 @@ internal sealed class QuickStackService
 				if (allItem.m_shared.m_questItem)
 				{
 					quest++;
+					trackFiltered(questStacks, questOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
-				if (!allItem.m_shared.m_autoStack)
+				if (!ValheimItemCategoryClassifier.IsAutoStackable(allItem))
 				{
 					noauto++;
+					trackFiltered(noautoStacks, noautoOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
 				if (((Humanoid)player).IsItemEquiped(allItem))
 				{
 					eq++;
+					trackFiltered(equippedStacks, equippedOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
 				if (ModConfig.ProtectHotbar.Value && allItem.m_gridPos.y == 0)
 				{
 					hot++;
+					trackFiltered(hotbarStacks, hotbarOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
 				if (ItemLockService.IsLocked(allItem))
 				{
 					locked++;
+					trackFiltered(lockedStacks, lockedOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
 				if (RestockProfileService.IsTarget(allItem))
 				{
 					reserved++;
+					trackFiltered(reservedStacks, reservedOrder, allItem.m_shared.m_name ?? "?");
 					continue;
 				}
 				if (ModConfig.SkipCustomData.Value && CustomDataTags.HasForeignData(allItem))
 				{
 					custom++;
+					trackFiltered(customStacks, customOrder, allItem.m_shared.m_name ?? "?");
 					foreach (System.Collections.Generic.KeyValuePair<string, string> kv in allItem.m_customData)
 					{
 						int kc;
@@ -463,8 +506,83 @@ internal sealed class QuickStackService
 					continue;
 				}
 				movable++;
+				string movableKey = allItem.m_shared.m_name ?? "?";
+				bool seenMovable = movableStacks.ContainsKey(movableKey);
+				int msc;
+				movableStacks.TryGetValue(movableKey, out msc);
+				movableStacks[movableKey] = msc + 1;
+				int mun;
+				movableUnits.TryGetValue(movableKey, out mun);
+				movableUnits[movableKey] = mun + allItem.m_stack;
+				if (!seenMovable)
+					movableOrder.Add(movableKey);
 			}
 			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: inventory movable=" + movable + " (equipped=" + eq + " hotbar=" + hot + " noautostack=" + noauto + " locked=" + locked + " reserved=" + reserved + " quest=" + quest + " custom=" + custom + ")"));
+			if (movableOrder.Count == 0)
+			{
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack diagnosis: movable items: none");
+			}
+			else
+			{
+				System.Text.StringBuilder msb = new System.Text.StringBuilder();
+				msb.Append("[ChestTX] quickstack diagnosis: movable items: ");
+				int mshown = 0;
+				foreach (string mname in movableOrder)
+				{
+					if (mshown >= 10)
+						break;
+					if (mshown > 0)
+						msb.Append(", ");
+					msb.Append(mname).Append("x").Append(movableStacks[mname]).Append("(").Append(movableUnits[mname]).Append(")");
+					mshown++;
+				}
+				if (movableOrder.Count > mshown)
+					msb.Append(", +").Append(movableOrder.Count - mshown).Append(" more");
+				Plugin.LogInstance.LogInfo((object)msb.ToString());
+			}
+			System.Func<System.Collections.Generic.Dictionary<string, int>, System.Collections.Generic.List<string>, string> formatBucket = delegate (System.Collections.Generic.Dictionary<string, int> stacks, System.Collections.Generic.List<string> order)
+			{
+				if (order.Count == 0)
+					return "-";
+				System.Text.StringBuilder bsb = new System.Text.StringBuilder();
+				int bshown = 0;
+				foreach (string bname in order)
+				{
+					if (bshown >= 5)
+						break;
+					if (bshown > 0)
+						bsb.Append(", ");
+					bsb.Append(bname).Append("x").Append(stacks[bname]);
+					bshown++;
+				}
+				if (order.Count > bshown)
+					bsb.Append(", +").Append(order.Count - bshown).Append(" more");
+				return bsb.ToString();
+			};
+			System.Text.StringBuilder fsb = new System.Text.StringBuilder();
+			fsb.Append("[ChestTX] quickstack diagnosis: filtered items: ");
+			fsb.Append("equipped=[").Append(formatBucket(equippedStacks, equippedOrder)).Append("] ");
+			fsb.Append("hotbar=[").Append(formatBucket(hotbarStacks, hotbarOrder)).Append("] ");
+			fsb.Append("noautostack=[").Append(formatBucket(noautoStacks, noautoOrder)).Append("] ");
+			fsb.Append("locked=[").Append(formatBucket(lockedStacks, lockedOrder)).Append("] ");
+			fsb.Append("reserved=[").Append(formatBucket(reservedStacks, reservedOrder)).Append("] ");
+			fsb.Append("quest=[").Append(formatBucket(questStacks, questOrder)).Append("] ");
+			fsb.Append("custom=[").Append(formatBucket(customStacks, customOrder)).Append("]");
+			Plugin.LogInstance.LogInfo((object)fsb.ToString());
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: config StorageMatchMode=" + ModConfig.StorageMatchMode.Value + " NearbyRange=" + range + "m"));
+			Container openChest = InventoryAccess.CurrentContainer(InventoryGui.instance);
+			if ((Object)(object)openChest == (Object)null)
+			{
+				Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack diagnosis: open-container: none");
+			}
+			else
+			{
+				Vector3 openDelta = ((Component)openChest).transform.position - playerPosition;
+				float openDist = (openDelta).magnitude;
+				bool openInRange = (openDelta).sqrMagnitude <= rangeSquared;
+				bool openEligible = IsEligible(openChest, player, FindMovablePlayerItems(player), playerPosition, rangeSquared);
+				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack diagnosis: open-container: " + ((Object)openChest).name + " (" + Math.Round(openDist, 1) + "m) inRange=" + openInRange + " eligible=" + openEligible));
+			}
 			if (customKeys.Count > 0)
 			{
 				System.Text.StringBuilder cksb = new System.Text.StringBuilder();
@@ -564,7 +682,7 @@ internal sealed class QuickStackService
 		ItemMatchIndex itemMatchIndex = new ItemMatchIndex();
 		foreach (ItemData allItem in ((Humanoid)player).GetInventory().GetAllItems())
 		{
-			if (!allItem.m_shared.m_questItem && allItem.m_shared.m_autoStack && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
+			if (!allItem.m_shared.m_questItem && ValheimItemCategoryClassifier.IsAutoStackable(allItem) && !((Humanoid)player).IsItemEquiped(allItem) && (!ModConfig.ProtectHotbar.Value || allItem.m_gridPos.y != 0) && !ItemLockService.IsLocked(allItem) && !RestockProfileService.IsTarget(allItem) && (!ModConfig.SkipCustomData.Value || !CustomDataTags.HasForeignData(allItem)))
 			{
 				itemMatchIndex.Names.Add(allItem.m_shared.m_name);
 				itemMatchIndex.PrefabNames.Add(ValheimItemCategoryClassifier.PrefabName(allItem));

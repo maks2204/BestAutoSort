@@ -143,7 +143,7 @@ namespace BestAutoSort.Tx
         /// <summary>Item arity the response body must carry (-1 = unknown, legacy behavior).</summary>
         public int ExpectedItems = -1;
         /// <summary>Completion context (closures over live refs — valid only until the deadline).</summary>
-        public System.Action<ZPackage, TxStatus, uint> OnResponse;
+        public System.Action<ZPackage, TxStatus, uint, TxCompletionKind> OnResponse;
         /// <summary>Source items claimed by the in-flight deduplicator (Add/AddBatch).</summary>
         public System.Collections.Generic.List<ItemDrop.ItemData> Claimed;
     }

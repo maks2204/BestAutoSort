@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BestAutoSort.Tx;
+using BestAutoSort.TxCore;
 using HarmonyLib;
 using UnityEngine;
 
@@ -41,10 +42,10 @@ internal static class ChestAuthority
 			return false;
 		}
 		ZNetPeer peer = instance.GetPeer(sender);
-		if (instance.IsServer() && peer == null)
-		{
-			return false;
-		}
+		// No early return for a missing peer on the server: fall through to the
+		// strict player scan below. The scan still binds owner==sender, so an
+		// unknown sender cannot resolve (this un-breaks the listen-server host,
+		// which has no ZNetPeer entry for its own uid but owns a Player ZDO).
 		if (peer != null && peer.m_characterID != ZDOID.None)
 		{
 			ZDOMan instance2 = ZDOMan.instance;
@@ -66,10 +67,11 @@ internal static class ChestAuthority
 				{
 					playerId = val.GetLong(ZDOVars.s_playerID, 0L);
 					position = val.GetPosition();
-					return playerId != 0;
+					if (playerId != 0)
+						return true;
 				}
 			}
-			return false;
+			// Peer data present but unusable: fall through to the strict scan.
 		}
 		foreach (Player allPlayer in Player.GetAllPlayers())
 		{
@@ -132,8 +134,15 @@ internal static class ChestAuthority
 		// walk-up-and-click deposits (items bounced back to the inventory).
 		// Spoofing is still contained: the playerId must match the ZDO-owned
 		// character, plus vanilla CheckAccess and the ward check apply.
+		//
+		// Actor-first (issue #10): a resolvable real player always takes the
+		// player path, even when the sender is also the server peer
+		// (listen-server host). Only a genuinely actor-less server sender may
+		// use the dedicated-automation path bound to the chest creator.
 		why = "ok";
-		if (sender != 0L && IsServerSenderOrSelf(sender))
+		bool actorResolved = ResolveActor(sender, out var resolvedPlayerId, out var _);
+		TxActorPath path = TxResponsePolicy.ClassifyActorPath(actorResolved, sender != 0L && IsServerSenderOrSelf(sender));
+		if (path == TxActorPath.ServerAutomation)
 		{
 			// Headless/dedicated server feeding: no player body, so no actor to resolve.
 			// The claim must be the chest creator (same rule the old feeder used);
@@ -163,11 +172,12 @@ internal static class ChestAuthority
 			}
 			return true;
 		}
-		if (!ResolveActor(sender, out var playerId, out var _))
+		if (path == TxActorPath.RejectNoActor)
 		{
 			why = "no-actor";
 			return false;
 		}
+		long playerId = resolvedPlayerId;
 		if (playerId != claimedPlayerId)
 		{
 			why = "player-mismatch";

@@ -58,16 +58,33 @@ namespace BestAutoSort.TxCore
                     _order.RemoveFirst();
                     _processed.Remove(oldest);
                 }
-                _ring.Add(new RingEntry
-                {
-                    TxId = request.TxId,
-                    AcceptedTotal = result.AcceptedTotal(),
-                    Revision = Revision
-                });
-                while (_ring.Count > TxLimits.RingCap)
-                    _ring.RemoveAt(0);
+                _ring.Clear();
+                _ring.AddRange(TxRing.Snapshot(CollectSlots()));
                 return result;
             }
+        }
+
+        /// <summary>
+        /// Projects the idempotency cache (oldest-first) into the shared ring
+        /// builder input. Must be called AFTER the current tx is cached, so
+        /// the snapshot always includes the just-committed tx.
+        /// </summary>
+        private List<RingSlot> CollectSlots()
+        {
+            List<RingSlot> slots = new List<RingSlot>(_order.Count);
+            foreach (long txId in _order)
+            {
+                TxResult r;
+                if (!_processed.TryGetValue(txId, out r) || r == null)
+                    continue;
+                RingSlot s;
+                s.TxId = txId;
+                s.AcceptedTotal = r.AcceptedTotal();
+                s.Revision = r.Revision;
+                s.Status = r.Status;
+                slots.Add(s);
+            }
+            return slots;
         }
 
         /// <summary>

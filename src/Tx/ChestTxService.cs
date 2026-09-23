@@ -188,6 +188,17 @@ namespace BestAutoSort.Tx
             call.Items.AddRange(items);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
+                if (disp == TxCompletionKind.Indeterminate)
+                {
+                    // Terminal: commitment unknown. Remove nothing, retry nothing —
+                    // the chest may already hold the items. Loud, never silent.
+                    TxLog.Warn("addbatch indeterminate: outcome unknown, nothing removed — check the chest before retrying");
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                    RefreshNow(container);
+                    if (onDone != null)
+                        onDone(EmptyCountBody(), status, rev);
+                    return;
+                }
                 if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
                 {
                     // Committed but per-item counts unknown (ring replay after handoff):
@@ -304,7 +315,9 @@ namespace BestAutoSort.Tx
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
-                if (status == TxStatus.Rejected)
+                if (status == TxStatus.UnknownTx)
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                else if (status == TxStatus.Rejected)
                     TellPlayer("The shared chest changed. Try that item move again.");
                 if (onDone != null)
                     onDone(pkg, status, rev);
@@ -320,7 +333,9 @@ namespace BestAutoSort.Tx
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
-                if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
+                if (status == TxStatus.UnknownTx)
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                else if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
                     TellPlayer("Chest sort failed. Try again.");
             });
         }
@@ -333,7 +348,9 @@ namespace BestAutoSort.Tx
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 RefreshNow(container);
-                if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
+                if (status == TxStatus.UnknownTx)
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                else if (status != TxStatus.Accepted && status != TxStatus.Duplicate)
                     TellPlayer("Chest rule was not saved. Try again.");
             });
         }
@@ -1282,9 +1299,16 @@ namespace BestAutoSort.Tx
                 // the manager lacks, and drops there get rejected).
                 TxReflect.UpdateRows(state.Container);
                 TxReflect.SaveContainer(state.Container);
-                WriteRing(state);
             }
+            // Post-inventory-save commit checkpoint: captured BEFORE the ring
+            // ZDO write and used consistently in the result, the RAM cache,
+            // the ring entry and the response. Never re-read DataRevision after
+            // ZDO.Set(RingKey): the ring write itself may bump the revision, so
+            // a read-back would describe the ring write, not the commit.
             result.Revision = CurrentRevision(state.Container);
+            // The just-committed tx enters the cache BEFORE the ring snapshot
+            // is built: an immediate handoff otherwise exposes a ring without
+            // its idempotency record and the replay re-applies (double-apply).
             state.Processed[job.TxId] = CloneStored(result, result.Status);
             state.ProcOrder.AddLast(job.TxId);
             while (state.ProcOrder.Count > TxLimits.ProcessedCacheCap)
@@ -1293,6 +1317,8 @@ namespace BestAutoSort.Tx
                 state.ProcOrder.RemoveFirst();
                 state.Processed.Remove(oldest);
             }
+            if (mutated)
+                WriteRing(state);
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                 + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
         }
@@ -1340,25 +1366,28 @@ namespace BestAutoSort.Tx
                 ZNetView netView = TxReflect.GetNetView(state.Container);
                 if ((Object)netView == (Object)null || !netView.IsValid())
                     return;
-                List<RingEntry> ring = new List<RingEntry>();
-                // ProcOrder is oldest-first: walk from the end (newest), then reverse.
-                LinkedListNode<long> node = state.ProcOrder.Last;
-                int collected = 0;
-                while (node != null && collected < TxLimits.RingCap)
+                // ProcOrder is oldest-first and already includes the
+                // just-committed tx (CommitResult caches before writing).
+                // TxRing.Snapshot keeps only committed entries: a persisted
+                // Rejected would resurrect as Duplicate (= committed) in
+                // SeedFromRing and falsely imply commitment.
+                List<RingSlot> slots = new List<RingSlot>(state.ProcOrder.Count);
+                LinkedListNode<long> node = state.ProcOrder.First;
+                while (node != null)
                 {
                     StoredResult r;
-                    if (state.Processed.TryGetValue(node.Value, out r))
+                    if (state.Processed.TryGetValue(node.Value, out r) && r != null)
                     {
-                        RingEntry e;
-                        e.TxId = node.Value;
-                        e.AcceptedTotal = r.AcceptedTotal();
-                        e.Revision = r.Revision;
-                        ring.Add(e);
-                        collected++;
+                        RingSlot s;
+                        s.TxId = node.Value;
+                        s.AcceptedTotal = r.AcceptedTotal();
+                        s.Revision = r.Revision;
+                        s.Status = r.Status;
+                        slots.Add(s);
                     }
-                    node = node.Previous;
+                    node = node.Next;
                 }
-                ring.Reverse();
+                List<RingEntry> ring = TxRing.Snapshot(slots);
                 netView.GetZDO().Set(RingKey, TxCore.TxCore.EncodeRing(ring));
             }
             catch (Exception ex)
@@ -1387,6 +1416,8 @@ namespace BestAutoSort.Tx
 
         private static void SeedFromRing(ChestState state, List<RingEntry> ring)
         {
+            // The ring holds committed entries only (WriteRing filters via
+            // TxRing), so restoring each as Duplicate (= committed) is sound.
             state.Processed.Clear();
             state.ProcOrder.Clear();
             for (int i = 0; i < ring.Count && i < TxLimits.RingCap; i++)

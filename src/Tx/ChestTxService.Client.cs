@@ -168,22 +168,26 @@ namespace BestAutoSort.Tx
                 return;
             }
             pkg = body;
-            // Status-first (issue #10): Rejected/UnknownTx is never "applied", and a
-            // committed totals-only replay never fabricates per-item payloads.
+            // Status-first (issue #10): Rejected is known-not-committed; wire
+            // UnknownTx (evicted/lost record) says nothing about commitment and
+            // is Indeterminate — never "applied", never a rejection. A committed
+            // totals-only replay never fabricates per-item payloads.
             TxCompletionKind disp = TxResponsePolicy.Classify(status, totalsOnly, pending.Op, pending.ExpectedItems);
+            if (disp == TxCompletionKind.Indeterminate)
+            {
+                // Terminal, exactly-once: credit nothing, remove nothing,
+                // cascade nothing. The chest may or may not have applied the
+                // mutation — the user must verify before retrying as a NEW tx.
+                TxLog.Warn("tx=" + txId + " outcome UNKNOWN op=" + pending.Op + " (manager has no record, nothing credited/removed, no cascade)");
+                TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
+                return;
+            }
             if (disp == TxCompletionKind.FailedNotCommitted)
             {
-                // Nothing applied (or, for wire UnknownTx, nothing known): credit and
+                // Rejected: known-not-committed. Nothing applied: credit and
                 // remove nothing, complete terminally so no callback chain stalls.
-                if (status == TxStatus.UnknownTx)
-                {
-                    TxLog.Warn("tx=" + txId + " outcome UNKNOWN op=" + pending.Op + " (manager has no record, nothing credited/removed)");
-                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
-                }
-                else
-                {
-                    TxLog.Warn("tx=" + txId + " REJECTED op=" + pending.Op + " (nothing applied, nothing credited/removed)");
-                }
+                TxLog.Warn("tx=" + txId + " REJECTED op=" + pending.Op + " (nothing applied, nothing credited/removed)");
                 CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
                 return;
             }
@@ -420,7 +424,9 @@ namespace BestAutoSort.Tx
                 // (vanilla), and itemRef is the abandoned drag object holding the full
                 // dragged amount. Never remove again — restore whatever was not committed.
                 RestoreDragRemainder(srcInv, itemRef, accepted);
-                if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
+                if (status == TxStatus.UnknownTx)
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                else if (status == TxStatus.Rejected)
                     TellPlayer("The shared chest refused the move. Try again.");
                 if (onDone != null)
                     onDone(null, status, rev);
@@ -442,7 +448,9 @@ namespace BestAutoSort.Tx
                     CompensateAddBack(container, sent, excess);
                 }
             }
-            if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
+            if (status == TxStatus.UnknownTx)
+                TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+            else if (status == TxStatus.Rejected)
                 TellPlayer("The shared chest refused the move. Try again.");
             if (onDone != null)
                 onDone(null, status, rev);
@@ -498,7 +506,9 @@ namespace BestAutoSort.Tx
                 }
                 if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
                 {
-                    TxLog.Warn("short-removal burn rejected (" + status + "), excess stays in chest");
+                    // Rejected OR indeterminate (UnknownTx): never retry the burn —
+                    // retrying an uncertain corrective Take double-debits. Loud.
+                    TxLog.Warn("short-removal burn not applied (" + status + "), excess stays in chest — check the chest");
                     TellPlayer("Chest could not correct an over-deposit. Check the chest.");
                 }
                 else if (took < amount)
@@ -602,7 +612,9 @@ namespace BestAutoSort.Tx
                     try { onPlaced(_placedByName); } catch { }
                 }
             }
-            if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
+            if (status == TxStatus.UnknownTx)
+                TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+            else if (status == TxStatus.Rejected)
                 TellPlayer("The shared chest changed. Try again.");
             if (onDone != null)
                 onDone(pkg, status, rev);
@@ -630,6 +642,17 @@ namespace BestAutoSort.Tx
             call.Items.Add(back);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
+                if (disp == TxCompletionKind.Indeterminate)
+                {
+                    // The compensation Add itself is indeterminate: the chest may
+                    // already hold the orphan. Restoring it to the player as
+                    // though rejection were known would duplicate it — restore
+                    // nothing, stay loud, let the user reconcile.
+                    TxLog.Warn("compensate-add indeterminate: outcome unknown, nothing restored — check the chest");
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                    RefreshNow(container);
+                    return;
+                }
                 int acc = ReadAcceptedAt(pkg, 0);
                 TxLog.Info("compensate-add status=" + status + " accepted=" + acc + " of " + wanted);
                 if (acc < wanted)
@@ -804,6 +827,18 @@ namespace BestAutoSort.Tx
             }
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
+                if (disp == TxCompletionKind.Indeterminate)
+                {
+                    // Terminal: commitment unknown (wire UnknownTx or exhausted
+                    // queries). Remove nothing, cascade nothing, retry nothing:
+                    // the chest may already hold the items. Loud, never silent.
+                    TxLog.Warn("batch indeterminate: outcome unknown, nothing removed, no cascade — check the chest before retrying");
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                    RefreshNow(container);
+                    if (onDone != null)
+                        onDone(new List<TransferRecord>(), ZeroAccepted(call.Items.Count), status, disp);
+                    return;
+                }
                 if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
                 {
                     // Committed but per-item counts unknown (ring replay after handoff):

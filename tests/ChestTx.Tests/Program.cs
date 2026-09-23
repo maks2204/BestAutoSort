@@ -22,6 +22,7 @@ namespace ChestTx.Tests
             TxTests.Test13_LegacyDimensions();
             TxSourceClampTests.RunAll();
             TxIssue10Tests.RunAll();
+            TxRingCascadeTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

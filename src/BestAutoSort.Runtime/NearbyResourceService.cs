@@ -413,12 +413,16 @@ internal static class NearbyResourceService
 			call.Items.Add(ops[i]);
 		ChestTxService.SubmitCall(dst, call, playerInv, delegate (System.Collections.Generic.List<TransferRecord> records, TxCompletionKind disp)
 		{
-			if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+			if (!TxResponsePolicy.ShouldCascadeToNextChest(disp))
 			{
-				// Terminal (issue #10): the chest committed but per-item counts are unknown.
-				// The stock is already stored — advancing the return chain with the full
+				// Terminal (issue #10): committed-but-unattributable totals-only
+				// OR indeterminate (unknown commitment). The stock is either already
+				// stored or its fate is unknown — advancing the return chain with the
 				// remainder would duplicate it into the next chest. Warned at the tx layer.
-				Plugin.LogInstance.LogInfo((object)"[ChestTX] return details-unavailable: chain stopped (already stored)");
+				if (disp == TxCompletionKind.Indeterminate)
+					Plugin.LogInstance.LogInfo((object)"[ChestTX] return indeterminate: chain stopped (outcome unknown, check the chest)");
+				else
+					Plugin.LogInstance.LogInfo((object)"[ChestTX] return details-unavailable: chain stopped (already stored)");
 				return;
 			}
 			int moved = movedSoFar;

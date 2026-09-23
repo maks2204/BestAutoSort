@@ -53,8 +53,9 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Status-first: Rejected/UnknownTx + totalsOnly is a failure, never
-        /// "applied". Committed totals-only Take/multi-add complete loudly with
+        /// Status-first: Rejected is known-not-committed; wire UnknownTx is
+        /// indeterminate (an evicted/lost record says nothing about commitment).
+        /// Committed totals-only Take/multi-add complete loudly with
         /// no item fabrication and no per-item misattribution.
         /// </summary>
         private static void Test15_ResponseDisposition()
@@ -65,11 +66,12 @@ namespace ChestTx.Tests
                 == TxCompletionKind.FailedNotCommitted, "Rejected+totalsOnly Take must fail, not claim applied");
             Check.That(TxResponsePolicy.Classify(TxStatus.Rejected, true, TxOp.AddBatch, 3)
                 == TxCompletionKind.FailedNotCommitted, "Rejected+totalsOnly AddBatch must fail, not claim applied");
-            // Wire UnknownTx is likewise not-committed: no credit/removal.
+            // Wire UnknownTx is INDETERMINATE (evicted/lost record says nothing
+            // about commitment): never failed-not-committed, never a cascade trigger.
             Check.That(TxResponsePolicy.Classify(TxStatus.UnknownTx, true, TxOp.TakeBatch, -1)
-                == TxCompletionKind.FailedNotCommitted, "UnknownTx+totalsOnly Take must fail without credit");
+                == TxCompletionKind.Indeterminate, "UnknownTx+totalsOnly Take must be indeterminate");
             Check.That(TxResponsePolicy.Classify(TxStatus.UnknownTx, true, TxOp.AddBatch, 2)
-                == TxCompletionKind.FailedNotCommitted, "UnknownTx+totalsOnly AddBatch must fail without removal");
+                == TxCompletionKind.Indeterminate, "UnknownTx+totalsOnly AddBatch must be indeterminate");
             // Committed totals-only Take: details unavailable, credit nothing.
             Check.That(TxResponsePolicy.Classify(TxStatus.Accepted, true, TxOp.Take, -1)
                 == TxCompletionKind.CommittedTakeDetailsUnavailable, "Accepted+totalsOnly Take must be details-unavailable");
@@ -97,7 +99,7 @@ namespace ChestTx.Tests
             Check.That(TxResponsePolicy.Classify(TxStatus.Rejected, false, TxOp.Add, 1)
                 == TxCompletionKind.FailedNotCommitted, "plain Rejected must fail without credit/removal");
             Check.That(TxResponsePolicy.Classify(TxStatus.UnknownTx, false, TxOp.AddBatch, 2)
-                == TxCompletionKind.FailedNotCommitted, "plain UnknownTx must fail without credit/removal");
+                == TxCompletionKind.Indeterminate, "plain UnknownTx must be indeterminate");
         }
 
         /// <summary>

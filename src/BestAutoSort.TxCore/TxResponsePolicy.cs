@@ -2,15 +2,16 @@ namespace BestAutoSort.TxCore
 {
     /// <summary>
     /// How a received response completes its pending request.
-    /// Decided status-first (then totals-only): a Rejected/UnknownTx response
-    /// must never be reported as applied, and a committed totals-only response
-    /// must never fabricate per-item payloads.
+    /// Decided status-first (then totals-only): a Rejected response must never
+    /// be reported as applied, an UnknownTx response is indeterminate (never
+    /// grouped with Rejected), and a committed totals-only response must never
+    /// fabricate per-item payloads.
     /// </summary>
     public enum TxCompletionKind
     {
         /// <summary>Normal completion: decode the body, credit/remove by accepted.</summary>
         Normal = 0,
-        /// <summary>Rejected or wire-UnknownTx: nothing applied (or nothing known).
+        /// <summary>Rejected: known-not-committed.
         /// Complete terminally with no accepted items; credit/remove nothing.</summary>
         FailedNotCommitted = 1,
         /// <summary>Committed Take recovered totals-only (ring replay after handoff):
@@ -76,11 +77,15 @@ namespace BestAutoSort.TxCore
 
         /// <summary>
         /// Status-first response classification.
+        /// Wire Rejected means known-not-committed. Wire UnknownTx (evicted or
+        /// lost record) says NOTHING about commitment, so it is Indeterminate.
         /// expectedItems: item arity the body must carry (&lt;=0 = unknown/singleton).
         /// </summary>
         public static TxCompletionKind Classify(TxStatus status, bool totalsOnly, bool isTake, int expectedItems)
         {
-            if (status == TxStatus.Rejected || status == TxStatus.UnknownTx)
+            if (status == TxStatus.UnknownTx)
+                return TxCompletionKind.Indeterminate;
+            if (status == TxStatus.Rejected)
                 return TxCompletionKind.FailedNotCommitted;
             if (!totalsOnly)
                 return TxCompletionKind.Normal;
@@ -94,6 +99,21 @@ namespace BestAutoSort.TxCore
         public static TxCompletionKind Classify(TxStatus status, bool totalsOnly, TxOp op, int expectedItems)
         {
             return Classify(status, totalsOnly, IsTakeOp(op), expectedItems);
+        }
+
+        /// <summary>
+        /// Cascade/continuation gate shared by QuickStack and the Shared
+        /// Resources return chain. Indeterminate (unknown commitment) and
+        /// committed-but-unattributable totals-only outcomes are terminal:
+        /// continuing would duplicate what is already stored or fabricate
+        /// what was never observed. A known Rejected (FailedNotCommitted)
+        /// MAY try the next chest: nothing was committed and the source
+        /// items are untouched (removal happens only by accepted counts).
+        /// </summary>
+        public static bool ShouldCascadeToNextChest(TxCompletionKind disp)
+        {
+            return disp == TxCompletionKind.Normal
+                || disp == TxCompletionKind.FailedNotCommitted;
         }
     }
 }

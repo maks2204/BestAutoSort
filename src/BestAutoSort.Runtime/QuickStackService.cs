@@ -233,12 +233,17 @@ internal sealed class QuickStackService
 				_totalMoved += movedHere;
 				if (session == _session && records.Count > 0)
 					TransferVisuals.Play(records, chest);
-				if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
+				if (!TxResponsePolicy.ShouldCascadeToNextChest(disp))
 				{
-					// Terminal (issue #10): the chest committed but per-item counts are
-					// unknown. The remainder is already stored — cascading it onward as a
-					// new tx would duplicate items. Warned at the tx layer; stop here.
-					Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack details-unavailable: no cascade (already stored)");
+					// Terminal (issue #10): committed-but-unattributable totals-only
+					// OR indeterminate (unknown commitment). The remainder is either
+					// already stored or its fate is unknown — cascading it onward as
+					// a new tx would duplicate items or fabricate movement. Warned at
+					// the tx layer; stop here, loudly.
+					if (disp == TxCompletionKind.Indeterminate)
+						Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack indeterminate: no cascade (outcome unknown, check the chest)");
+					else
+						Plugin.LogInstance.LogInfo((object)"[ChestTX] quickstack details-unavailable: no cascade (already stored)");
 					return;
 				}
 				if (rest == null || rest.Count == 0 || call == null || call.Items == null)

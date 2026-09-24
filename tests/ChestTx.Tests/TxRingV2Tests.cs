@@ -73,8 +73,8 @@ namespace ChestTx.Tests
             V2_MalformedFailClosed();
             Console.WriteLine("V2_FloorEvictionIndeterminate");
             V2_FloorEvictionIndeterminate();
-            Console.WriteLine("V2_FloorCapRefusal");
-            V2_FloorCapRefusal();
+            Console.WriteLine("V2_FloorUnboundedBeyondCap");
+            V2_FloorUnboundedBeyondCap();
             Console.WriteLine("V2_OutOfOrderDelayed");
             V2_OutOfOrderDelayed();
             Console.WriteLine("V2_SenderMismatchNoLeak");
@@ -346,30 +346,25 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Floor cap: 64 peers fit; the 65th peer's mutation is refused loudly
-        /// (UnknownTx, nothing cached/executed) and the refusal is stable.
+        /// Floor is UNBOUNDED: FloorCap is a warn threshold, never a refusal.
+        /// Peers past 64 still transact (no liveness brick in long-lived
+        /// worlds); the map only grows and every peer keeps its high-water.
         /// </summary>
-        private static void V2_FloorCapRefusal()
+        private static void V2_FloorUnboundedBeyondCap()
         {
             ModelChest chest = new ModelChest(64, 64);
             chest.AddItem(Wood, 99999, 50);
             TxCore core = new TxCore();
-            for (long peer = 1; peer <= TxLimits.FloorCap; peer++)
+            int peers = TxLimits.FloorCap + 16;
+            for (long peer = 1; peer <= peers; peer++)
             {
                 TxRequest r = new TxRequest { TxId = Tx(peer, 1), Op = TxOp.Take, Sender = peer };
                 r.Items.Add(Lot(Wood, 1, 50));
                 TxResult res = core.Apply(chest, r);
-                Check.That(res.Status == TxStatus.Accepted, "peer " + peer + " fits");
+                Check.That(res.Status == TxStatus.Accepted, "peer " + peer + " transacts past the warn threshold");
             }
-            Check.Equal(TxLimits.FloorCap, core.FloorCount, "floor at cap, never evicted");
-            int before = chest.TotalOf(Wood);
-            TxRequest extra = new TxRequest { TxId = Tx(999, 1), Op = TxOp.Take, Sender = 999 };
-            extra.Items.Add(Lot(Wood, 1, 50));
-            TxResult refused = core.Apply(chest, extra);
-            Check.That(refused.Status == TxStatus.UnknownTx, "65th peer refused fail-closed, got " + refused.Status);
-            Check.Equal(before, chest.TotalOf(Wood), "refused mutation debits nothing");
-            TxResult again = core.Apply(chest, extra);
-            Check.That(again.Status == TxStatus.UnknownTx, "refusal is stable across retries");
+            Check.Equal(peers, core.FloorCount, "floor grows unbounded, never evicted");
+            Check.Equal(99999 - peers, chest.TotalOf(Wood), "every peer debited exactly once");
             // An established peer still transacts.
             TxRequest known = new TxRequest { TxId = Tx(1, 2), Op = TxOp.Take, Sender = 1 };
             known.Items.Add(Lot(Wood, 1, 50));

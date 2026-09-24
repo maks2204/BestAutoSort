@@ -17,27 +17,45 @@ namespace BestAutoSort.TxCore
     }
 
     /// <summary>
+    /// Decoded independent floor payload (separate ZDO key): the durable
+    /// per-sender execution high-water. Corrupt=true means present but
+    /// untrustworthy. Present=false (missing key) means no independent floor
+    /// was ever written: fall back to the ring-embedded copy. Keys are
+    /// canonical peer keys (TxIdGen.PeerKey).
+    /// </summary>
+    public sealed class FloorData
+    {
+        public bool Corrupt;
+        public bool Present;
+        public Dictionary<long, uint> Floor = new Dictionary<long, uint>();
+    }
+
+    /// <summary>
     /// Serialized transaction engine of one chest.
     /// Invariant: all mutations of one chest go strictly one at a time through Apply.
     /// Idempotency: a repeated txId returns the cached result without re-applying.
     /// Revision grows only on a really applied mutation.
     /// Thread-safe (lock); in game all calls come from the main thread.
     ///
-    /// Stability contract (ring v2):
+    /// Stability contract (ring v2/v3):
     /// - Every terminal outcome (Accepted/Partial/Rejected) is cached AND ringed.
     ///   A replay or query returns the ORIGINAL status — the same txId never
     ///   changes its terminal outcome across handoff (Rejected stays Rejected).
     /// - Wire Duplicate is reserved for legacy v1 entries whose original status
     ///   is genuinely unavailable (they restore totals-only).
-    /// - The durable per-sender floor (peer -&gt; highest committed counter, capped
-    ///   at FloorCap peers, NEVER evicted) makes an absent txId at or below its
-    ///   sender's high-water indeterminate (UnknownTx): it must NEVER execute.
+    /// - The durable per-sender floor (peer key -&gt; highest committed counter,
+    ///   UNBOUNDED, never evicted, never refusing) makes an absent txId at or
+    ///   below its sender's high-water indeterminate (UnknownTx): it must NEVER execute.
     ///   This intentionally includes a delayed first-time out-of-order request.
+    /// - The high-water fence is written BEFORE the mutation commits, so a crash
+    ///   in between leaves the request Indeterminate, never double-applied.
     /// - Authenticated replay identity is checked before anything else on the
-    ///   replay path: a sender/txId mismatch is Rejected without exposing
-    ///   another sender's cached payload.
+    ///   replay path with canonical keys (TxIdGen.MatchesPeer): a sender/txId
+    ///   mismatch is Rejected without exposing another sender's cached payload.
     /// - A corrupt persisted ring fails closed: Apply answers UnknownTx and
-    ///   mutates nothing until the state is rebuilt from trustworthy data.
+    ///   mutates nothing until the state is rebuilt from trustworthy data —
+    ///   or degraded-recovered with an intact independent floor (old-gen stays
+    ///   blocked, new-gen above the floor may commit fenced-first).
     /// </summary>
     public sealed class TxCore
     {
@@ -47,6 +65,7 @@ namespace BestAutoSort.TxCore
         private readonly List<RingEntry> _ring = new List<RingEntry>();
         private readonly Dictionary<long, uint> _floor = new Dictionary<long, uint>();
         private bool _corrupt;
+        private bool _floorCorrupt;
 
         public uint Revision { get; private set; }
 
@@ -71,9 +90,19 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// The independent floor copy is untrustworthy (or missing while the
+        /// ring is also corrupt). Mutations stay fail-closed until BOTH the
+        /// ring and the floor are trustworthy or the floor is recovered.
+        /// </summary>
+        public bool FloorCorrupt
+        {
+            get { lock (_gate) { return _floorCorrupt; } }
+        }
+
+        /// <summary>
         /// Apply a request to the state. A repeated txId returns the ORIGINAL
-        /// cached outcome (IsReplay=true) without re-applying; a stale or
-        /// over-capacity request answers UnknownTx without executing.
+        /// cached outcome (IsReplay=true) without re-applying; a stale request
+        /// (at/below its sender's high-water) answers UnknownTx without executing.
         /// </summary>
         public TxResult Apply(ModelChest chest, TxRequest request)
         {
@@ -83,20 +112,21 @@ namespace BestAutoSort.TxCore
                 throw new ArgumentNullException("request");
             lock (_gate)
             {
-                if (_corrupt)
+                if (_corrupt && _floorCorrupt)
                     return UnknownResult();
                 TxResult cached;
                 if (_processed.TryGetValue(request.TxId, out cached))
                 {
-                    if (request.Sender != 0 && cached.Sender != 0 && request.Sender != cached.Sender)
+                    if (request.Sender != 0 && cached.Sender != 0
+                        && TxIdGen.PeerKey(request.Sender) != TxIdGen.PeerKey(cached.Sender))
                         return SenderMismatch(cached, request.Sender);
                     TxResult dup = cached.Clone();
                     dup.IsReplay = true;
                     return dup;
                 }
                 long peer = TxIdGen.PeerOf(request.TxId);
-                uint ctr = (uint)(request.TxId & 0xFFFFFFFFL);
-                if (request.Sender != 0 && request.Sender != peer)
+                uint ctr = TxIdGen.CounterOf(request.TxId);
+                if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
                     return CacheSpoofReject(request, peer, ctr);
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
@@ -107,17 +137,17 @@ namespace BestAutoSort.TxCore
                     // re-executed here would flip to Accepted).
                     return UnknownResult();
                 }
-                if (!_floor.ContainsKey(peer) && _floor.Count >= TxLimits.FloorCap)
-                {
-                    // Floor refuses new peers loudly at capacity instead of
-                    // evicting (which would recreate the eviction bug). UnknownTx
-                    // is deterministic here: nothing is cached or executed, so a
-                    // retry answers the same way forever — fail closed.
-                    return UnknownResult();
-                }
+                // The floor map is UNBOUNDED (never evicted, never refusing):
+                // FloorCap is only a warn threshold for operators. A fixed cap
+                // would brick liveness in long-lived worlds.
+                // Write-ahead fence: the high-water is recorded BEFORE the
+                // mutation, so a crash between fence and commit can only leave
+                // the request Indeterminate (at/below floor, never executes)
+                // — it can never double-apply.
+                AdvanceFloor(peer, ctr);
                 TxResult result = Execute(chest, request);
                 result.Op = request.Op;
-                result.Sender = request.Sender != 0 ? request.Sender : peer;
+                result.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
                 result.Revision = Revision;
                 _processed[request.TxId] = result.Clone();
                 _order.AddLast(request.TxId);
@@ -131,6 +161,8 @@ namespace BestAutoSort.TxCore
                 AdvanceFloor(peer, ctr);
                 _ring.Clear();
                 _ring.AddRange(TxRing.Snapshot(CollectSlots()));
+                if (!_floorCorrupt)
+                    _corrupt = false; // degraded-mode recovery: the ring was just rebuilt from the live cache.
                 return result;
             }
         }
@@ -189,7 +221,8 @@ namespace BestAutoSort.TxCore
                 TxResult cached;
                 if (_processed.TryGetValue(txId, out cached))
                 {
-                    if (sender != 0 && cached.Sender != 0 && sender != cached.Sender)
+                    if (sender != 0 && cached.Sender != 0
+                        && TxIdGen.PeerKey(sender) != TxIdGen.PeerKey(cached.Sender))
                         return SenderMismatch(cached, sender);
                     TxResult r = cached.Clone();
                     r.IsReplay = true;
@@ -200,7 +233,8 @@ namespace BestAutoSort.TxCore
                     if (_ring[i].TxId == txId)
                     {
                         RingEntry e = _ring[i];
-                        if (sender != 0 && e.Sender != 0 && sender != e.Sender)
+                        if (sender != 0 && e.Sender != 0
+                            && TxIdGen.PeerKey(sender) != TxIdGen.PeerKey(e.Sender))
                             return SenderMismatchStatus(e, sender);
                         if (e.Status == TxStatus.Duplicate || !TxRing.IsExactEntry(e))
                         {
@@ -258,29 +292,30 @@ namespace BestAutoSort.TxCore
                 _floor.Clear();
                 _takeBlobs.Clear();
                 _corrupt = false;
+                _floorCorrupt = false;
                 Revision = 0;
                 if (data == null)
                     return;
                 if (data.Corrupt)
                 {
+                    // Legacy combined path with no independent floor: both the
+                    // ring and the floor are untrustworthy — full fail-closed.
+                    // Use LoadRingWithFloor/RecoverWithFloor when a separate
+                    // floor copy exists (degraded recovery keeps old-gen blocked
+                    // while new-gen above the floor may proceed).
                     _corrupt = true;
+                    _floorCorrupt = true;
                     return;
                 }
-                if (data.Floor != null)
-                {
-                    foreach (KeyValuePair<long, uint> kv in data.Floor)
-                    {
-                        if (_floor.Count >= TxLimits.FloorCap)
-                            break;
-                        _floor[kv.Key] = kv.Value;
-                    }
-                }
+                MergeFloor(data.Floor);
                 if (data.Entries == null)
                     return;
                 int n = Math.Min(data.Entries.Count, TxLimits.RingCap);
                 for (int i = 0; i < n; i++)
                 {
                     RingEntry e = data.Entries[i];
+                    if (e.Sender != 0)
+                        e.Sender = TxIdGen.PeerKey(e.Sender); // canonicalize legacy signed senders.
                     _ring.Add(e);
                     TxResult r;
                     if (e.Status == TxStatus.Duplicate)
@@ -339,6 +374,178 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// Merges one floor copy into the live map: per peer the MAXIMUM wins.
+        /// Max-merge is crash-order safe no matter which copy (ring-embedded
+        /// or independent key) was written last: high-waters only move up, so
+        /// the merged floor never un-blocks an old-generation txId. Keys are
+        /// canonicalized (legacy signed senders map to their peer key).
+        /// </summary>
+        private void MergeFloor(Dictionary<long, uint> copy)
+        {
+            if (copy == null)
+                return;
+            foreach (KeyValuePair<long, uint> kv in copy)
+            {
+                long peer = TxIdGen.PeerKey(kv.Key);
+                uint hw;
+                if (_floor.TryGetValue(peer, out hw))
+                {
+                    if (kv.Value > hw)
+                        _floor[peer] = kv.Value;
+                }
+                else
+                {
+                    _floor[peer] = kv.Value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Split-copy handoff load: the ring plus the independently persisted
+        /// floor. TRUE RESET, then restore with max-merge (see MergeFloor).
+        /// Torn generations (two non-atomic ZDO keys) merge safely: high-waters
+        /// only move up and entries are immutable committed records — never
+        /// partial-apply. A present-but-corrupt floor copy is validated-then-
+        /// ignored, never merged.
+        /// Ring corrupt + independent floor present-and-valid = DEGRADED
+        /// recovery: the ring is unusable (no replays) but the floor still
+        /// blocks old-generation txIds while new-generation ones above the
+        /// floor may commit (fenced first). Ring corrupt with no trustworthy
+        /// floor = full fail-closed, like LoadRing(corrupt).
+        /// </summary>
+        public void LoadRingWithFloor(RingData ring, FloorData floor)
+        {
+            lock (_gate)
+            {
+                _processed.Clear();
+                _order.Clear();
+                _ring.Clear();
+                _floor.Clear();
+                _takeBlobs.Clear();
+                _corrupt = false;
+                _floorCorrupt = false;
+                Revision = 0;
+                bool floorOk = floor != null && floor.Present && !floor.Corrupt;
+                if (ring != null && ring.Corrupt)
+                {
+                    if (floorOk)
+                    {
+                        MergeFloor(floor.Floor);
+                        _corrupt = true;
+                        _floorCorrupt = false;
+                        return;
+                    }
+                    _corrupt = true;
+                    _floorCorrupt = true;
+                    return;
+                }
+                if (floor != null && floor.Corrupt)
+                {
+                    // Independent floor griefed but the ring is fine: the
+                    // ring-embedded copy is authoritative for this generation.
+                    // (Max-merge with a corrupt copy would be unsafe, so the
+                    // corrupt copy is ignored, not merged.)
+                }
+                else if (floorOk)
+                {
+                    MergeFloor(floor.Floor);
+                }
+                if (ring != null)
+                    MergeFloor(ring.Floor);
+                if (ring == null || ring.Entries == null)
+                    return;
+                RingData second = new RingData();
+                second.Entries.AddRange(ring.Entries);
+                // Reuse the entry-restore loop through a nested reset-free path:
+                // entries were already validated by the shared codec, so only
+                // canonicalize senders and rebuild the cache here.
+                int n = Math.Min(second.Entries.Count, TxLimits.RingCap);
+                for (int i = 0; i < n; i++)
+                {
+                    RingEntry e = second.Entries[i];
+                    if (e.Sender != 0)
+                        e.Sender = TxIdGen.PeerKey(e.Sender);
+                    _ring.Add(e);
+                    _processed[e.TxId] = RingEntryToResult(e);
+                    _order.AddLast(e.TxId);
+                    if (e.TakePayloads != null)
+                        _takeBlobs[e.TxId] = e.TakePayloads;
+                }
+                while (_order.Count > TxLimits.ProcessedCacheCap)
+                {
+                    long oldest = _order.First.Value;
+                    _order.RemoveFirst();
+                    _processed.Remove(oldest);
+                    _takeBlobs.Remove(oldest);
+                }
+                if (_ring.Count > 0)
+                    Revision = _ring[_ring.Count - 1].Revision;
+            }
+        }
+
+        /// <summary>
+        /// Recovers a corrupt-ring core with a separately trusted floor: drops
+        /// the unusable ring, keeps the floor, stays degraded (RingCorrupt)
+        /// until the next successful commit rebuilds the ring from live cache.
+        /// Old-generation txIds stay blocked; new-generation ones may commit.
+        /// </summary>
+        public void RecoverWithFloor(FloorData floor)
+        {
+            lock (_gate)
+            {
+                if (!_corrupt)
+                    return;
+                if (floor == null || !floor.Present || floor.Corrupt)
+                    return; // nothing trustworthy to recover with: stay fail-closed.
+                _processed.Clear();
+                _order.Clear();
+                _ring.Clear();
+                _floor.Clear();
+                _takeBlobs.Clear();
+                MergeFloor(floor.Floor);
+                _floorCorrupt = false;
+                Revision = 0;
+            }
+        }
+
+        private static TxResult RingEntryToResult(RingEntry e)
+        {
+            if (e.Status == TxStatus.Duplicate)
+            {
+                return new TxResult
+                {
+                    Status = TxStatus.Duplicate,
+                    Revision = e.Revision,
+                    Accepted = new List<int> { e.AcceptedTotal },
+                    TotalsOnly = true,
+                    Op = e.Op,
+                    Sender = e.Sender != 0 ? e.Sender : TxIdGen.PeerOf(e.TxId)
+                };
+            }
+            if (TxRing.IsExactEntry(e))
+            {
+                return new TxResult
+                {
+                    Status = e.Status,
+                    Revision = e.Revision,
+                    Accepted = new List<int>(e.Accepted ?? new List<int>()),
+                    TotalsOnly = false,
+                    Op = e.Op,
+                    Sender = e.Sender
+                };
+            }
+            return new TxResult
+            {
+                Status = e.Status,
+                Revision = e.Revision,
+                Accepted = new List<int>(e.Accepted ?? new List<int> { e.AcceptedTotal }),
+                TotalsOnly = true,
+                Op = e.Op,
+                Sender = e.Sender
+            };
+        }
+
+        /// <summary>
         /// Ring snapshot for persistence (ZDO).
         /// </summary>
         public List<RingEntry> DumpRing()
@@ -376,7 +583,7 @@ namespace BestAutoSort.TxCore
                 Accepted = new List<int>(),
                 TotalsOnly = false,
                 Op = cached.Op,
-                Sender = sender,
+                Sender = TxIdGen.PeerKey(sender),
                 IsReplay = true
             };
         }
@@ -396,7 +603,7 @@ namespace BestAutoSort.TxCore
                 Accepted = new List<int>(),
                 TotalsOnly = false,
                 Op = e.Op,
-                Sender = sender,
+                Sender = TxIdGen.PeerKey(sender),
                 IsReplay = true
             };
         }
@@ -430,15 +637,17 @@ namespace BestAutoSort.TxCore
             return result;
         }
 
+        /// <summary>Write-ahead fence + commit marker: UNBOUNDED, never evicting. FloorCap is a warn threshold only.</summary>
         private void AdvanceFloor(long peer, uint ctr)
         {
+            peer = TxIdGen.PeerKey(peer);
             uint hw;
             if (_floor.TryGetValue(peer, out hw))
             {
                 if (ctr > hw)
                     _floor[peer] = ctr;
             }
-            else if (_floor.Count < TxLimits.FloorCap)
+            else
             {
                 _floor[peer] = ctr;
             }
@@ -507,9 +716,12 @@ namespace BestAutoSort.TxCore
 
         /// <summary>
         /// Versioned ring envelope decode (production + tests share this codec):
+        /// v3 = [0xFF][0x03][floorCount:ushort][peerKey:uint32,ctr:uint32]...[ringCount:ushort][entries]...,
         /// v2 = [0xFF][0x02][floorCount][peer:long,ctr:uint]...[ringCount][entries]...,
         /// v1 = [count:byte][txId:long,total:int,rev:uint]... (exact length required).
-        /// Validates lengths, enums, counts, payload sizes and complete consumption.
+        /// v2 senders stored as raw signed UIDs are tolerated when their KEY matches
+        /// (normalized to canonical); v3 keys compare directly. Validates lengths,
+        /// enums, counts, payload sizes and complete consumption.
         /// Never throws. Null (missing ZDO key) decodes as empty-usable (fresh chest);
         /// present-but-unparseable decodes as Corrupt (fail closed for mutation).
         /// </summary>
@@ -521,7 +733,16 @@ namespace BestAutoSort.TxCore
             try
             {
                 if (buf[0] == TxLimits.RingV2Magic)
+                {
+                    if (buf.Length < 2)
+                    {
+                        data.Corrupt = true;
+                        return data;
+                    }
+                    if (buf[1] == TxLimits.RingV3Version)
+                        return DecodeV3(buf);
                     return DecodeV2(buf);
+                }
                 int n = (int)buf[0];
                 if (n < 0 || n > TxLimits.RingCap)
                 {
@@ -561,11 +782,13 @@ namespace BestAutoSort.TxCore
         /// <summary>
         /// v2 envelope encode shared by production WriteRing and tests.
         /// Legacy-shaped entries (Status==Duplicate) encode with their aggregate;
-        /// entries whose sender disagrees with the txId peer bits are SKIPPED
-        /// as malformed. Spoof rejects persist by design: CacheSpoofReject caches
+        /// entries whose sender KEY disagrees with the txId peer bits are SKIPPED
+        /// as malformed (canonical comparison: legacy signed senders pass when
+        /// their key matches). Spoof rejects persist by design: CacheSpoofReject caches
         /// them under the PEER (not the spoofer), so they pass this filter, the
         /// ring carries them, and the floor still guards their txIds.
-        /// Never throws.
+        /// Returns null on encoding failure (callers must persist NOTHING:
+        /// a failed encode must never become a valid empty ring). Never throws.
         /// </summary>
         public static byte[] EncodeRingV2(List<RingEntry> ring, Dictionary<long, uint> floor)
         {
@@ -577,7 +800,7 @@ namespace BestAutoSort.TxCore
                 for (int i = 0; i < ring.Count; i++)
                 {
                     RingEntry e = ring[i];
-                    if (e.Sender != 0 && e.Sender != TxIdGen.PeerOf(e.TxId))
+                    if (e.Sender != 0 && TxIdGen.PeerKey(e.Sender) != TxIdGen.PeerOf(e.TxId))
                         continue;
                     if (e.Status == TxStatus.UnknownTx)
                         continue;
@@ -590,7 +813,10 @@ namespace BestAutoSort.TxCore
                 {
                     foreach (KeyValuePair<long, uint> kv in floor)
                     {
-                        if (floors.Count >= TxLimits.FloorCap)
+                        // v2 carries the floor in a single count byte: at most 255 entries fit.
+                        // Overflow truncates the EMBEDDED copy only (the independent floor key carries
+                        // the full map in v3 worlds); production writes v3, so this path is legacy/tests.
+                        if (floors.Count >= 255)
                             break;
                         floors.Add(kv);
                     }
@@ -611,7 +837,100 @@ namespace BestAutoSort.TxCore
             }
             catch (Exception)
             {
-                return new byte[] { TxLimits.RingV2Magic, TxLimits.RingV2Version, 0, 0 };
+                // Never replace a failed encode with valid empty state: that would
+                // wipe the floor and resurrect evicted txIds. Null = persist nothing.
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// v3 envelope encode (production writer): entries carry the sender as an
+        /// unambiguous uint32 sender KEY and the floor uses uint32 keys + ushort
+        /// counts, so an unbounded floor round-trips exactly. v1/v2 stay
+        /// decodable; v3 is never migrated in place. Returns null on failure
+        /// (persist nothing). Never throws.
+        /// </summary>
+        public static byte[] EncodeRingV3(List<RingEntry> ring, Dictionary<long, uint> floor)
+        {
+            try
+            {
+                if (ring == null)
+                    ring = new List<RingEntry>();
+                List<RingEntry> sane = new List<RingEntry>(ring.Count);
+                for (int i = 0; i < ring.Count; i++)
+                {
+                    RingEntry e = ring[i];
+                    if (e.Sender != 0 && TxIdGen.PeerKey(e.Sender) != TxIdGen.PeerOf(e.TxId))
+                        continue;
+                    if (e.Status == TxStatus.UnknownTx)
+                        continue;
+                    sane.Add(e);
+                }
+                while (sane.Count > TxLimits.RingCap)
+                    sane.RemoveAt(0);
+                List<KeyValuePair<long, uint>> floors = new List<KeyValuePair<long, uint>>();
+                if (floor != null)
+                {
+                    foreach (KeyValuePair<long, uint> kv in floor)
+                        floors.Add(kv);
+                }
+                if (floors.Count > 65535 || sane.Count > TxLimits.RingCap)
+                    return null;
+                List<byte> buf = new List<byte>(128);
+                buf.Add(TxLimits.RingV2Magic);
+                buf.Add(TxLimits.RingV3Version);
+                buf.Add((byte)(floors.Count & 0xFF));
+                buf.Add((byte)((floors.Count >> 8) & 0xFF));
+                for (int i = 0; i < floors.Count; i++)
+                {
+                    uint peerKey = (uint)(TxIdGen.PeerKey(floors[i].Key) & 0xFFFFFFFFL);
+                    buf.AddRange(BitConverter.GetBytes(peerKey));
+                    buf.AddRange(BitConverter.GetBytes(floors[i].Value));
+                }
+                buf.Add((byte)(sane.Count & 0xFF));
+                buf.Add((byte)((sane.Count >> 8) & 0xFF));
+                for (int i = 0; i < sane.Count; i++)
+                    AppendEntryV3(buf, sane[i]);
+                return buf.ToArray();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private static void AppendEntryV3(List<byte> buf, RingEntry e)
+        {
+            List<int> acc = e.Accepted;
+            if (acc == null)
+                acc = new List<int> { e.AcceptedTotal };
+            int accCount = Math.Min(acc.Count, TxLimits.MaxAcceptedPerEntry);
+            buf.AddRange(BitConverter.GetBytes(e.TxId));
+            buf.AddRange(BitConverter.GetBytes((int)e.Op));
+            buf.Add((byte)e.Status);
+            buf.AddRange(BitConverter.GetBytes(e.Revision));
+            long key = e.Sender != 0 ? TxIdGen.PeerKey(e.Sender) : TxIdGen.PeerOf(e.TxId);
+            buf.AddRange(BitConverter.GetBytes((uint)(key & 0xFFFFFFFFL)));
+            buf.Add((byte)accCount);
+            for (int i = 0; i < accCount; i++)
+                buf.AddRange(BitConverter.GetBytes(acc[i]));
+            List<TakePayload> takes = e.TakePayloads;
+            int takeCount = takes != null ? Math.Min(takes.Count, TxLimits.MaxTakePayloadsPerEntry) : 0;
+            buf.Add((byte)takeCount);
+            for (int i = 0; i < takeCount; i++)
+            {
+                TakePayload p = takes[i];
+                if (p == null || p.Bytes == null)
+                {
+                    buf.AddRange(BitConverter.GetBytes(0));
+                    buf.AddRange(BitConverter.GetBytes(0));
+                    continue;
+                }
+                int len = Math.Min(p.Bytes.Length, TxLimits.MaxTakePayloadBytes);
+                buf.AddRange(BitConverter.GetBytes(p.PrefabHash));
+                buf.AddRange(BitConverter.GetBytes(len));
+                for (int b = 0; b < len; b++)
+                    buf.Add(p.Bytes[b]);
             }
         }
 
@@ -650,6 +969,99 @@ namespace BestAutoSort.TxCore
             }
         }
 
+        /// <summary>
+        /// Independent floor encode (separate ZDO key): [0xFE][0x01][count:ushort][peerKey:uint32,ctr:uint32]...
+        /// Keys are canonical. Returns null on failure (persist nothing). Never throws.
+        /// </summary>
+        public static byte[] EncodeFloor(Dictionary<long, uint> floor)
+        {
+            try
+            {
+                List<KeyValuePair<long, uint>> peers = new List<KeyValuePair<long, uint>>();
+                if (floor != null)
+                {
+                    foreach (KeyValuePair<long, uint> kv in floor)
+                        peers.Add(kv);
+                }
+                if (peers.Count > 65535)
+                    return null;
+                List<byte> buf = new List<byte>(4 + peers.Count * 8);
+                buf.Add(TxLimits.FloorMagic);
+                buf.Add(TxLimits.FloorVersion);
+                buf.Add((byte)(peers.Count & 0xFF));
+                buf.Add((byte)((peers.Count >> 8) & 0xFF));
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    uint peerKey = (uint)(TxIdGen.PeerKey(peers[i].Key) & 0xFFFFFFFFL);
+                    buf.AddRange(BitConverter.GetBytes(peerKey));
+                    buf.AddRange(BitConverter.GetBytes(peers[i].Value));
+                }
+                return buf.ToArray();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Independent floor decode shared by production ReadFloor and tests.
+        /// Null (missing ZDO key) decodes as absent-but-usable (Present=false:
+        /// fall back to the ring-embedded copy); present-but-unparseable
+        /// decodes as Corrupt. Never throws.
+        /// </summary>
+        public static FloorData DecodeFloor(byte[] buf)
+        {
+            FloorData data = new FloorData();
+            if (buf == null || buf.Length == 0)
+                return data;
+            data.Present = true;
+            try
+            {
+                if (buf.Length < 4)
+                {
+                    data.Corrupt = true;
+                    return data;
+                }
+                if (buf[0] != TxLimits.FloorMagic || buf[1] != TxLimits.FloorVersion)
+                {
+                    data.Corrupt = true;
+                    return data;
+                }
+                int count = (int)buf[2] | ((int)buf[3] << 8);
+                if (count < 0 || 4 + count * 8 != buf.Length)
+                {
+                    data.Corrupt = true;
+                    return data;
+                }
+                int o = 4;
+                for (int i = 0; i < count; i++)
+                {
+                    uint peerKey = BitConverter.ToUInt32(buf, o); o += 4;
+                    uint ctr = BitConverter.ToUInt32(buf, o); o += 4;
+                    long peer = (long)peerKey;
+                    uint hw;
+                    if (data.Floor.TryGetValue(peer, out hw))
+                    {
+                        if (ctr > hw)
+                            data.Floor[peer] = ctr;
+                    }
+                    else
+                    {
+                        data.Floor[peer] = ctr;
+                    }
+                }
+                return data;
+            }
+            catch (Exception)
+            {
+                FloorData bad = new FloorData();
+                bad.Present = true;
+                bad.Corrupt = true;
+                return bad;
+            }
+        }
+
         private static RingData DecodeV2(byte[] buf)
         {
             RingData bad = new RingData();
@@ -663,15 +1075,26 @@ namespace BestAutoSort.TxCore
             if (ver != TxLimits.RingV2Version)
                 return bad;
             int floorCount = (int)buf[o++];
-            if (floorCount < 0 || floorCount > TxLimits.FloorCap)
+            // v2 floor count is one byte (0..255 by construction); the per-entry
+            // length guards below bound memory. The live floor map itself is unbounded.
+            if (floorCount < 0 || floorCount > 255)
                 return bad;
             for (int i = 0; i < floorCount; i++)
             {
                 if (o + 12 > buf.Length)
                     return bad;
-                long peer = BitConverter.ToInt64(buf, o); o += 8;
+                long peer = TxIdGen.PeerKey(BitConverter.ToInt64(buf, o)); o += 8;
                 uint ctr = BitConverter.ToUInt32(buf, o); o += 4;
-                data.Floor[peer] = ctr;
+                uint hw;
+                if (data.Floor.TryGetValue(peer, out hw))
+                {
+                    if (ctr > hw)
+                        data.Floor[peer] = ctr;
+                }
+                else
+                {
+                    data.Floor[peer] = ctr;
+                }
             }
             if (o + 1 > buf.Length)
                 return bad;
@@ -690,6 +1113,123 @@ namespace BestAutoSort.TxCore
             return data;
         }
 
+        /// <summary>
+        /// v3 envelope decode: [0xFF][0x03][floorCount:ushort][peerKey:uint32,ctr:uint32]...
+        /// [ringCount:ushort][entries with uint32 senderKey]... Exact consumption required.
+        /// Sender keys compare directly against the txId peer bits (both canonical by
+        /// construction); any mismatch fails the whole envelope closed. Never throws.
+        /// </summary>
+        private static RingData DecodeV3(byte[] buf)
+        {
+            RingData bad = new RingData();
+            bad.Corrupt = true;
+            RingData data = new RingData();
+            if (buf.Length < 6)
+                return bad;
+            int o = 2; // magic + version (already dispatched)
+            int floorCount = (int)buf[o] | ((int)buf[o + 1] << 8); o += 2;
+            if (floorCount < 0 || o + floorCount * 8 > buf.Length)
+                return bad;
+            for (int i = 0; i < floorCount; i++)
+            {
+                uint peerKey = BitConverter.ToUInt32(buf, o); o += 4;
+                uint ctr = BitConverter.ToUInt32(buf, o); o += 4;
+                long peer = (long)peerKey;
+                uint hw;
+                if (data.Floor.TryGetValue(peer, out hw))
+                {
+                    if (ctr > hw)
+                        data.Floor[peer] = ctr;
+                }
+                else
+                {
+                    data.Floor[peer] = ctr;
+                }
+            }
+            if (o + 2 > buf.Length)
+                return bad;
+            int ringCount = (int)buf[o] | ((int)buf[o + 1] << 8); o += 2;
+            if (ringCount < 0 || ringCount > TxLimits.RingCap)
+                return bad;
+            for (int i = 0; i < ringCount; i++)
+            {
+                RingEntry e;
+                if (!ReadEntryV3(buf, ref o, out e))
+                    return bad;
+                data.Entries.Add(e);
+            }
+            if (o != buf.Length)
+                return bad;
+            return data;
+        }
+
+        private static bool ReadEntryV3(byte[] buf, ref int o, out RingEntry e)
+        {
+            e = new RingEntry();
+            if (o + 8 + 4 + 1 + 4 + 4 + 1 > buf.Length)
+                return false;
+            e.TxId = BitConverter.ToInt64(buf, o); o += 8;
+            e.Op = (TxOp)BitConverter.ToInt32(buf, o); o += 4;
+            byte st = buf[o++];
+            if (st > (byte)TxStatus.UnknownTx)
+                return false;
+            e.Status = (TxStatus)st;
+            if (e.Status == TxStatus.UnknownTx)
+                return false;
+            e.Revision = BitConverter.ToUInt32(buf, o); o += 4;
+            long senderKey = (long)BitConverter.ToUInt32(buf, o); o += 4;
+            if (senderKey != TxIdGen.PeerOf(e.TxId))
+                return false;
+            e.Sender = senderKey;
+            if (e.Status != TxStatus.Duplicate && (int)e.Op == 0)
+                return false;
+            int accCount = (int)buf[o++];
+            if (accCount < 0 || accCount > TxLimits.MaxAcceptedPerEntry)
+                return false;
+            if (o + accCount * 4 > buf.Length)
+                return false;
+            e.Accepted = new List<int>(accCount);
+            for (int i = 0; i < accCount; i++)
+            {
+                e.Accepted.Add(BitConverter.ToInt32(buf, o)); o += 4;
+            }
+            e.AcceptedTotal = 0;
+            for (int i = 0; i < e.Accepted.Count; i++)
+                e.AcceptedTotal += e.Accepted[i];
+            if (o + 1 > buf.Length)
+                return false;
+            int takeCount = (int)buf[o++];
+            if (takeCount < 0 || takeCount > TxLimits.MaxTakePayloadsPerEntry)
+                return false;
+            e.TakePayloads = takeCount > 0 ? new List<TakePayload>(takeCount) : null;
+            for (int i = 0; i < takeCount; i++)
+            {
+                if (o + 8 > buf.Length)
+                    return false;
+                int prefab = BitConverter.ToInt32(buf, o); o += 4;
+                int len = BitConverter.ToInt32(buf, o); o += 4;
+                if (len < 0 || len > TxLimits.MaxTakePayloadBytes)
+                    return false;
+                if (o + len > buf.Length)
+                    return false;
+                if (len == 0 && prefab == 0)
+                {
+                    e.TakePayloads.Add(null);
+                }
+                else
+                {
+                    byte[] bytes = new byte[len];
+                    Array.Copy(buf, o, bytes, 0, len);
+                    o += len;
+                    TakePayload p = new TakePayload();
+                    p.PrefabHash = prefab;
+                    p.Bytes = bytes;
+                    e.TakePayloads.Add(p);
+                }
+            }
+            return true;
+        }
+
         private static bool ReadEntry(byte[] buf, ref int o, out RingEntry e)
         {
             e = new RingEntry();
@@ -704,9 +1244,14 @@ namespace BestAutoSort.TxCore
             if (e.Status == TxStatus.UnknownTx)
                 return false;
             e.Revision = BitConverter.ToUInt32(buf, o); o += 4;
-            e.Sender = BitConverter.ToInt64(buf, o); o += 8;
-            if (e.Sender != TxIdGen.PeerOf(e.TxId))
+            long rawSender = BitConverter.ToInt64(buf, o); o += 8;
+            // Canonical tolerance: v2 worlds written before canonicalization stored the
+            // raw signed UID. Accept when its KEY matches the txId peer bits and normalize
+            // to the canonical key; a true key mismatch is still fail-closed (whole envelope
+            // corrupt), so spoofed entries can never smuggle through a persisted ring.
+            if (TxIdGen.PeerKey(rawSender) != TxIdGen.PeerOf(e.TxId))
                 return false;
+            e.Sender = TxIdGen.PeerOf(e.TxId);
             if (e.Status != TxStatus.Duplicate && (int)e.Op == 0)
                 return false;
             int accCount = (int)buf[o++];

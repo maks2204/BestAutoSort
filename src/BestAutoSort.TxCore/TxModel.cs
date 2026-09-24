@@ -74,8 +74,8 @@ namespace BestAutoSort.TxCore
 
     /// <summary>
     /// Mutation request.
-    /// Sender: authenticated sender peer (0 = unknown/legacy, skips identity checks).
-    /// Must equal TxIdGen.PeerOf(TxId) or the request is a spoofed txId.
+    /// Sender: CANONICAL peer key (TxIdGen.PeerKey of the authenticated raw sender; 0 = unknown/legacy, skips checks).
+    /// Must equal TxIdGen.PeerOf(TxId) or the request is a spoofed txId. Compare with MatchesPeer, never raw.
     /// </summary>
     public sealed class TxRequest
     {
@@ -98,7 +98,7 @@ namespace BestAutoSort.TxCore
     /// Rejected stable across handoff); IsReplay separates replay from original.
     /// Wire Duplicate survives only where the original status is genuinely
     /// unavailable (legacy v1 ring entries).
-    /// Sender: authenticated sender peer recorded at commit (0 = legacy unknown).
+    /// Sender: canonical peer key recorded at commit (TxIdGen.PeerOf of the txId; 0 = legacy unknown).
     /// </summary>
     public sealed class TxResult
     {

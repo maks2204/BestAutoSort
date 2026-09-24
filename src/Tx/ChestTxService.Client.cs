@@ -100,8 +100,8 @@ namespace BestAutoSort.Tx
             {
                 // Original outcome (never coerced to Duplicate): the same txId
                 // keeps its answer forever. A stranger gets Rejected with no
-                // payload — never another sender's Take bytes.
-                if (cached.Sender != 0L && cached.Sender != sender)
+                // payload — never another sender's Take bytes. Canonical identity.
+                if (cached.Sender != 0L && TxIdGen.PeerKey(cached.Sender) != TxIdGen.PeerKey(sender))
                 {
                     TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " QUERY sender mismatch");
                     Respond(container, sender, txId, TxStatus.Rejected, cached.Revision, new ZPackage(), false, cached.Op);
@@ -1138,7 +1138,9 @@ namespace BestAutoSort.Tx
             ZNetView netView = TxReflect.GetNetView(container);
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return;
-            long txId = TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
+            long txId = IssueTxId();
+            if (txId == 0L)
+                return; // counter exhausted/unreserved: stay silent, fail closed (presence is fire-and-forget).
             ZPackage body = new ZPackage();
             body.Write(TxCodec.ProtoVersion);
             body.Write((int)op);
@@ -1235,7 +1237,7 @@ namespace BestAutoSort.Tx
                 state.Processed.Clear();
                 state.ProcOrder.Clear();
                 RingData ring = ReadRing(state.Container);
-                SeedFromRing(state, ring);
+                SeedFromRing(state, ring, ReadFloor(state.Container));
                 // Queued-but-unapplied jobs keep a stable outcome: seed them as
                 // Rejected in the FRESH cache (nothing was applied — the sender
                 // retries as a NEW tx) so the same txId can never execute later.

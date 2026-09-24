@@ -37,11 +37,15 @@ namespace BestAutoSort.Tx
         private const int DrainPerFrame = 64;
 
         internal const string RingKey = "BestAutoSort_TxRing";
+        internal const string FloorKey = "BestAutoSort_TxFloor";
         internal const string ItemsKey = "items";
 
         private static readonly Dictionary<int, ChestState> States = new Dictionary<int, ChestState>();
         private static readonly Dictionary<long, PendingTx> Pending = new Dictionary<long, PendingTx>();
         private static uint _clientCounter = 1;
+        /// <summary>Exclusive upper bound of the persisted counter reservation block (0 = none reserved yet).</summary>
+        private static uint _counterReservedCeil;
+        private const uint CounterReserveBlock = 4096;
         private static float _nextSlowPump;
         private static float _nextRefreshPoll;
         private static int _openInstanceId;
@@ -54,6 +58,8 @@ namespace BestAutoSort.Tx
             States.Clear();
             Pending.Clear();
             _clientCounter = 1;
+            _counterReservedCeil = 0;
+            LoadReservedCounter();
             _nextSlowPump = 0f;
             _nextRefreshPoll = 0f;
             _openInstanceId = 0;
@@ -392,15 +398,31 @@ namespace BestAutoSort.Tx
             job.Container = container;
             job.IsLocal = true;
             job.TxId = NextLocalTxId();
+            if (job.TxId == 0L)
+            {
+                // Counter exhausted/unreserved: fail closed, known-not-committed.
+                TxLog.Warn("local tx refused: counter exhausted (fail closed)");
+                if (onDone != null)
+                {
+                    StoredResult r = new StoredResult();
+                    r.Op = call.Op;
+                    r.Status = TxStatus.Rejected;
+                    r.Revision = CurrentRevision(container);
+                    onDone(r);
+                }
+                return;
+            }
             job.Sender = ZNet.GetUID();
             job.PlayerId = playerId != 0L ? playerId : LocalPlayerId();
             job.ActorPos = actorPos.HasValue ? actorPos.Value : LocalActorPos();
             job.BaseRev = CurrentRevision(container);
             job.Call = call;
             job.Complete = onDone;
-            if (state.RingCorrupt)
+            if (state.RingCorrupt && state.FloorCorrupt)
             {
-                // Fail closed: persisted state untrustworthy, mutate nothing.
+                // Fully fail closed: both the ring and the floor are untrustworthy.
+                // (Ring corrupt alone with an intact floor runs degraded: old-gen
+                // blocked by the floor, new-gen above it commits fenced-first.)
                 TxLog.Warn("tx=" + job.TxId + " local refused: ring corrupt (fail closed)");
                 if (onDone != null)
                 {
@@ -428,6 +450,9 @@ namespace BestAutoSort.Tx
             }
             if (IsFloorCappedFor(state, job.TxId))
             {
+                // Dead branch retained for fail-closed shape: the floor is
+                // UNBOUNDED (IsFloorCappedFor always returns false), so this
+                // never fires. FloorCap survives only as a warn threshold.
                 TxLog.Warn("tx=" + job.TxId + " local refused: execution floor at capacity (fail closed)");
                 if (onDone != null)
                 {
@@ -498,7 +523,7 @@ namespace BestAutoSort.Tx
                     List<TxJob> dropped = DequeueAll(state);
                     state.Processed.Clear();
                     state.ProcOrder.Clear();
-                    SeedFromRing(state, ReadRing(container));
+                    SeedFromRing(state, ReadRing(container), ReadFloor(container));
                     foreach (TxJob dj in dropped)
                         SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true);
                     foreach (TxJob dj in dropped)
@@ -517,9 +542,109 @@ namespace BestAutoSort.Tx
 
         // ============================ submit / transport ============================
 
+        /// <summary>
+        /// Issues the next local txId (0 = fail-closed: counter exhausted or the
+        /// reservation could not be persisted). The counter is reserved in
+        /// durable blocks as cheap defense-in-depth: ZNet UIDs are EPHEMERAL
+        /// per-process values (NOT SteamIDs — a relaunch normally yields a fresh
+        /// UID, i.e. a fresh floor peer), so the reservation only matters in the
+        /// rare case a UID repeats with a reset counter. The floor is the real
+        /// guard (a same-UID reset counter hits the high-water and answers
+        /// Indeterminate — never double-applies). Counter wrap fails closed loudly.
+        /// </summary>
+        private static long IssueTxId()
+        {
+            if (!ReserveTxCounter())
+                return 0L;
+            long txId;
+            if (!TxIdGen.TryNext(ZNet.GetUID(), ref _clientCounter, out txId))
+            {
+                TxLog.Warn("tx counter exhausted (wrap): refusing new transactions (fail closed)");
+                return 0L;
+            }
+            return txId;
+        }
+
         private static long NextLocalTxId()
         {
-            return TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
+            return IssueTxId();
+        }
+
+        private static bool ReserveTxCounter()
+        {
+            if (_clientCounter == 0 || _clientCounter == uint.MaxValue)
+                return false;
+            if (_clientCounter < _counterReservedCeil)
+                return true;
+            ulong want = (ulong)_clientCounter + CounterReserveBlock;
+            if (want >= (ulong)uint.MaxValue)
+                return false;
+            uint ceil = (uint)want;
+            if (!PersistReservedCounter(ceil))
+            {
+                TxLog.Warn("tx counter reservation persist failed: refusing new transactions (fail closed)");
+                return false;
+            }
+            _counterReservedCeil = ceil;
+            return true;
+        }
+
+        private static string CounterPath()
+        {
+            try
+            {
+                return System.IO.Path.Combine(BepInEx.Paths.ConfigPath, "BestAutoSort_TxCounter.txt");
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool PersistReservedCounter(uint ceil)
+        {
+            try
+            {
+                string path = CounterPath();
+                if (path == null)
+                    return false;
+                System.IO.File.WriteAllText(path, ceil.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("tx counter persist failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void LoadReservedCounter()
+        {
+            try
+            {
+                string path = CounterPath();
+                if (path == null || !System.IO.File.Exists(path))
+                    return;
+                string text = System.IO.File.ReadAllText(path);
+                uint ceil;
+                if (uint.TryParse(text.Trim(), System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out ceil) && ceil > 1)
+                {
+                    // Resume above everything reserved before the restart. UIDs are
+                    // ephemeral per process, so this normally belongs to a retired UID
+                    // (harmless); in the rare UID-reuse case it keeps the new session
+                    // above its own old high-water instead of colliding with it.
+                    _clientCounter = ceil;
+                    _counterReservedCeil = ceil;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Unreadable reservation is NOT fatal: worst case the counter
+                // restarts low and the floor answers Indeterminate (safe side).
+                // Never invent a high counter here — that could skip fencing.
+                TxLog.Warn("tx counter load failed, starting at 1: " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -624,7 +749,14 @@ namespace BestAutoSort.Tx
                 }
                 return;
             }
-            long txId = TxIdGen.Next(ZNet.GetUID(), ref _clientCounter);
+            long txId = IssueTxId();
+            if (txId == 0L)
+            {
+                TellPlayer("Chest request counter exhausted. Restart the game before retrying.");
+                TxLog.Warn("submit refused: counter exhausted (fail closed)");
+                ReleaseClaimed(claimed);
+                return;
+            }
             ZPackage payload = EncodeCall(call, CurrentRevision(container), playerId, actorPos);
             ZPackage request = new ZPackage();
             request.Write(txId);
@@ -803,7 +935,7 @@ namespace BestAutoSort.Tx
                 RespondQuery(container, sender, txId);
                 return;
             }
-            if (sender != TxIdGen.PeerOf(txId))
+            if (!TxIdGen.MatchesPeer(sender, txId))
             {
                 // Cache first: a committed txId keeps its ORIGINAL outcome even
                 // when re-sent with mismatched sender bytes — never overwrite
@@ -827,7 +959,8 @@ namespace BestAutoSort.Tx
                 // Authenticated replay BEFORE access re-evaluation: a committed
                 // retry must return its original outcome even after permissions
                 // changed — re-checking access here would flip it to Rejected.
-                if (replay.Sender != 0 && replay.Sender != sender)
+                // Canonical identity: raw negative RPC senders match their txIds via MatchesPeer semantics.
+                if (replay.Sender != 0 && TxIdGen.PeerKey(replay.Sender) != TxIdGen.PeerKey(sender))
                 {
                     // Stranger asking for another sender's tx: reject WITHOUT the
                     // cached payload (never leak Take bytes across senders).
@@ -840,9 +973,10 @@ namespace BestAutoSort.Tx
                     EncodeCachedBody(replay), replay.TotalsOnly, replay.Op);
                 return;
             }
-            if (state.RingCorrupt)
+            if (state.RingCorrupt && state.FloorCorrupt)
             {
-                // Fail closed: persisted state untrustworthy, mutate nothing.
+                // Fully fail closed: both copies untrustworthy, mutate nothing.
+                // Ring-corrupt alone with an intact floor runs degraded below.
                 TxLog.Warn("tx=" + txId + " refused: ring corrupt (fail closed)");
                 Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
@@ -858,7 +992,7 @@ namespace BestAutoSort.Tx
             }
             if (IsFloorCappedFor(state, txId))
             {
-                // The floor never evicts: refuse new-peer mutations loudly.
+                // Dead branch (see above): floor is unbounded, never refuses.
                 // Nothing cached or executed, so retries answer identically.
                 TxLog.Warn("tx=" + txId + " refused: execution floor at capacity (fail closed)");
                 Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
@@ -1120,7 +1254,7 @@ namespace BestAutoSort.Tx
             StoredResult cached;
             if (state.Processed.TryGetValue(job.TxId, out cached))
             {
-                if (cached.Sender != 0 && cached.Sender != job.Sender)
+                if (cached.Sender != 0 && TxIdGen.PeerKey(cached.Sender) != TxIdGen.PeerKey(job.Sender))
                 {
                     TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REPLAY sender mismatch");
                     StoredResult denied = new StoredResult();
@@ -1132,9 +1266,9 @@ namespace BestAutoSort.Tx
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REPLAY status=" + cached.Status);
                 return CloneStored(cached, cached.Status, true);
             }
-            if (state.RingCorrupt)
+            if (state.RingCorrupt && state.FloorCorrupt)
             {
-                // Fail closed (recheck: the ring may have loaded corrupt after
+                // Fail closed (recheck: both copies may have loaded corrupt after
                 // the request was enqueued). Mutate nothing.
                 StoredResult u = new StoredResult();
                 u.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
@@ -1163,6 +1297,9 @@ namespace BestAutoSort.Tx
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REJECT op=" + job.Call.Op);
                 return result;
             }
+            // Write-ahead fence: record the high-water BEFORE executing, so a crash
+            // between fence and commit leaves this txId Indeterminate, never double-applied.
+            AdvanceFloor(state, job.TxId);
             StoredResult applied = ExecuteCall(state, job, inv);
             CommitResult(state, job, applied);
             uint baseRev = job.BaseRev;
@@ -1479,8 +1616,8 @@ namespace BestAutoSort.Tx
             // ZDO.Set(RingKey): the ring write itself may bump the revision, so
             // a read-back would describe the ring write, not the commit.
             result.Revision = CurrentRevision(state.Container);
-            // Authenticated committer, stamped before caching: replays check it.
-            result.Sender = job.Sender;
+            // Authenticated committer's CANONICAL peer key, stamped before caching: replays check it.
+            result.Sender = TxIdGen.PeerKey(job.Sender);
             result.IsReplay = false;
             // EVERY terminal outcome is cached (including Rejected) BEFORE the
             // ring snapshot is built: an immediate handoff otherwise exposes a
@@ -1495,10 +1632,16 @@ namespace BestAutoSort.Tx
                 state.Processed.Remove(oldest);
             }
             AdvanceFloor(state, job.TxId);
-            // The ring carries every terminal outcome now (v2), so it is
+            // The ring carries every terminal outcome now (v3), so it is
             // rewritten on rejections too — WriteRing skips the ZDO write when
-            // the bytes are unchanged.
-            WriteRing(state);
+            // the bytes are unchanged. A failed encode persists NOTHING (never
+            // a valid empty ring). On a healthy floor, a successful rewrite
+            // heals a degraded corrupt-ring flag: the ring was just rebuilt
+            // from the live cache.
+            bool ringOk = WriteRing(state);
+            bool floorOk = WriteFloor(state);
+            if (!state.FloorCorrupt && ringOk && floorOk)
+                state.RingCorrupt = false;
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                 + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
         }
@@ -1533,21 +1676,21 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Durable per-sender execution floor: peer -&gt; highest tx counter seen.
-        /// Capped at FloorCap peers, NEVER evicted — reaching the cap refuses
-        /// new-peer mutations loudly (fail closed) instead of recreating the
-        /// eviction bug. An absent txId at/below high-water is indeterminate.
+        /// UNBOUNDED and never evicted — FloorCap is a warn threshold only
+        /// (see WriteFloor), never a refusal cap. An absent txId at/below
+        /// high-water is indeterminate.
         /// </summary>
         private static void AdvanceFloor(ChestState state, long txId)
         {
             long peer = TxIdGen.PeerOf(txId);
-            uint ctr = (uint)(txId & 0xFFFFFFFFL);
+            uint ctr = TxIdGen.CounterOf(txId);
             uint hw;
             if (state.Floor.TryGetValue(peer, out hw))
             {
                 if (ctr > hw)
                     state.Floor[peer] = ctr;
             }
-            else if (state.Floor.Count < TxLimits.FloorCap)
+            else
             {
                 state.Floor[peer] = ctr;
             }
@@ -1560,16 +1703,18 @@ namespace BestAutoSort.Tx
             uint hw;
             if (!state.Floor.TryGetValue(TxIdGen.PeerOf(txId), out hw))
                 return false;
-            return (uint)(txId & 0xFFFFFFFFL) <= hw;
+            return TxIdGen.CounterOf(txId) <= hw;
         }
 
+        /// <summary>
+        /// Retained as a no-op: the floor is UNBOUNDED (never evicted, never
+        /// refusing), so no peer is ever "capped out". FloorCap survives only
+        /// as a warn threshold (see WriteFloor). Callers keep their fail-closed
+        /// shape; this never fires.
+        /// </summary>
         private static bool IsFloorCappedFor(ChestState state, long txId)
         {
-            if (state.Processed.ContainsKey(txId))
-                return false;
-            if (state.Floor.ContainsKey(TxIdGen.PeerOf(txId)))
-                return false;
-            return state.Floor.Count >= TxLimits.FloorCap;
+            return false;
         }
 
         /// <summary>
@@ -1585,7 +1730,7 @@ namespace BestAutoSort.Tx
             StoredResult hit;
             if (!state.Processed.TryGetValue(txId, out hit) || hit == null)
                 return false;
-            if (hit.Sender != 0L && hit.Sender != sender)
+            if (hit.Sender != 0L && TxIdGen.PeerKey(hit.Sender) != TxIdGen.PeerKey(sender))
             {
                 TxLog.Warn("tx=" + txId + " cached answer sender mismatch sender=" + sender);
                 Respond(container, sender, txId, TxStatus.Rejected, hit.Revision, new ZPackage(), false, hit.Op);
@@ -1622,7 +1767,7 @@ namespace BestAutoSort.Tx
             {
                 r.Revision = 0u;
             }
-            r.Sender = storedSender;
+            r.Sender = TxIdGen.PeerKey(storedSender);
             r.IsReplay = false;
             state.Processed[txId] = r;
             if (!state.ProcOrder.Contains(txId))
@@ -1675,16 +1820,22 @@ namespace BestAutoSort.Tx
 
         // ============================ manager: ring persist ============================
 
-        private static void WriteRing(ChestState state)
+        /// <summary>
+        /// Persists the v3 ring (entries + embedded floor copy). Returns false when
+        /// nothing was written (encode failure persists NOTHING — never a valid
+        /// empty ring — or the ZDO write threw). Callers use the result to decide
+        /// whether a degraded corrupt-ring flag may heal.
+        /// </summary>
+        private static bool WriteRing(ChestState state)
         {
             try
             {
                 ZNetView netView = TxReflect.GetNetView(state.Container);
                 if ((Object)netView == (Object)null || !netView.IsValid())
-                    return;
+                    return false;
                 // ProcOrder is oldest-first and already includes the
                 // just-committed tx (CommitResult caches before writing).
-                // v2 persists EVERY terminal outcome with its original status:
+                // v3 persists EVERY terminal outcome with its original status:
                 // a forgotten Rejected would otherwise resurrect as Accepted.
                 List<RingSlot> slots = new List<RingSlot>(state.ProcOrder.Count);
                 LinkedListNode<long> node = state.ProcOrder.First;
@@ -1699,7 +1850,8 @@ namespace BestAutoSort.Tx
                         s.Revision = r.Revision;
                         s.Status = r.Status;
                         s.Op = r.Op;
-                        s.Sender = r.Sender != 0L ? r.Sender : TxIdGen.PeerOf(node.Value);
+                        // Canonical sender key (PeerOf is already canonical; PeerKey is idempotent).
+                        s.Sender = r.Sender != 0L ? TxIdGen.PeerKey(r.Sender) : TxIdGen.PeerOf(node.Value);
                         s.Accepted = new List<int>(r.Accepted);
                         s.TakePayloads = BuildRingTakePayloads(r);
                         slots.Add(s);
@@ -1707,17 +1859,67 @@ namespace BestAutoSort.Tx
                     node = node.Next;
                 }
                 List<RingEntry> ring = TxRing.Snapshot(slots);
-                // The next successful mutation rewrites v2; legacy v1 ZDO bytes
-                // are only ever read (never migrated in place, no world migration).
-                byte[] bytes = TxCore.TxCore.EncodeRingV2(ring, state.Floor);
+                // Production writes v3; legacy v1/v2 ZDO bytes are only ever
+                // read (never migrated in place, no world migration).
+                byte[] bytes = TxCore.TxCore.EncodeRingV3(ring, state.Floor);
+                if (bytes == null)
+                {
+                    TxLog.Warn("ring persist failed: encode error (persisting nothing)");
+                    return false;
+                }
                 if (SameBytes(bytes, state.LastRingBytes))
-                    return;
-                state.LastRingBytes = bytes;
+                    return true;
                 netView.GetZDO().Set(RingKey, bytes);
+                state.LastRingBytes = bytes;
+                return true;
             }
             catch (Exception ex)
             {
                 TxLog.Warn("ring persist failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Persists the independent floor copy (own ZDO key). Ring first, floor
+        /// second: with per-peer max-merge on load, either crash order stays safe.
+        /// ZDO reality (no atomicity across keys, each Set bumps DataRevision,
+        /// writes are owner-gated): readers MUST tolerate torn generations —
+        /// a newer ring with an older floor (or vice versa) is routine, not
+        /// corruption. Max-merge only ever raises high-waters, and ring entries
+        /// are immutable committed records, so a torn read can never un-block
+        /// an old-generation txId nor partially apply anything. Present-but-bad
+        /// floor bytes are validated-then-ignored (never partial-applied); only
+        /// a corrupt ring with NO trustworthy floor fails fully closed.
+        /// Warns past the FloorCap threshold (unbounded map, liveness preserved).
+        /// Returns false when nothing was written. Never throws.
+        /// </summary>
+        private static bool WriteFloor(ChestState state)
+        {
+            try
+            {
+                ZNetView netView = TxReflect.GetNetView(state.Container);
+                if ((Object)netView == (Object)null || !netView.IsValid())
+                    return false;
+                if (state.Floor.Count > TxLimits.FloorCap)
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " floor peers=" + state.Floor.Count
+                        + " past warn threshold " + TxLimits.FloorCap + " (unbounded, no refusal)");
+                byte[] bytes = TxCore.TxCore.EncodeFloor(state.Floor);
+                if (bytes == null)
+                {
+                    TxLog.Warn("floor persist failed: encode error (persisting nothing)");
+                    return false;
+                }
+                if (SameBytes(bytes, state.LastFloorBytes))
+                    return true;
+                netView.GetZDO().Set(FloorKey, bytes);
+                state.LastFloorBytes = bytes;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("floor persist failed: " + ex.Message);
+                return false;
             }
         }
 
@@ -1789,9 +1991,74 @@ namespace BestAutoSort.Tx
             }
         }
 
+        private static FloorData ReadFloor(Container container)
+        {
+            try
+            {
+                ZNetView netView = TxReflect.GetNetView(container);
+                if ((Object)netView == (Object)null || !netView.IsValid())
+                    return new FloorData();
+                byte[] bytes = netView.GetZDO().GetByteArray(FloorKey.GetStableHashCode());
+                if (bytes == null)
+                    return new FloorData(); // absent: fall back to the ring-embedded copy.
+                FloorData data = TxCore.TxCore.DecodeFloor(bytes);
+                data.Present = true;
+                return data;
+            }
+            catch (Exception)
+            {
+                FloorData bad = new FloorData();
+                bad.Present = true;
+                bad.Corrupt = true;
+                return bad;
+            }
+        }
+
         private static void SeedFromRing(ChestState state, RingData data)
         {
-            // True reset of the idempotency state, then restore. v2 entries keep
+            SeedFromRing(state, data, null);
+        }
+
+        /// <summary>Per-peer max-merge of one floor copy (canonical keys, unbounded). Crash-order safe.</summary>
+        private static void MergeFloor(ChestState state, Dictionary<long, uint> copy)
+        {
+            if (copy == null)
+                return;
+            foreach (KeyValuePair<long, uint> kv in copy)
+            {
+                long peer = TxIdGen.PeerKey(kv.Key);
+                uint hw;
+                if (state.Floor.TryGetValue(peer, out hw))
+                {
+                    if (kv.Value > hw)
+                        state.Floor[peer] = kv.Value;
+                }
+                else
+                {
+                    state.Floor[peer] = kv.Value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Split-copy seed: the ring plus the independently persisted floor.
+        /// True reset, then restore with per-peer max-merge (either crash order
+        /// stays safe: high-waters only move up). Floor keys are canonicalized.
+        /// TORN READS are expected (two non-atomic ZDO keys): any combination of
+        /// ring/floor generations merges safely — max-merge never lowers a
+        /// high-water and entries are immutable committed records, so nothing
+        /// partially applies. A present-but-corrupt floor copy is validated-
+        /// then-ignored in favor of the ring-embedded copy; a corrupt ring with
+        /// no trustworthy floor fails fully closed (both flags).
+        /// Ring corrupt + independent floor present-and-valid = DEGRADED recovery:
+        /// empty caches + RingCorrupt kept for visibility, floor trusted — old-gen
+        /// txIds stay blocked, new-gen above the floor commits fenced-first, and
+        /// the next successful commit rebuilds (and heals) the ring. Ring corrupt
+        /// with no trustworthy floor = full fail-closed (both flags).
+        /// </summary>
+        private static void SeedFromRing(ChestState state, RingData data, FloorData floor)
+        {
+            // True reset of the idempotency state, then restore. v2/v3 entries keep
             // their ORIGINAL status with exact payloads when available; legacy
             // v1 entries (Status==Duplicate) restore totals-only. A corrupt
             // payload fails closed: empty caches + RingCorrupt (no mutation).
@@ -1799,29 +2066,45 @@ namespace BestAutoSort.Tx
             state.ProcOrder.Clear();
             state.Floor.Clear();
             state.LastRingBytes = null;
+            state.LastFloorBytes = null;
             state.RingCorrupt = false;
+            state.FloorCorrupt = false;
             if (data == null)
                 return;
+            bool floorOk = floor != null && floor.Present && !floor.Corrupt;
             if (data.Corrupt)
             {
+                if (floorOk)
+                {
+                    MergeFloor(state, floor.Floor);
+                    state.RingCorrupt = true; // degraded: no replays, floor still guards old-gen.
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId)
+                        + " ring corrupt: degraded recovery on independent floor (old-gen blocked, new-gen may commit)");
+                    return;
+                }
                 state.RingCorrupt = true;
+                state.FloorCorrupt = true;
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " ring corrupt: fail closed (no mutations until trustworthy state)");
                 return;
             }
-            if (data.Floor != null)
+            if (floor != null && floor.Corrupt)
             {
-                foreach (KeyValuePair<long, uint> kv in data.Floor)
-                {
-                    if (state.Floor.Count >= TxLimits.FloorCap)
-                        break;
-                    state.Floor[kv.Key] = kv.Value;
-                }
+                // Independent floor griefed but the ring is fine: the ring-embedded
+                // copy is authoritative for this generation (never max-merge a
+                // corrupt copy).
             }
+            else if (floorOk)
+            {
+                MergeFloor(state, floor.Floor);
+            }
+            MergeFloor(state, data.Floor);
             if (data.Entries == null)
                 return;
             for (int i = 0; i < data.Entries.Count && i < TxLimits.RingCap; i++)
             {
                 RingEntry e = data.Entries[i];
+                if (e.Sender != 0L)
+                    e.Sender = TxIdGen.PeerKey(e.Sender); // canonicalize legacy signed senders.
                 StoredResult r = new StoredResult();
                 r.Op = e.Op;
                 r.Revision = e.Revision;

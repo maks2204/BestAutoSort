@@ -49,7 +49,7 @@ namespace BestAutoSort.Tx
     /// Cached result for idempotency (full — includes Take items).
     /// Status is the ORIGINAL terminal outcome (Accepted/Partial/Rejected stable
     /// across handoff); IsReplay separates a replay from the original.
-    /// Sender is the authenticated committer (Replay identity check).
+    /// Sender is the authenticated committer's CANONICAL peer key (Replay identity check).
     /// </summary>
     internal sealed class StoredResult
     {
@@ -70,7 +70,7 @@ namespace BestAutoSort.Tx
         public List<TakeEntry> Takes = new List<TakeEntry>();
         /// <summary>True when the entry was restored without exact payloads (legacy ring or inexact Take metadata).</summary>
         public bool TotalsOnly;
-        /// <summary>Authenticated sender peer recorded at commit (PeerOf(txId)).</summary>
+        /// <summary>Authenticated sender peer key recorded at commit (TxIdGen.PeerOf(txId)).</summary>
         public long Sender;
         /// <summary>True when served from cache/ring instead of freshly executed.</summary>
         public bool IsReplay;
@@ -101,6 +101,7 @@ namespace BestAutoSort.Tx
         public Container Container;
         public bool IsLocal;
         public long TxId;
+        /// <summary>Raw authenticated RPC sender (routing + ChestAuthority); canonicalized to a peer key at commit.</summary>
         public long Sender;
         public long PlayerId;
         public uint BaseRev;
@@ -113,11 +114,15 @@ namespace BestAutoSort.Tx
 
     /// <summary>
     /// Per-chest state on this peer.
-    /// Floor: durable per-sender execution high-water (peer -&gt; highest tx
-    /// counter), persisted with the ring, NEVER evicted. An absent txId at or
-    /// below its sender's high-water is indeterminate and must never execute.
-    /// RingCorrupt: persisted bytes were untrustworthy — fail closed (answer
-    /// UnknownTx, mutate nothing) until trustworthy state is rebuilt.
+    /// Floor: durable per-sender execution high-water (canonical peer key -&gt; highest tx
+    /// counter), persisted with the ring AND in its own floor key, UNBOUNDED (never evicted,
+    /// never refusing). An absent txId at or below its sender's high-water is indeterminate
+    /// and must never execute. FloorCap is a warn threshold only.
+    /// RingCorrupt: persisted ring bytes were untrustworthy. FloorCorrupt: the independent
+    /// floor copy is untrustworthy (or missing while the ring is also corrupt).
+    /// Mutations are fully fail-closed only when BOTH are untrustworthy; a corrupt ring
+    /// with an intact floor runs degraded (old-gen blocked, new-gen above the floor commits
+    /// fenced-first) until a successful commit rebuilds the ring.
     /// </summary>
     internal sealed class ChestState
     {
@@ -129,7 +134,9 @@ namespace BestAutoSort.Tx
         public LinkedList<long> ProcOrder = new LinkedList<long>();
         public Dictionary<long, uint> Floor = new Dictionary<long, uint>();
         public bool RingCorrupt;
+        public bool FloorCorrupt;
         public byte[] LastRingBytes;
+        public byte[] LastFloorBytes;
         public long LastOwner;
         // Viewer (we watch a foreign chest):
         public bool ViewedByMe;

@@ -4,9 +4,9 @@
     <AssemblyName>BestAutoSort</AssemblyName>
     <RootNamespace>BestAutoSort</RootNamespace>
     <TargetFramework>net472</TargetFramework>
-    <Version>0.5.5</Version>
-    <AssemblyVersion>0.5.5.0</AssemblyVersion>
-    <FileVersion>0.5.5.0</FileVersion>
+    <Version>0.5.6</Version>
+    <AssemblyVersion>0.5.6.0</AssemblyVersion>
+    <FileVersion>0.5.6.0</FileVersion>
     <Description>BestAutoSort: standalone storage mod (quick-stack, restock, rules, crafting from chests, autofeed, shared chests, upgrades, sort)</Description>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <LangVersion>14.0</LangVersion>

@@ -86,9 +86,9 @@ namespace BestAutoSort.Tx
             try
             {
                 long txId = pkg.ReadLong();
-                // Own tx (matched by originator session in the high bits):
+                // Own tx (matched by canonical originator key in the high bits):
                 // local visuals already played or playing — skip to avoid doubles.
-                if (TxIdGen.PeerOf(txId) == ZNet.GetUID())
+                if (TxIdGen.MatchesPeer(ZNet.GetUID(), txId))
                 {
                     TxLog.Info("flights rx tx=" + txId + " skipped-own");
                     return;

@@ -538,6 +538,11 @@ namespace BestAutoSort.Tx
                 return false;
             try
             {
+                // Dead-source candidate for the null-quarantine escape: whoever
+                // owned before our claim (captured BEFORE ClaimOwnership).
+                long prevOwner = 0L;
+                try { prevOwner = netView.GetZDO().GetOwner(); }
+                catch { }
                 netView.ClaimOwnership();
                 if (!container.IsOwner())
                     return false;
@@ -605,10 +610,16 @@ namespace BestAutoSort.Tx
                     // quarantine. Null s_items means no reload ran: stay quarantined
                     // (never presumed empty) so speculative RAM never goes live.
                     if (reloaded)
+                    {
                         state.TxQuarantined = false;
+                        state.QuarantinedSince = 0f;
+                        state.QuarantineOldOwner = 0L;
+                        state.QuarantineWarns = 0;
+                    }
                     else
                     {
-                        state.TxQuarantined = true;
+                        // Dead-source candidate: whoever owned before our claim.
+                        StampQuarantine(state, prevOwner);
                         if (bytes == null)
                         {
                             NoteSItemsNull("structural-acquire");
@@ -926,6 +937,7 @@ namespace BestAutoSort.Tx
             claimed = null;
             if (call == null || (call.Op != TxOp.Add && call.Op != TxOp.AddBatch))
                 return true;
+            int pruned = 0;
             for (int i = call.Items.Count - 1; i >= 0; i--)
             {
                 TxOpItem it = call.Items[i];
@@ -941,10 +953,32 @@ namespace BestAutoSort.Tx
                 else
                 {
                     call.Items.RemoveAt(i);
-                    TxLog.Info("add submit pruned duplicate in-flight item (already sending)");
+                    pruned++;
                 }
             }
+            // Cascade-spin fix (v0.5.x): one summary line per submit max. The
+            // per-item prune notice used to fire once per pruned item (TxLog.Info
+            // is TxVerbose-gated, but a spinning cascade still buries the log).
+            if (pruned > 0)
+                TxLog.Info("add submit pruned " + pruned + " duplicate in-flight item(s) (already sending)");
             return call.Items.Count > 0;
+        }
+
+        /// <summary>
+        /// No-progress cascade probe (v0.5.x spin fix): is this live stack
+        /// currently claimed by an in-flight Add? Never throws; false on any
+        /// failure (fail-open toward the legacy cascade path, never a stall).
+        /// </summary>
+        internal static bool IsAddInFlight(ItemDrop.ItemData src)
+        {
+            try
+            {
+                return src != null && InFlightAdds.IsClaimed(src);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void ReleaseClaimed(System.Collections.Generic.List<ItemDrop.ItemData> claimed)
@@ -2805,6 +2839,11 @@ namespace BestAutoSort.Tx
             if (!state.TxQuarantined)
             {
                 state.TxQuarantined = true;
+                // No handoff here (we were already the manager): the bounded
+                // wait starts now, the dead-source candidate stays whatever it
+                // was (0 = no claimant to wait for), Warn cadence restarts.
+                state.QuarantinedSince = Time.realtimeSinceStartup;
+                state.QuarantineWarns = 0;
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " quarantined after post-fence failure (authoritative reload pending)");
             }
             if (TryReloadAuthoritative(state))
@@ -2831,6 +2870,9 @@ namespace BestAutoSort.Tx
                     state.SeenOnce = false;
                     state.SeenBytes = null;
                     state.TxQuarantined = false;
+                    state.QuarantinedSince = 0f;
+                    state.QuarantineOldOwner = 0L;
+                    state.QuarantineWarns = 0;
                     TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " recovered from fence-time snapshot (save never ran)");
                     return true;
                 }
@@ -2866,6 +2908,204 @@ namespace BestAutoSort.Tx
             catch { }
         }
 
+        /// <summary>
+        /// Stamp a quarantine episode: flag + bounded-wait start + dead-source
+        /// candidate (0 = no claimant to wait for) + Warn-cadence restart.
+        /// Never throws.
+        /// </summary>
+        private static void StampQuarantine(ChestState state, long oldOwner)
+        {
+            try
+            {
+                state.TxQuarantined = true;
+                state.QuarantinedSince = Time.realtimeSinceStartup;
+                state.QuarantineOldOwner = oldOwner;
+                state.QuarantineWarns = 0;
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Dead-source liveness: is there still a peer that could deliver the
+        /// missing s_items bytes? True = keep quarantining (replication may
+        /// still arrive). False ONLY for a provably gone claimant. Fail-closed:
+        /// unknown net layer, exceptions, and self all read LIVE (never heal on
+        /// doubt). UID 0 means no claimant (never a live peer). The listen-
+        /// server host owns no ZNetPeer entry for its own UID, so beyond the
+        /// peer list the server peer (client side) and live Player ZDO owners
+        /// (either side) also count as live. Never throws.
+        /// </summary>
+        private static bool IsOldOwnerLive(long oldOwner, out string why)
+        {
+            try
+            {
+                if (oldOwner == 0L)
+                {
+                    why = "uid0-no-claimant";
+                    return false;
+                }
+                long self;
+                try { self = ZNet.GetUID(); }
+                catch { why = "uid-unknown"; return true; }
+                if (oldOwner == self)
+                {
+                    why = "self";
+                    return true;
+                }
+                ZNet inst = ZNet.instance;
+                if ((UnityEngine.Object)inst == (UnityEngine.Object)null)
+                {
+                    why = "no-net";
+                    return true;
+                }
+                try
+                {
+                    if (inst.GetPeer(oldOwner) != null)
+                    {
+                        why = "peer-list";
+                        return true;
+                    }
+                }
+                catch { why = "peer-exc"; return true; }
+                try
+                {
+                    if (!inst.IsServer())
+                    {
+                        ZNetPeer serverPeer = inst.GetServerPeer();
+                        if (serverPeer != null && serverPeer.m_uid == oldOwner)
+                        {
+                            why = "server-peer";
+                            return true;
+                        }
+                    }
+                }
+                catch { why = "server-exc"; return true; }
+                try
+                {
+                    List<Player> players = Player.GetAllPlayers();
+                    for (int i = 0; i < players.Count; i++)
+                    {
+                        Player p = players[i];
+                        if ((UnityEngine.Object)p == (UnityEngine.Object)null)
+                            continue;
+                        ZNetView view = p.GetComponent<ZNetView>();
+                        if ((UnityEngine.Object)view == (UnityEngine.Object)null || !view.IsValid())
+                            continue;
+                        if (view.GetZDO().GetOwner() == oldOwner)
+                        {
+                            why = "player-zdo";
+                            return true;
+                        }
+                    }
+                }
+                catch { why = "player-exc"; return true; }
+                why = "gone";
+                return false;
+            }
+            catch
+            {
+                why = "outer-exc";
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Null-s_items self-heal (v0.5.x empty-chest fix), shared by BOTH escape
+        /// legs. Dead-source leg: s_items stayed null past the bounded wait
+        /// with the old owner provably gone (liveQuiescence=false). Live-owner
+        /// quiescence leg: s_items stayed null for the EXTENDED quiescence
+        /// window with the old owner still live (liveQuiescence=true).
+        /// Rationale for the live leg: only the ZDO owner runs vanilla
+        /// Container.Save, so an ex-owner that lost ownership cannot produce
+        /// s_items anymore — delivery must come via the server relay, which
+        /// settles in seconds, not minutes — while our own rev-bumping writes
+        /// (WriteRing/WriteFloor reseeds, SaveContainer) each bump
+        /// DataRevision and can stale-drop older server state, so indefinite
+        /// waiting for a live source that never delivers cannot converge and
+        /// would deadlock an empty chest forever. The bounded quiescence
+        /// window is the only non-deadlock option; the residual risk (server
+        /// silently holding unreplicated items) is LOUD-logged for manual
+        /// reconcile. Requires provably empty live RAM (GetAllItems().Count
+        /// == 0 — never cement empty over real contents), then materializes
+        /// the present empty blob via SaveContainer and VERIFIES it (fresh
+        /// read + validated Load with decoded-bytes proof) before clearing
+        /// the quarantine. Only ever called on the quarantined null path
+        /// behind TxNullEscape.ShouldEscape / ShouldEscapeLiveQuiescent.
+        /// Returns true only on a fully verified heal. Never throws.
+        /// </summary>
+        private static bool TryHealNullSItems(ChestState state, ZNetView netView, long oldOwner, double elapsedSeconds, bool liveQuiescence = false)
+        {
+            try
+            {
+                if (state == null || (UnityEngine.Object)state.Container == (UnityEngine.Object)null)
+                    return false;
+                if ((UnityEngine.Object)netView == (UnityEngine.Object)null || !netView.IsValid())
+                    return false;
+                if (!state.Container.IsOwner())
+                    return false;
+                Inventory inv;
+                try { inv = state.Container.GetInventory(); }
+                catch { return false; }
+                if (inv == null)
+                    return false;
+                int liveCount;
+                try { liveCount = inv.GetAllItems().Count; }
+                catch { return false; }
+                if (liveCount != 0)
+                {
+                    if (TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + (liveQuiescence ? " live-quiescence escape refused (live RAM holds " : " dead-source escape refused (live RAM holds ") + liveCount + " stacks, never cementing empty over real contents)");
+                    return false;
+                }
+                uint rev = netView.GetZDO().DataRevision;
+                if (liveQuiescence)
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " live-owner quiescence escape: s_items null for " + elapsedSeconds.ToString("F1") + "s (quiescence window " + TxNullEscape.QuiescenceSeconds.ToString("F0") + "s), old owner " + oldOwner + " still live, RAM provably empty — healing empty inventory at rev=" + rev);
+                    TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " live-quiescence escape evidence: rev=" + rev + " oldOwner=" + oldOwner + " elapsedS=" + elapsedSeconds.ToString("F1") + " quiescenceS=" + TxNullEscape.QuiescenceSeconds.ToString("F0") + " ramStacks=0");
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " RESIDUAL RISK: server relay may silently hold unreplicated items for this chest — healed as empty after bounded quiescence; manually reconcile if items are missing");
+                }
+                else
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " dead-source escape: s_items null for " + elapsedSeconds.ToString("F1") + "s, old owner " + oldOwner + " unreachable, RAM provably empty — healing empty inventory at rev=" + rev);
+                    TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " dead-source escape evidence: rev=" + rev + " oldOwner=" + oldOwner + " elapsedS=" + elapsedSeconds.ToString("F1") + " ramStacks=0");
+                }
+                try { TxReflect.SaveContainer(state.Container); }
+                catch (Exception ex)
+                {
+                    if (TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + (liveQuiescence ? " live-quiescence self-heal save failed, staying quarantined: " : " dead-source self-heal save failed, staying quarantined: ") + ex.Message);
+                    return false;
+                }
+                byte[] healed;
+                try { healed = TxSItemsGuard.CloneBytes(netView.GetZDO().GetByteArray(ZDOVars.s_items)); }
+                catch { return false; }
+                string healReason;
+                if (!TxSItemsLoad.TryLoad(state.Container, healed, out healReason))
+                {
+                    if (TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + (liveQuiescence ? " live-quiescence self-heal unverified (" : " dead-source self-heal unverified (") + healReason + "), staying quarantined");
+                    return false;
+                }
+                TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
+                TxReflect.UpdateRows(state.Container);
+                state.SeenRev = 0u;
+                state.SeenOnce = false;
+                state.SeenBytes = null;
+                state.TxQuarantined = false;
+                state.QuarantinedSince = 0f;
+                state.QuarantineOldOwner = 0L;
+                state.QuarantineWarns = 0;
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + (liveQuiescence ? " live-owner quiescence escape complete (empty blob present and verified, quarantine cleared, normal operation resumed)" : " dead-source escape complete (empty blob present, quarantine cleared, normal operation resumed)"));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + (liveQuiescence ? " live-quiescence escape failed, staying quarantined: " : " dead-source escape failed, staying quarantined: ") + ex.Message);
+                return false;
+            }
+        }
+
         private static bool TryReloadAuthoritative(ChestState state)
         {
             try
@@ -2893,6 +3133,50 @@ namespace BestAutoSort.Tx
                     // stays fail-closed (quarantine kept, never presumed empty).
                     // Counted for the runtime-verification checklist.
                     NoteSItemsNull("reload");
+                    // Null escape (v0.5.x empty-chest fix): the ONLY
+                    // time-based exits, behind TxNullEscape.ShouldEscape
+                    // (dead source: quarantined + still null + old owner
+                    // provably gone + bounded wait elapsed) and
+                    // TxNullEscape.ShouldEscapeLiveQuiescent (live owner:
+                    // quarantined + still null + old owner still live +
+                    // EXTENDED quiescence window elapsed) — plus provably
+                    // empty RAM and a verified self-heal save inside
+                    // TryHealNullSItems. The short grace NEVER escapes a
+                    // live owner; only total null persistence past the
+                    // quiescence window does (bounded non-deadlock: the
+                    // ex-owner cannot Save, the relay settles in seconds,
+                    // and our own rev-bumping writes can stale-drop older
+                    // server state, so infinite waiting cannot converge).
+                    // Never throws.
+                    float now = Time.realtimeSinceStartup;
+                    if (state.QuarantinedSince <= 0f)
+                    {
+                        // Quarantine predates the stamp (e.g. post-fence path):
+                        // the bounded wait starts at the first null sighting.
+                        // The candidate is left untouched (0 = no claimant).
+                        state.QuarantinedSince = now;
+                    }
+                    double elapsedSeconds = (double)(now - state.QuarantinedSince);
+                    bool oldOwnerLive = true;
+                    string liveWhy = "unchecked";
+                    try { oldOwnerLive = IsOldOwnerLive(state.QuarantineOldOwner, out liveWhy); }
+                    catch { oldOwnerLive = true; liveWhy = "call-exc"; }
+                    // Diagnostic for stuck quarantines: when the bounded wait has
+                    // elapsed but escape is still blocked, say exactly why (which
+                    // liveness leg holds + elapsed + candidate). Dampened by the
+                    // caller's Warn cadence via QuarantineWarns (see pump retry).
+                    if (elapsedSeconds >= TxNullEscape.GraceSeconds && oldOwnerLive && TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " null-escape blocked: oldOwner=" + state.QuarantineOldOwner + " liveWhy=" + liveWhy + " elapsed=" + elapsedSeconds.ToString("F1") + "s");
+                    if (TxNullEscape.ShouldEscape(state.TxQuarantined, true, oldOwnerLive, elapsedSeconds))
+                    {
+                        if (TryHealNullSItems(state, netView, state.QuarantineOldOwner, elapsedSeconds))
+                            return true;
+                    }
+                    if (TxNullEscape.ShouldEscapeLiveQuiescent(state.TxQuarantined, true, oldOwnerLive, elapsedSeconds))
+                    {
+                        if (TryHealNullSItems(state, netView, state.QuarantineOldOwner, elapsedSeconds, true))
+                            return true;
+                    }
                     return false;
                 }
                 // Decoded-bytes proof + RAM snapshot fallback: corrupt-but-
@@ -2910,6 +3194,9 @@ namespace BestAutoSort.Tx
                 state.SeenOnce = false;
                 state.SeenBytes = null;
                 state.TxQuarantined = false;
+                state.QuarantinedSince = 0f;
+                state.QuarantineOldOwner = 0L;
+                state.QuarantineWarns = 0;
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " authoritative reload ok, quarantine cleared");
                 return true;
             }

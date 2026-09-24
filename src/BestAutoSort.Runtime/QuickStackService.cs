@@ -271,6 +271,18 @@ internal sealed class QuickStackService
 				}
 				if (next.Items.Count == 0)
 					return;
+				// Cascade-spin fix (v0.5.x): zero accepted for every sent item AND
+				// every remainder item already in flight under a live sibling tx
+				// means the onward submit would prune to zero and re-cascade once
+				// per chest (the all-pruned skip answers Normal + zero accepted).
+				// Stop this chain: the sibling tx owns the items and continues
+				// through its own remainder path. Chest-full with live (unclaimed)
+				// items still cascades below; partial accept never stops here.
+				if (TxResponsePolicy.ShouldStopNoProgressCascade(accepted, call.Items.Count, AllRemainderInFlight(next)))
+				{
+					Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack cascade stopped (no progress, " + next.Items.Count + " item(s) remain in flight, sibling tx owns them)"));
+					return;
+				}
 				for (int r = 0; r < rest.Count; r++)
 				{
 					Container target = rest[r];
@@ -301,6 +313,25 @@ internal sealed class QuickStackService
 					_cascadePending--;
 			}
 		});
+	}
+
+	/// <summary>
+	/// Cascade-spin probe: every remainder item already claimed by a live sibling
+	/// Add (so an onward submit would prune to zero and spin). Null/empty
+	/// remainder or any unclaimed (or unprovable, e.g. null SourceRef — the claim
+	/// guard only prunes non-null SourceRefs) item returns false: cascade as usual.
+	/// </summary>
+	private static bool AllRemainderInFlight(TxOpCall next)
+	{
+		if (next == null || next.Items == null || next.Items.Count == 0)
+			return false;
+		for (int i = 0; i < next.Items.Count; i++)
+		{
+			TxOpItem op = next.Items[i];
+			if (op == null || op.SourceRef == null || !ChestTxService.IsAddInFlight(op.SourceRef))
+				return false;
+		}
+		return true;
 	}
 
 	private static ItemData ResolveRemainder(Inventory playerInv, TxOpItem sent)

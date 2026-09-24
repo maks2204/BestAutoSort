@@ -126,5 +126,42 @@ namespace BestAutoSort.TxCore
             return disp == TxCompletionKind.Normal
                 || disp == TxCompletionKind.FailedNotCommitted;
         }
+
+        /// <summary>
+        /// No-progress probe for the quick-stack cascade-spin fix: true when at
+        /// least one sent item shows accepted &gt; 0. A short or empty accepted list
+        /// (chunk fanout, empty-body all-pruned skips) reads missing slots as 0,
+        /// matching the cascade remainder math (got = 0 =&gt; full remainder).
+        /// Pure (no Unity refs), pinned by ChestTx.Tests.
+        /// </summary>
+        public static bool CascadeMadeProgress(System.Collections.Generic.IList<int> accepted, int sentCount)
+        {
+            if (accepted == null || sentCount <= 0)
+                return false;
+            int n = accepted.Count < sentCount ? accepted.Count : sentCount;
+            for (int i = 0; i < n; i++)
+            {
+                if (accepted[i] > 0)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Cascade-spin stop gate (v0.5.x): stop the chain only when the completion
+        /// moved nothing (accepted == 0 for every sent item) AND the onward submit
+        /// would send nothing new (every remainder item already in flight under a
+        /// live sibling tx: submitting would prune to zero and re-cascade once per
+        /// chest, since the all-pruned skip answers Normal + zero accepted).
+        /// Chest-full with live (unclaimed) items keeps cascading: the next chest
+        /// may still take them. Partial/full accept never stops here (progress).
+        /// No item loss: the stopped chain submitted and removed nothing (removal
+        /// runs only by accepted counts); the sibling tx holding the claims owns
+        /// the items and continues through its own remainder path.
+        /// </summary>
+        public static bool ShouldStopNoProgressCascade(System.Collections.Generic.IList<int> accepted, int sentCount, bool allRemainderInFlight)
+        {
+            return allRemainderInFlight && !CascadeMadeProgress(accepted, sentCount);
+        }
     }
 }

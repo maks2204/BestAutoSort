@@ -1414,8 +1414,18 @@ namespace BestAutoSort.Tx
                 // then the queue. Drain fail-closes queued jobs as UnknownTx while quarantined.
                 if (state.TxQuarantined)
                 {
+                    // Dampened stuck signal: first retry always Warns (same
+                    // immediate signal as before), then every WarnEveryNth
+                    // retry (~6 s at the 0.5 s cadence) instead of every pump.
                     if (!TryReloadAuthoritative(state))
-                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " still quarantined (pump reload failed, queue fail-closed)");
+                    {
+                        bool showWarn = false;
+                        try { showWarn = TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns); }
+                        catch { showWarn = true; }
+                        state.QuarantineWarns++;
+                        if (showWarn)
+                            TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " still quarantined (pump reload failed, queue fail-closed, attempt=" + state.QuarantineWarns + ")");
+                    }
                 }
                 Drain(state);
                 try
@@ -1437,6 +1447,11 @@ namespace BestAutoSort.Tx
 
         private static void Takeover(ChestState state)
         {
+            // Dead-source candidate: whoever owned before this takeover (the
+            // pump overwrites LastOwner right after we return, so capture now).
+            long prevOwner = 0L;
+            try { prevOwner = state.LastOwner; }
+            catch { }
             try
             {
                 ZNetView netView = TxReflect.GetNetView(state.Container);
@@ -1501,10 +1516,15 @@ namespace BestAutoSort.Tx
                 // any prior quarantine. Null s_items means no reload ran: stay
                 // quarantined (never presumed empty) so speculative RAM never goes live.
                 if (reloaded)
+                {
                     state.TxQuarantined = false;
+                    state.QuarantinedSince = 0f;
+                    state.QuarantineOldOwner = 0L;
+                    state.QuarantineWarns = 0;
+                }
                 else
                 {
-                    state.TxQuarantined = true;
+                    StampQuarantine(state, prevOwner);
                     if (bytes == null)
                     {
                         NoteSItemsNull("takeover");
@@ -1520,7 +1540,7 @@ namespace BestAutoSort.Tx
             {
                 TxLog.Error("takeover failed: " + ex.Message);
                 // Fail-closed: a half-reloaded takeover may hold speculative RAM.
-                try { state.TxQuarantined = true; } catch { }
+                try { StampQuarantine(state, prevOwner); } catch { }
             }
         }
 

@@ -32,6 +32,8 @@ namespace ChestTx.Tests
             TxTransientSendTests.RunAll();
             TxMarkerCrashTests.RunAll();
             TxHardeningTests.RunAll();
+            TxNullEscapeTests.RunAll();
+            TxCascadeNoProgressTests.RunAll();
             TxMustFixTests.RunAll();
             TxPropagationTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");

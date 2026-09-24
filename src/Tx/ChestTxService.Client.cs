@@ -184,9 +184,10 @@ namespace BestAutoSort.Tx
             TxCompletionKind disp = TxResponsePolicy.Classify(status, totalsOnly, pending.Op, pending.ExpectedItems);
             if (disp == TxCompletionKind.Indeterminate)
             {
-                // Terminal, exactly-once: credit nothing, remove nothing,
-                // cascade nothing. The chest may or may not have applied the
-                // mutation — the user must verify before retrying as a NEW tx.
+                // Terminal callback attempt (once per Pending entry — at-most-once
+                // submit, NOT end-to-end exactly-once): credit nothing, remove
+                // nothing, cascade nothing. The chest may or may not have applied
+                // the mutation — the user must verify before retrying as a NEW tx.
                 TxLog.Warn("tx=" + txId + " outcome UNKNOWN op=" + pending.Op + " (manager has no record, nothing credited/removed, no cascade)");
                 TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
                 CompletePendingTerminal(txId, EmptyCountBody(), status, revision, disp);
@@ -243,11 +244,13 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Exactly-once terminal completion (issue #10): remove from Pending before
-        /// invoking the callback, release claims once, invoke inside try/catch,
-        /// then refresh. A late duplicate finds no pending entry and touches nothing.
-        /// Decode failures still eligible for Query must stay pending; only
-        /// terminal paths use this helper.
+        /// Terminal completion, exactly-once callback ATTEMPT per Pending entry
+        /// (issue #10): remove from Pending before invoking the callback, release
+        /// claims, invoke inside try/catch, then refresh. A late duplicate finds
+        /// no pending entry and touches nothing. At-most-once submit, NOT
+        /// end-to-end exactly-once: a committed-but-Indeterminate tx (answer lost)
+        /// still needs manual reconciliation. Decode failures still eligible for
+        /// Query must stay pending; only terminal paths use this helper.
         /// </summary>
         private static void CompletePendingTerminal(long txId, ZPackage body, TxStatus status, uint rev, TxCompletionKind disp)
         {
@@ -431,9 +434,24 @@ namespace BestAutoSort.Tx
             {
                 // Drag-deposit: the stack already left the inventory when the drag started
                 // (vanilla), and itemRef is the abandoned drag object holding the full
-                // dragged amount. Never remove again — restore whatever was not committed.
-                RestoreDragRemainder(srcInv, itemRef, accepted);
-                if (status == TxStatus.UnknownTx)
+                // dragged amount. Never remove again.
+                // Wave-1 isolation: restore ONLY on known-safe outcomes (shared seam
+                // TxDecision.ShouldRestoreDragRemainder). On Indeterminate or
+                // details-unavailable outcomes the chest may already hold the items —
+                // a blind full restore would duplicate them — so restore NOTHING and
+                // stay loud. Real restart-safe escrow is future work (phase 2), never
+                // built here; withholding is not dropping (the drag object keeps its
+                // stack for manual reconciliation).
+                if (!TxDecision.ShouldRestoreDragRemainder(disp))
+                {
+                    TxLog.Warn("drag-restore withheld: outcome " + status + "/" + disp + " is not known-safe — chest may already hold the items, nothing restored");
+                    TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
+                }
+                else
+                {
+                    RestoreDragRemainder(srcInv, itemRef, accepted, disp);
+                }
+                if (status == TxStatus.UnknownTx && TxDecision.ShouldRestoreDragRemainder(disp))
                     TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
                 else if (status == TxStatus.Rejected)
                     TellPlayer("The shared chest refused the move. Try again.");
@@ -465,13 +483,19 @@ namespace BestAutoSort.Tx
                 onDone(null, status, rev, disp);
         }
 
-        private static void RestoreDragRemainder(Inventory srcInv, ItemData itemRef, int accepted)
+        /// <summary>
+        /// Drag-remainder restore, called only behind the shared gate
+        /// (TxDecision.ShouldRestoreDragRemainder): the count comes from
+        /// TxDecision.DragRestoreAmount (production arithmetic pinned by tests).
+        /// A 0 result restores nothing; the caller already warned loudly.
+        /// </summary>
+        private static void RestoreDragRemainder(Inventory srcInv, ItemData itemRef, int accepted, TxCompletionKind disp)
         {
             if (srcInv == null || itemRef == null)
                 return;
             CustomDataTags.StripBenign(itemRef);
-            TxLog.Info("drag-restore stack=" + itemRef.m_stack + " accepted=" + accepted);
-            int restore = itemRef.m_stack - accepted;
+            TxLog.Info("drag-restore stack=" + itemRef.m_stack + " accepted=" + accepted + " disp=" + disp);
+            int restore = TxDecision.DragRestoreAmount(itemRef.m_stack, accepted, disp);
             if (restore <= 0)
                 return;
             itemRef.m_stack = restore;
@@ -938,64 +962,62 @@ namespace BestAutoSort.Tx
             return records;
         }
 
+        /// <summary>
+        /// Client timeout/retry/query pump through the shared enumeration-safe drain
+        /// (TxPendingDrain): keys are snapshotted up front, terminal entries are
+        /// collected during the pass and finalized post-loop (removal + exactly-once
+        /// callback + claim release via FinalizeUnknownTx). Pending is NEVER mutated
+        /// while it is enumerated. Destroyed containers finalize terminally (loud
+        /// Indeterminate with a callback) instead of stalling without one.
+        /// </summary>
         private static void PumpPending()
         {
             if (Pending.Count == 0)
                 return;
             float now = Time.realtimeSinceStartup;
-            List<long> done = null;
-            foreach (KeyValuePair<long, PendingTx> kv in Pending)
-            {
-                PendingTx p = kv.Value;
-                if ((Object)p.Container == (Object)null)
+            TxPendingDrain.Drain<long, PendingTx>(
+                Pending,
+                delegate (long txId, PendingTx p)
                 {
-                    if (done == null)
-                        done = new List<long>();
-                    done.Add(kv.Key);
-                    ReleaseClaimed(p.Claimed);
-                    continue;
-                }
-                if (now >= p.Deadline)
+                    if ((Object)p.Container == (Object)null)
+                        return TxPendingDrain.Step.Terminal;
+                    return TxPendingDrain.Decide(now, p.NextTryAt, p.Deadline, p.Attempts,
+                        p.QuerySent, p.FinalQuerySent, PayloadAttempts, QueryAttempts);
+                },
+                delegate (long txId, PendingTx p, TxPendingDrain.Step step)
                 {
-                    if (!p.FinalQuerySent && (Object)p.Container != (Object)null)
+                    switch (step)
                     {
-                        // One last query before giving up: a lost response is still
-                        // sitting in the manager cache in the common case.
-                        p.FinalQuerySent = true;
-                        p.QuerySent = true;
-                        SendQuery(p);
-                        p.Attempts++;
-                        p.Deadline = now + RequestTimeout;
-                        p.NextTryAt = now + RequestTimeout;
-                        TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op + " final query sent");
-                        continue;
+                        case TxPendingDrain.Step.Resend:
+                            SendPayload(p.Container, p.Payload);
+                            p.Attempts++;
+                            p.NextTryAt = now + RequestTimeout;
+                            break;
+                        case TxPendingDrain.Step.Query:
+                            p.QuerySent = true;
+                            SendQuery(p);
+                            p.Attempts++;
+                            p.NextTryAt = now + RequestTimeout;
+                            break;
+                        case TxPendingDrain.Step.FinalQuery:
+                            // One last query before giving up: a lost response is still
+                            // sitting in the manager cache in the common case.
+                            p.FinalQuerySent = true;
+                            p.QuerySent = true;
+                            SendQuery(p);
+                            p.Attempts++;
+                            p.Deadline = now + RequestTimeout;
+                            p.NextTryAt = now + RequestTimeout;
+                            TxLog.Warn("tx=" + p.TxId + " TIMEOUT op=" + p.Op + " final query sent");
+                            break;
+                        default:
+                            break; // Wait: leave pending, touch nothing.
                     }
-                    if (done == null)
-                        done = new List<long>();
-                    done.Add(kv.Key);
-                    FinalizeUnknownTx(kv.Key);
-                    continue;
-                }
-                if (now < p.NextTryAt)
-                    continue;
-                if (p.Attempts < PayloadAttempts + (p.QuerySent ? 0 : QueryAttempts))
+                },
+                delegate (long txId)
                 {
-                    if (!p.QuerySent && p.Attempts >= PayloadAttempts)
-                    {
-                        p.QuerySent = true;
-                        SendQuery(p);
-                    }
-                    else
-                    {
-                        SendPayload(p.Container, p.Payload);
-                    }
-                    p.Attempts++;
-                    p.NextTryAt = now + RequestTimeout;
-                }
-            }
-            if (done != null)
-                for (int i = 0; i < done.Count; i++)
-                    Pending.Remove(done[i]);
+                    FinalizeUnknownTx(txId);
+                });
         }
 
         private static void SendQuery(PendingTx p)
@@ -1247,12 +1269,13 @@ namespace BestAutoSort.Tx
                 state.ProcOrder.Clear();
                 RingData ring = ReadRing(state.Container);
                 SeedFromRing(state, ring, ReadFloor(state.Container));
-                // Queued-but-unapplied jobs keep a stable outcome: seed them as
-                // Rejected in the FRESH cache (nothing was applied — the sender
-                // retries as a NEW tx) so the same txId can never execute later.
-                // Rejected is answered only when durably persisted (ring + floor);
-                // otherwise each job keeps Indeterminate (floor advance kept, never
-                // rolls back, so an in-session retry stays stale-gated).
+                // Queued-but-unapplied jobs keep a stable outcome ONLY when durable
+                // (shared seam TxDecision.HandoffDropTerminal): seeded Rejected in the
+                // FRESH cache (nothing was applied — the sender retries as a NEW tx)
+                // so the same txId can never execute later. Rejected is answered
+                // only when durably persisted (ring + floor); otherwise each job
+                // keeps Indeterminate (floor advance kept, never rolls back, so an
+                // in-session retry stays stale-gated).
                 TxStatus droppedStatus = TxStatus.Rejected;
                 if (dropped.Count > 0)
                 {
@@ -1260,13 +1283,17 @@ namespace BestAutoSort.Tx
                     foreach (TxJob dj in dropped)
                         if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
                             seeded.Add(dj.TxId);
-                    if (!WriteRing(state) || !WriteFloor(state))
+                    bool ringOk = WriteRing(state);
+                    bool floorOk = ringOk ? WriteFloor(state) : false;
+                    droppedStatus = TxDecision.HandoffDropTerminal(ringOk, floorOk);
+                    if (droppedStatus == TxStatus.UnknownTx)
                     {
                         TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover drops not persisted (indeterminate)");
                         foreach (long txId in seeded)
                             EvictSeededReject(state, txId);
-                        droppedStatus = TxStatus.UnknownTx;
                     }
+                    // Reseed rewrote ZDO keys: propagation-request (never ACK).
+                    RequestPropagation(state);
                 }
                 foreach (TxJob dj in dropped)
                     AnswerReject(state, dj, droppedStatus);
@@ -1283,6 +1310,7 @@ namespace BestAutoSort.Tx
                 else
                 {
                     state.TxQuarantined = true;
+                    NoteSItemsNull("takeover");
                     TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover without authoritative reload (null s_items), staying quarantined");
                 }
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " manager changed old=" + state.LastOwner
@@ -1294,21 +1322,6 @@ namespace BestAutoSort.Tx
                 // Fail-closed: a half-reloaded takeover may hold speculative RAM.
                 try { state.TxQuarantined = true; } catch { }
             }
-        }
-
-        /// <summary>
-        /// Answer queued-but-unapplied jobs (handoff / structural acquire).
-        /// Prefer the two-phase path in Takeover (DequeueAll + SeedReject +
-        /// AnswerReject) so the Rejected outcome persists in the fresh cache.
-        /// This legacy entry point answers without seeding (callers that already
-        /// hold a seeded cache must not double-answer).
-        /// </summary>
-        internal static void RejectQueued(ChestState state)
-        {
-            if (state == null)
-                return;
-            foreach (TxJob job in DequeueAll(state))
-                AnswerReject(state, job, TxStatus.Rejected);
         }
 
         private static void PruneViewers(ChestState state)

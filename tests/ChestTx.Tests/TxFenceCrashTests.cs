@@ -429,9 +429,12 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Spoofed txIds never advance any floor: the exact counter stays blocked as
-        /// Rejected (stable answer for everyone), while the true owner's other
-        /// counters commit normally.
+        /// Wave-1 isolation: spoofed txIds are EPHEMERAL. Rejected, executes nothing,
+        /// advances no floor, seeds no cache entry, writes no ring/floor bytes — so the
+        /// victim's counter is NOT burned and the true owner's SAME txId still commits
+        /// exactly once. (Older behavior cached the spoof Rejected under the peer and
+        /// burned the exact counter, letting an attacker deny the victim's legitimate
+        /// txId with a stable-but-wrong record.)
         /// </summary>
         private static void FENCE_SpoofNeverFences()
         {
@@ -447,17 +450,20 @@ namespace ChestTx.Tests
             Check.That(r.Status == TxStatus.Rejected, "spoof rejected, got " + r.Status);
             Check.Equal(20, chest.TotalOf(Wood), "spoof executes nothing");
             Check.That(!core.DumpFloor().ContainsKey(TxIdGen.PeerKey(11)), "true peer floor untouched by spoof");
-            Check.That(w.RingBytes != null, "spoof reject persisted in ring");
+            Check.Equal(0, core.ProcessedCount, "spoof seeds no cache entry");
+            Check.Equal(0, core.RingCount, "spoof writes no ring entry");
+            Check.That(w.RingBytes == null && w.FloorBytes == null, "spoof persists nothing");
+            Check.That(core.Query(Tx(11, 1)).Status == TxStatus.UnknownTx, "spoof leaves no record to query");
 
-            // The exact counter is burned as Rejected even for the true owner...
+            // The victim's SAME txId is NOT burned: the true owner still commits it once.
             TxRequest ownerSameCounter = TakeReq(Tx(11, 1), 11, Wood, 6);
-            TxResult burned = core.Apply(chest, ownerSameCounter);
-            Check.That(burned.Status == TxStatus.Rejected && burned.IsReplay, "exact counter stable, got " + burned.Status);
-            Check.Equal(20, chest.TotalOf(Wood), "burned counter executes nothing");
-            // ...while the owner's next counter commits normally.
-            TxResult legit = core.Apply(chest, TakeReq(Tx(11, 2), 11, Wood, 6));
-            Check.That(legit.Status == TxStatus.Accepted, "true owner commits, got " + legit.Status);
+            TxResult legit = core.Apply(chest, ownerSameCounter);
+            Check.That(legit.Status == TxStatus.Accepted && !legit.IsReplay, "victim txId not burned, got " + legit.Status);
             Check.Equal(14, chest.TotalOf(Wood), "exactly one debit");
+            // ...while the owner's next counter commits normally too.
+            TxResult legit2 = core.Apply(chest, TakeReq(Tx(11, 2), 11, Wood, 6));
+            Check.That(legit2.Status == TxStatus.Accepted, "true owner commits, got " + legit2.Status);
+            Check.Equal(8, chest.TotalOf(Wood), "exactly two debits total");
         }
 
         /// <summary>

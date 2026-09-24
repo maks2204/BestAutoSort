@@ -33,7 +33,17 @@ namespace BestAutoSort.TxCore
     }
 
     /// <summary>
-    /// Protocol limits.
+    /// Ring vs floor roles (durable ZDO copies, two SEPARATE keys, writes NOT
+    /// atomic across keys — torn generations are routine, never corruption):
+    /// - Ring: immutable committed OUTCOME records (txId, status, accepted totals,
+    ///   revision, sender key; v3). Answers replays/Queries with the ORIGINAL
+    ///   outcome so a txId never flips across handoff. Cap 32, oldest evicted.
+    /// - Floor: per-sender execution HIGH-WATER (peer key -> highest counter seen).
+    ///   UNBOUNDED, never evicted, never refusing. An absent txId at/below its
+    ///   sender's high-water is Indeterminate (evicted, forgotten, or out-of-order)
+    ///   and must NEVER execute. Max-merged across copies (either crash order safe).
+    /// A present-but-corrupt floor copy is validated-then-ignored in favor of the
+    /// ring-embedded copy; a corrupt ring with no trustworthy floor fails fully closed.
     /// </summary>
     public static class TxLimits
     {

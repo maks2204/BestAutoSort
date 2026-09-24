@@ -251,7 +251,8 @@ internal static class AutoFeedService
 	}
 
 	/// <summary>
-	/// Feed one unit via the tx queue (manager-serialized, atomic): no ownership
+	/// Feed one unit via the tx queue (manager-serialized single-owner order,
+	/// multi-key ZDO writes still non-atomic): no ownership
 	/// transfer, no snapshots, no lease. The animal owner feeds directly; remote
 	/// managers commit the Take like any client request.
 	/// </summary>

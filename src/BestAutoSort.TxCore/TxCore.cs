@@ -52,9 +52,12 @@ namespace BestAutoSort.TxCore
     ///   any mutation, so a crash in any later window leaves the request
     ///   Indeterminate, never double-applied. The floor is seen-high-water and
     ///   never rolls back.
-    /// - Authenticated replay identity is checked before anything else on the
-    ///   replay path with canonical keys (TxIdGen.MatchesPeer): a sender/txId
-    ///   mismatch is Rejected without exposing another sender's cached payload.
+    /// - Authenticated sender identity is gated through the shared seam
+    ///   (TxDecision.ClassifySenderBinding, canonical keys via TxIdGen.MatchesPeer)
+    ///   BEFORE any Processed/ProcOrder/Floor/Ring mutation, and a sender/txId
+    ///   mismatch is an EPHEMERAL Rejected: no victim floor/ring/cache change, so
+    ///   the victim's txId is never burned and no stranger ever sees another
+    ///   sender's cached payload.
     /// - A corrupt persisted ring fails closed: Apply answers UnknownTx and
     ///   mutates nothing until the state is rebuilt from trustworthy data —
     ///   or degraded-recovered with an intact independent floor (old-gen stays
@@ -175,8 +178,12 @@ namespace BestAutoSort.TxCore
                 }
                 long peer = TxIdGen.PeerOf(request.TxId);
                 uint ctr = TxIdGen.CounterOf(request.TxId);
-                if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
-                    return SpoofReject(request, peer);
+                // Trust gate FIRST (shared seam): an authenticated sender that does
+                // not own the txId peer bits is a stranger. The refusal below is
+                // EPHEMERAL and mutates nothing (no cache/ring/floor change) — the
+                // cache lookup above is read-only. See EphemeralSpoofReject.
+                if (TxDecision.ClassifySenderBinding(request.Sender, request.TxId) == TxDecision.SenderBinding.UnboundStranger)
+                    return EphemeralSpoofReject(request);
                 if (_quarantined)
                 {
                     // Fail-closed quarantine: speculative RAM may be dirty. Safe
@@ -184,7 +191,7 @@ namespace BestAutoSort.TxCore
                     // fresh mutations never execute, fence, or cache here — the same
                     // txId stays retryable after TryRecover clears the quarantine.
                     // (The failed tx that caused the quarantine keeps its fence.)
-                    return UnknownResult();
+                    return QuarantinedResult();
                 }
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
@@ -203,7 +210,8 @@ namespace BestAutoSort.TxCore
                 // any later window leaves this txId Indeterminate, never double-applied.
                 // The floor is seen-high-water and NEVER rolls back — not even when the
                 // fence write itself fails (then nothing mutated, so a later FRESH txId
-                // is still exactly-once while this txId stays blocked in-session).
+                // still submits at-most-once against an unblocked floor while this
+                // txId stays blocked in-session).
                 // With Durability unset this degrades to the legacy RAM-only fence.
                 AdvanceFloor(peer, ctr);
                 if (Durability != null)
@@ -722,6 +730,16 @@ namespace BestAutoSort.TxCore
             }
         }
 
+        /// <summary>
+        /// Quarantined fresh-tx terminal through the shared seam (TxDecision):
+        /// Indeterminate, never fenced/cached/executed. The same txId stays
+        /// retryable after TryRecover clears the quarantine.
+        /// </summary>
+        private TxResult QuarantinedResult()
+        {
+            return new TxResult { Status = TxDecision.QuarantinedTerminal(), Revision = Revision };
+        }
+
         private TxResult UnknownResult()
         {
             return new TxResult { Status = TxStatus.UnknownTx, Revision = Revision };
@@ -767,71 +785,24 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
-        /// Authenticated sender disagrees with the txId peer bits: spoofed txId.
-        /// Cached as Rejected under the PEER (so the exact counter stays blocked
-        /// with a stable answer) WITHOUT advancing the floor — pushing the true
-        /// owner's high-water would amplify the spoof into a wider denial.
-        /// Legacy RAM-only path (Durability unset): seed + rebuild, answer Rejected.
+        /// Spoofed txId (authenticated sender disagrees with the txId peer bits):
+        /// EPHEMERAL Rejected through the shared seam (TxDecision.SpoofTerminal).
+        /// Persists, fences and caches NOTHING — no victim floor/ring/cache change —
+        /// so the victim's txId is never burned: its legitimate use still applies
+        /// at-most-once afterwards (every resend of the spoofed txId answers the
+        /// same way without recording anything: stable without state). The refused
+        /// sender is named by its canonical key; no victim payload is ever attached.
         /// </summary>
-        private TxResult CacheSpoofReject(TxRequest request, long peer, uint ctr)
+        private TxResult EphemeralSpoofReject(TxRequest request)
         {
-            TxResult result = new TxResult
+            return new TxResult
             {
-                Status = TxStatus.Rejected,
+                Status = TxDecision.SpoofTerminal(),
                 Revision = Revision,
                 Op = request.Op,
-                Sender = peer
+                Sender = TxIdGen.PeerKey(request.Sender),
+                IsReplay = false
             };
-            _processed[request.TxId] = result.Clone();
-            _order.AddLast(request.TxId);
-            while (_order.Count > TxLimits.ProcessedCacheCap)
-            {
-                long oldest = _order.First.Value;
-                _order.RemoveFirst();
-                _processed.Remove(oldest);
-                _takeBlobs.Remove(oldest);
-            }
-            _ring.Clear();
-            _ring.AddRange(TxRing.Snapshot(CollectSlots()));
-            return result;
-        }
-
-        /// <summary>
-        /// Spoof entry point: the durable variant seeds the Rejected entry and persists
-        /// the ring copy, but NEVER advances any floor (the true owner's high-water is
-        /// untouched). If the ring write fails the seed is evicted and the answer is
-        /// Indeterminate — a RAM-only spoof Rejected would flip after a restart.
-        /// </summary>
-        private TxResult SpoofReject(TxRequest request, long peer)
-        {
-            if (Durability == null)
-            {
-                uint ctr = TxIdGen.CounterOf(request.TxId);
-                return CacheSpoofReject(request, peer, ctr);
-            }
-            TxResult result = new TxResult
-            {
-                Status = TxStatus.Rejected,
-                Revision = Revision,
-                Op = request.Op,
-                Sender = peer
-            };
-            _processed[request.TxId] = result.Clone();
-            _order.AddLast(request.TxId);
-            while (_order.Count > TxLimits.ProcessedCacheCap)
-            {
-                long oldest = _order.First.Value;
-                _order.RemoveFirst();
-                _processed.Remove(oldest);
-                _takeBlobs.Remove(oldest);
-            }
-            RebuildRing();
-            if (!PersistRingHook())
-            {
-                Evict(request.TxId);
-                return UnknownResult();
-            }
-            return result;
         }
 
         /// <summary>
@@ -840,7 +811,7 @@ namespace BestAutoSort.TxCore
         /// replaying a non-durable answer. The floor advance is intentionally KEPT
         /// (seen-high-water, never rolls back): an in-session retry is stale-gated
         /// to Indeterminate, and nothing ever executed, so a post-restart fresh
-        /// attempt stays exactly-once.
+        /// attempt still applies at-most-once (never a silent double-apply).
         /// </summary>
         private void Evict(long txId)
         {

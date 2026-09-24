@@ -9,6 +9,14 @@ namespace BestAutoSort.Tx
     /// RPC names and peer hello/compatibility.
     /// Requests go through the chest ZNetView: no target = to the owner (manager),
     /// with target = to a specific peer (responses).
+    ///
+    /// Delivery order (no-FIFO assumption): the engine does NOT guarantee that
+    /// requests, responses, Queries or presence packets arrive in send order
+    /// (UDP transport, relayed fan-out, resends). NOTHING in the protocol depends
+    /// on arrival order: every request carries its full identity (txId) and every
+    /// outcome is idempotent (Processed-cache replay + per-sender floor gate +
+    /// Query-by-txId for lost responses). A reordered duplicate is a cache hit;
+    /// a reordered first-timer at/below the floor is Indeterminate, never executed.
     /// </summary>
     internal static class TxNet
     {

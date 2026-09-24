@@ -43,6 +43,15 @@ namespace BestAutoSort.Tx
         private static readonly Dictionary<int, ChestState> States = new Dictionary<int, ChestState>();
         private static readonly Dictionary<long, PendingTx> Pending = new Dictionary<long, PendingTx>();
         private static uint _clientCounter = 1;
+        /// <summary>
+        /// Observation-only diagnostic: how many times a fail-closed path saw
+        /// null s_items and stayed quarantined instead of presuming empty
+        /// (reload / takeover / structural-acquire). Monotonic, never reset
+        /// except by Reset(). NO behavior change — handling is untouched; the
+        /// count exists only for the runtime-verification checklist
+        /// (docs/chesttx_runtime_verification.md).
+        /// </summary>
+        internal static long SItemsNullDenials;
         /// <summary>Exclusive upper bound of the persisted counter reservation block (0 = none reserved yet).</summary>
         private static uint _counterReservedCeil;
         private const uint CounterReserveBlock = 4096;
@@ -59,6 +68,7 @@ namespace BestAutoSort.Tx
             Pending.Clear();
             _clientCounter = 1;
             _counterReservedCeil = 0;
+            SItemsNullDenials = 0;
             LoadReservedCounter();
             _nextSlowPump = 0f;
             _nextRefreshPoll = 0f;
@@ -444,7 +454,7 @@ namespace BestAutoSort.Tx
                 {
                     StoredResult u = new StoredResult();
                     u.Op = call.Op;
-                    u.Status = TxStatus.UnknownTx;
+                    u.Status = TxDecision.QuarantinedTerminal();
                     u.Revision = CurrentRevision(container);
                     onDone(u);
                 }
@@ -534,21 +544,18 @@ namespace BestAutoSort.Tx
                 ChestState state = GetState(container);
                 if (state != null)
                 {
-                    // Queued-but-unapplied jobs must keep a stable outcome: seed
-                    // them as Rejected in the FRESH cache (nothing was applied, so
-                    // the sender retries as a NEW tx) instead of letting the same
-                    // txId execute later and flip to Accepted.
                     List<TxJob> dropped = DequeueAll(state);
                     state.Processed.Clear();
                     state.ProcOrder.Clear();
                     SeedFromRing(state, ReadRing(container), ReadFloor(container));
-                    // Queued-but-unapplied jobs must keep a stable outcome: seed
-                    // them as Rejected in the FRESH cache (nothing was applied, so
-                    // the sender retries as a NEW tx) instead of letting the same
-                    // txId execute later and flip to Accepted. Rejected is answered
-                    // only when durably persisted (ring + floor); otherwise each job
-                    // keeps Indeterminate. On eviction-after-failure the floor advance
-                    // is kept (never rolls back), so an in-session retry stays stale.
+                    // Queued-but-unapplied jobs keep a stable outcome ONLY when durable
+                    // (shared seam TxDecision.HandoffDropTerminal): seeded Rejected in the
+                    // FRESH cache (nothing was applied, so the sender retries as a NEW tx)
+                    // instead of letting the same txId execute later and flip to Accepted.
+                    // Rejected is answered only when durably persisted (ring + floor);
+                    // otherwise each job keeps Indeterminate. On eviction-after-failure
+                    // the floor advance is kept (never rolls back), so an in-session
+                    // retry stays stale.
                     TxStatus droppedStatus = TxStatus.Rejected;
                     if (dropped.Count > 0)
                     {
@@ -556,13 +563,17 @@ namespace BestAutoSort.Tx
                         foreach (TxJob dj in dropped)
                             if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
                                 seeded.Add(dj.TxId);
-                        if (!WriteRing(state) || !WriteFloor(state))
+                        bool ringOk = WriteRing(state);
+                        bool floorOk = ringOk ? WriteFloor(state) : false;
+                        droppedStatus = TxDecision.HandoffDropTerminal(ringOk, floorOk);
+                        if (droppedStatus == TxStatus.UnknownTx)
                         {
                             TxLog.Warn("structural acquire drops not persisted (indeterminate)");
                             foreach (long txId in seeded)
                                 EvictSeededReject(state, txId);
-                            droppedStatus = TxStatus.UnknownTx;
                         }
+                        // Reseed rewrote ZDO keys: propagation-request (never ACK).
+                        RequestPropagation(state);
                     }
                     foreach (TxJob dj in dropped)
                         AnswerReject(state, dj, droppedStatus);
@@ -576,6 +587,7 @@ namespace BestAutoSort.Tx
                     else
                     {
                         state.TxQuarantined = true;
+                        NoteSItemsNull("structural-acquire");
                         TxLog.Warn("structural acquire without authoritative reload (null s_items), staying quarantined");
                     }
                 }
@@ -621,20 +633,22 @@ namespace BestAutoSort.Tx
 
         private static bool ReserveTxCounter()
         {
-            if (_clientCounter == 0 || _clientCounter == uint.MaxValue)
+            // Pure rule in the shared seam (TxCounterFile.TryReserve, pinned by
+            // HARDENING_Counter* tests): refuses fail-closed at 0/MaxValue and
+            // when the next block would reach MaxValue, so the counter can
+            // never wrap silently. Only a successful ATOMIC persist advances
+            // the reservation ceil.
+            uint newCeil;
+            if (!TxCounterFile.TryReserve(_clientCounter, _counterReservedCeil, CounterReserveBlock, out newCeil))
                 return false;
-            if (_clientCounter < _counterReservedCeil)
+            if (newCeil == _counterReservedCeil)
                 return true;
-            ulong want = (ulong)_clientCounter + CounterReserveBlock;
-            if (want >= (ulong)uint.MaxValue)
-                return false;
-            uint ceil = (uint)want;
-            if (!PersistReservedCounter(ceil))
+            if (!PersistReservedCounter(newCeil))
             {
                 TxLog.Warn("tx counter reservation persist failed: refusing new transactions (fail closed)");
                 return false;
             }
-            _counterReservedCeil = ceil;
+            _counterReservedCeil = newCeil;
             return true;
         }
 
@@ -650,6 +664,14 @@ namespace BestAutoSort.Tx
             }
         }
 
+        /// <summary>
+        /// Crash-atomic reservation persist through the shared seam
+        /// (TxCounterFile.WriteAtomically: temp + OS flush + Replace with a
+        /// backup copy, delete+move fallback). False = persisted NOTHING: the
+        /// caller refuses new txIds fail-closed. A torn write can only leave a
+        /// truncated temp file — never a half primary — so the next load fails
+        /// the checksum and falls back to the backup copy.
+        /// </summary>
         private static bool PersistReservedCounter(uint ceil)
         {
             try
@@ -657,7 +679,11 @@ namespace BestAutoSort.Tx
                 string path = CounterPath();
                 if (path == null)
                     return false;
-                System.IO.File.WriteAllText(path, ceil.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (!TxCounterFile.WriteAtomically(path, ceil))
+                {
+                    TxLog.Warn("tx counter persist failed (atomic write refused)");
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
@@ -674,10 +700,31 @@ namespace BestAutoSort.Tx
                 string path = CounterPath();
                 if (path == null || !System.IO.File.Exists(path))
                     return;
-                string text = System.IO.File.ReadAllText(path);
+                // Backup-aware load (shared seam TxCounterFile.ResolveLoad): the
+                // versioned format is checksum-checked, legacy plain-integer
+                // files still read, and a torn/corrupt primary falls back to
+                // the backup copy (restoring it best-effort). Both copies
+                // untrustworthy = archive the evidence aside and resume at 1
+                // LOUDLY (never a silent rollback: UIDs are ephemeral per
+                // process so this normally belongs to a retired UID; in the
+                // rare UID-reuse case the floor stale-gates anything at/below
+                // the old high-water to Indeterminate — safe side, never
+                // double-applied). Never invent a high counter here — that
+                // could skip fencing.
+                string primaryText = null;
+                string backupText = null;
+                string backupPath = TxCounterFile.BackupPathFor(path);
+                try { primaryText = System.IO.File.ReadAllText(path); }
+                catch { }
+                try
+                {
+                    if (System.IO.File.Exists(backupPath))
+                        backupText = System.IO.File.ReadAllText(backupPath);
+                }
+                catch { }
                 uint ceil;
-                if (uint.TryParse(text.Trim(), System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture, out ceil) && ceil > 1)
+                bool restoreBackup;
+                if (TxCounterFile.ResolveLoad(primaryText, backupText, out ceil, out restoreBackup))
                 {
                     // Resume above everything reserved before the restart. UIDs are
                     // ephemeral per process, so this normally belongs to a retired UID
@@ -685,7 +732,16 @@ namespace BestAutoSort.Tx
                     // above its own old high-water instead of colliding with it.
                     _clientCounter = ceil;
                     _counterReservedCeil = ceil;
+                    if (restoreBackup)
+                    {
+                        TxLog.Warn("tx counter primary corrupt, resumed from backup ceil=" + ceil + " (restoring primary best-effort)");
+                        try { TxCounterFile.WriteAtomically(path, ceil); }
+                        catch { }
+                    }
+                    return;
                 }
+                ArchiveCorruptCounter(path, backupPath);
+                TxLog.Warn("tx counter file corrupt (primary AND backup untrustworthy): evidence archived aside, starting at 1 (floor stale-gates same-UID replays to Indeterminate)");
             }
             catch (Exception ex)
             {
@@ -697,12 +753,46 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
+        /// Corrupt-counter evidence preservation (diagnostic only): renames
+        /// untrustworthy primary/backup copies aside with a timestamp suffix so
+        /// the failure stays inspectable. Never throws. Does NOT invent a
+        /// replacement counter — the caller resumes at 1 loudly.
+        /// </summary>
+        private static void ArchiveCorruptCounter(string path, string backupPath)
+        {
+            try
+            {
+                string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                try
+                {
+                    if (System.IO.File.Exists(path))
+                        System.IO.File.Move(path, path + ".corrupt-" + stamp);
+                }
+                catch { }
+                try
+                {
+                    if (System.IO.File.Exists(backupPath))
+                        System.IO.File.Move(backupPath, backupPath + ".corrupt-" + stamp);
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// In-flight deduplicator for Adds: the same live ItemData must never be committed
         /// twice (quickstack snapshots every chest from one inventory state; a double click
         /// re-sends the same stack). First submit wins; later duplicates are pruned.
         /// Takes are safe by re-resolution on the manager and are not tracked.
+        /// Shared lease primitive (TxClaimSet): claims are held only until the Pending
+        /// map (remote) or the synchronous local drain owns them — EVERY pre-ownership
+        /// failure path releases via try/finally (see Submit), and terminal completion
+        /// releases the claim before the callback (see CompletePendingTerminal:
+        /// exactly-once callback ATTEMPT per Pending entry — at-most-once submit,
+        /// not end-to-end exactly-once; committed-but-Indeterminate and client-crash
+        /// windows stay residual). Never held across frames except inside Pending.
         /// </summary>
-        private static readonly System.Collections.Generic.HashSet<ItemDrop.ItemData> InFlightAdds = new System.Collections.Generic.HashSet<ItemDrop.ItemData>();
+        private static readonly TxClaimSet<ItemDrop.ItemData> InFlightAdds = new TxClaimSet<ItemDrop.ItemData>();
 
         private static bool TryClaimAddItems(TxOpCall call, out System.Collections.Generic.List<ItemDrop.ItemData> claimed)
         {
@@ -715,7 +805,7 @@ namespace BestAutoSort.Tx
                 ItemDrop.ItemData src = it != null ? it.SourceRef : null;
                 if (src == null)
                     continue;
-                if (InFlightAdds.Add(src))
+                if (InFlightAdds.TryClaim(src))
                 {
                     if (claimed == null)
                         claimed = new System.Collections.Generic.List<ItemDrop.ItemData>();
@@ -732,13 +822,7 @@ namespace BestAutoSort.Tx
 
         private static void ReleaseClaimed(System.Collections.Generic.List<ItemDrop.ItemData> claimed)
         {
-            if (claimed == null)
-                return;
-            for (int i = 0; i < claimed.Count; i++)
-            {
-                if (claimed[i] != null)
-                    InFlightAdds.Remove(claimed[i]);
-            }
+            InFlightAdds.ReleaseAll(claimed);
         }
 
         private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
@@ -781,6 +865,10 @@ namespace BestAutoSort.Tx
             System.Collections.Generic.List<ItemDrop.ItemData> claimed;
             if (!TryClaimAddItems(call, out claimed))
             {
+                // All items already in flight (claimed is empty here: only surviving
+                // items are ever claimed). Release defensively — a stranded claim
+                // would starve every future submit of that stack.
+                ReleaseClaimed(claimed);
                 TxLog.Info("add submit skipped: all items already in flight");
                 if (onDone != null)
                 {
@@ -798,41 +886,88 @@ namespace BestAutoSort.Tx
                 }
                 return;
             }
-            long txId = IssueTxId();
-            if (txId == 0L)
+            // Claim lease: `claimed` is held ONLY until the Pending map owns it.
+            // EVERY pre-ownership failure path below (counter exhausted, encode
+            // failure, invalid netview, insert failure, destroyed container)
+            // releases via the finally — a stranded claim would starve every
+            // future submit of that live stack. Pending owns the claims from
+            // `owned = true` until CompletePendingTerminal releases them exactly
+            // once (exactly-once callback + claim release, late duplicates find
+            // no entry and touch nothing).
+            bool owned = false;
+            try
             {
-                TellPlayer("Chest request counter exhausted. Restart the game before retrying.");
-                TxLog.Warn("submit refused: counter exhausted (fail closed)");
-                ReleaseClaimed(claimed);
-                return;
+                long txId = IssueTxId();
+                if (txId == 0L)
+                {
+                    TellPlayer("Chest request counter exhausted. Restart the game before retrying.");
+                    TxLog.Warn("submit refused: counter exhausted (fail closed)");
+                    return;
+                }
+                ZPackage payload;
+                try
+                {
+                    payload = EncodeCall(call, CurrentRevision(container), playerId, actorPos);
+                }
+                catch (Exception ex)
+                {
+                    TellPlayer("Shared chest is not available.");
+                    TxLog.Warn("submit refused: encode failed: " + ex.Message);
+                    return;
+                }
+                ZPackage request;
+                try
+                {
+                    request = new ZPackage();
+                    request.Write(txId);
+                    request.Write(payload);
+                }
+                catch (Exception ex)
+                {
+                    TellPlayer("Shared chest is not available.");
+                    TxLog.Warn("submit refused: framing failed: " + ex.Message);
+                    return;
+                }
+                ZNetView netView = TxReflect.GetNetView(container);
+                if ((Object)netView == (Object)null || !netView.IsValid() || (Object)container == (Object)null)
+                {
+                    TellPlayer("Shared chest is not available.");
+                    TxLog.Warn("submit refused: chest netview invalid/destroyed (claims released)");
+                    return;
+                }
+                PendingTx pending = new PendingTx();
+                pending.TxId = txId;
+                pending.Container = container;
+                pending.Payload = request;
+                pending.Op = call.Op;
+                pending.Claimed = claimed;
+                pending.Attempts = 0;
+                pending.ExpectedItems = expectedItems;
+                pending.NextTryAt = 0f;
+                pending.Deadline = Time.realtimeSinceStartup + FailDeadline;
+                pending.OnResponse = onDone;
+                try
+                {
+                    Pending.Add(txId, pending);
+                }
+                catch (Exception ex)
+                {
+                    TellPlayer("Shared chest is not available.");
+                    TxLog.Warn("submit refused: pending insert failed (claims released): " + ex.Message);
+                    return;
+                }
+                owned = true;
+                TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + txId
+                    + " peer=" + ZNet.GetUID() + " op=" + call.Op + " " + DescribeCall(call) + " SEND");
+                SendPayload(container, request);
+                pending.Attempts = 1;
+                pending.NextTryAt = Time.realtimeSinceStartup + RequestTimeout;
             }
-            ZPackage payload = EncodeCall(call, CurrentRevision(container), playerId, actorPos);
-            ZPackage request = new ZPackage();
-            request.Write(txId);
-            request.Write(payload);
-            ZNetView netView = TxReflect.GetNetView(container);
-            if ((Object)netView == (Object)null || !netView.IsValid())
+            finally
             {
-                TellPlayer("Shared chest is not available.");
-                return;
+                if (!owned)
+                    ReleaseClaimed(claimed);
             }
-            PendingTx pending = new PendingTx();
-            pending.TxId = txId;
-            pending.Container = container;
-            pending.Payload = request;
-            pending.Op = call.Op;
-            pending.Claimed = claimed;
-            pending.Attempts = 0;
-            pending.ExpectedItems = expectedItems;
-            pending.NextTryAt = 0f;
-            pending.Deadline = Time.realtimeSinceStartup + FailDeadline;
-            pending.OnResponse = onDone;
-            Pending[txId] = pending;
-            TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + txId
-                + " peer=" + ZNet.GetUID() + " op=" + call.Op + " " + DescribeCall(call) + " SEND");
-            SendPayload(container, request);
-            pending.Attempts = 1;
-            pending.NextTryAt = Time.realtimeSinceStartup + RequestTimeout;
         }
 
         private static void SendPayload(Container container, ZPackage request)
@@ -959,21 +1094,18 @@ namespace BestAutoSort.Tx
                 return;
             if (!TxNet.IsCompatiblePeer(sender) && sender != ZNet.GetUID())
             {
-                // Cache first: a committed txId keeps its ORIGINAL outcome even
-                // when re-sent over a version-skewed link — never overwrite it
+                // Cache first (READ-ONLY): a committed txId keeps its ORIGINAL outcome
+                // even when re-sent over a version-skewed link — never overwrite it
                 // with a fresh Rejected (same sender-mismatch rule as replays).
                 if (TryRespondCached(container, sender, txId, state))
                     return;
-                // Deterministic version mismatch: persist the definitive Rejected
-                // so the same txId can never execute later (not even after handoff).
-                TxLog.Warn("tx=" + txId + " REJECT incompatible peer " + sender);
-                if (!TryPersistReject(state, txId, call.Op, sender, true))
-                {
-                    TxLog.Warn("tx=" + txId + " REJECT not persisted (indeterminate)");
-                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
-                    return;
-                }
-                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
+                // Version-skewed sender, uncommitted txId: EPHEMERAL Rejected through
+                // the shared seam — no victim state change (no cache seed, no floor
+                // advance, no ring write). A persisted Rejected would fence a peer
+                // whose version may flap; the same txId answers the same way on
+                // resend without recording anything.
+                TxLog.Warn("tx=" + txId + " REJECT incompatible peer " + sender + " (ephemeral: no victim state change)");
+                Respond(container, sender, txId, TxDecision.SpoofTerminal(), CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
             if ((call.Op == TxOp.ViewerOpen || call.Op == TxOp.ViewerClose))
@@ -988,26 +1120,19 @@ namespace BestAutoSort.Tx
                 RespondQuery(container, sender, txId);
                 return;
             }
-            if (!TxIdGen.MatchesPeer(sender, txId))
+            if (TxDecision.ClassifySenderBinding(sender, txId) == TxDecision.SenderBinding.UnboundStranger)
             {
-                // Cache first: a committed txId keeps its ORIGINAL outcome even
-                // when re-sent with mismatched sender bytes — never overwrite
-                // it with a fresh spoof Rejected (stranger => Rejected without
-                // payload; true sender => original status/body).
+                // Trust gate FIRST: the authenticated sender provably does not own
+                // this txId. The cache lookup below is READ-ONLY (a committed txId
+                // keeps its ORIGINAL outcome; a stranger gets Rejected with no
+                // payload — never another sender's Take bytes). The uncached tail
+                // is an EPHEMERAL Rejected through the shared seam: no victim
+                // Processed/ProcOrder/Floor/Ring mutation, so the victim's txId is
+                // never burned and a spoof can never fence the true owner's floor.
                 if (TryRespondCached(container, sender, txId, state))
                     return;
-                // Spoofed txId (authenticated sender disagrees with the txId peer
-                // bits). Cache Rejected under the PEER (not the spoofer) without
-                // advancing the floor: the exact counter is blocked, lower/upper
-                // counters of the true owner are unaffected.
-                TxLog.Warn("tx=" + txId + " REJECT sender/txId mismatch sender=" + sender);
-                if (!TryPersistReject(state, txId, call.Op, TxIdGen.PeerOf(txId), false))
-                {
-                    TxLog.Warn("tx=" + txId + " spoof REJECT not persisted (indeterminate)");
-                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
-                    return;
-                }
-                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
+                TxLog.Warn("tx=" + txId + " REJECT sender/txId mismatch sender=" + sender + " (ephemeral: no victim state change)");
+                Respond(container, sender, txId, TxDecision.SpoofTerminal(), CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
             StoredResult replay;
@@ -1044,7 +1169,7 @@ namespace BestAutoSort.Tx
                 // speculative inventory. Fresh txIds never execute until an authoritative
                 // s_items reload succeeds. Replays above already answered from cache.
                 TxLog.Warn("tx=" + txId + " refused: quarantined after post-fence failure (indeterminate, never executes)");
-                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                Respond(container, sender, txId, TxDecision.QuarantinedTerminal(), CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }
             if (IsFloorStale(state, txId))
@@ -1278,7 +1403,7 @@ namespace BestAutoSort.Tx
                         TxLog.Warn("tx=" + job.TxId + " quarantined: answered indeterminate without executing");
                         StoredResult q = new StoredResult();
                         q.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                        q.Status = TxStatus.UnknownTx;
+                        q.Status = TxDecision.QuarantinedTerminal();
                         q.Revision = CurrentRevision(state.Container);
                         try
                         {
@@ -1317,6 +1442,9 @@ namespace BestAutoSort.Tx
                         AdvanceFloor(state, job.TxId);
                         WriteRing(state);
                         WriteFloor(state);
+                        // The fence re-persist above rewrote ZDO keys: ask the
+                        // net layer to push them (propagation-request, §RequestPropagation).
+                        RequestPropagation(state);
                     }
                     try
                     {
@@ -1420,8 +1548,8 @@ namespace BestAutoSort.Tx
             // executed, nothing cached, answer UnknownTx (Indeterminate) loudly, with
             // no auto-retry and no new-tx synthesis — the client retries as a NEW txId.
             // The floor is seen-high-water and NEVER rolls back (not even on fence-write
-            // failure: nothing mutated, so a later FRESH txId is still exactly-once
-            // while this txId stays blocked in-session).
+            // failure: nothing mutated, so a later FRESH txId still submits
+            // at-most-once while this txId stays blocked in-session).
             if (!TryPersistExecutionFence(state, job.TxId))
             {
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " fence not persisted (indeterminate, never executes)");
@@ -1450,7 +1578,7 @@ namespace BestAutoSort.Tx
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " quarantined (indeterminate, never executes)");
                 StoredResult quarantined = new StoredResult();
                 quarantined.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                quarantined.Status = TxStatus.UnknownTx;
+                quarantined.Status = TxDecision.QuarantinedTerminal();
                 quarantined.Revision = CurrentRevision(job.Container);
                 return quarantined;
             }
@@ -1870,6 +1998,10 @@ namespace BestAutoSort.Tx
             bool floorOk = WriteFloor(state);
             if (!state.FloorCorrupt && ringOk && floorOk)
                 state.RingCorrupt = false;
+            // Committed (or deterministically rejected) state just rewrote ZDO
+            // keys: ask the net layer to push them (propagation-request, see
+            // RequestPropagation — never an ACK/barrier).
+            RequestPropagation(state);
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                 + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
             return ringOk && floorOk;
@@ -1973,7 +2105,7 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Seed a definitive Rejected outcome into the fresh cache (pre-queue
-        /// rejects: incompatible peer, access denial, spoof) so the same txId
+        /// rejects: access denial, handoff/structural seeds) so the same txId
         /// keeps its answer forever. Advances the floor unless told otherwise
         /// (spoof entries must not push the true owner's high-water).
         /// Never overwrites a committed outcome: pre-replay callers answer from
@@ -2029,16 +2161,20 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Deterministic pre-queue Rejected (incompatible peer, spoof, access denial):
-        /// seed the RAM entry, then persist it. The Rejected answer may be sent ONLY when
-        /// the outcome is durable — the ring entry, plus the floor copy when the floor
-        /// advances. Otherwise the caller must answer UnknownTx (Indeterminate): a
-        /// RAM-only Rejected would flip after a restart/handoff. On failure a freshly
-        /// seeded entry is evicted so a retry re-attempts persistence instead of
-        /// replaying a non-durable answer (the floor advance is KEPT: seen-high-water,
-        /// never rolls back, so an in-session retry is stale-gated to Indeterminate).
-        /// Spoof entries never advance any floor (advanceFloor=false), so a spoof can
-        /// never fence the true owner's high-water. Returns true when Rejected may be sent.
+        /// Deterministic pre-queue Rejected (incompatible peer, access denial,
+        /// handoff seeds): seed the RAM entry, then persist it. The Rejected
+        /// answer may be sent ONLY when the outcome is durable — the ring entry,
+        /// plus the floor copy when the floor advances. Otherwise the caller must
+        /// answer UnknownTx (Indeterminate): a RAM-only Rejected would flip after
+        /// a restart/handoff. On failure a freshly seeded entry is evicted so a
+        /// retry re-attempts persistence instead of replaying a non-durable answer
+        /// (the floor advance is KEPT: seen-high-water, never rolls back, so an
+        /// in-session retry is stale-gated to Indeterminate).
+        /// NOTE: spoofed sender/txId mismatches NO LONGER use this helper — they
+        /// are refused ephemerally (no seed, no floor advance, no persist) so a
+        /// spoof can never fence the true owner's high-water. Surviving callers
+        /// pass advanceFloor=true and never carry a spoofed txId.
+        /// Returns true when Rejected may be sent.
         /// </summary>
         private static bool TryPersistReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
         {
@@ -2154,6 +2290,20 @@ namespace BestAutoSort.Tx
         /// Load/UpdateRows throw) leaves quarantine set. Null bytes count as failure (never
         /// presumed empty). Never throws.
         /// </summary>
+        /// <summary>
+        /// Observation-only s_items==null tally (see SItemsNullDenials). Never
+        /// throws; records the site tag at TxVerbose level for field diagnosis.
+        /// </summary>
+        private static void NoteSItemsNull(string site)
+        {
+            try
+            {
+                SItemsNullDenials++;
+                TxLog.Info("s_items null observed at " + site + " (fail-closed, quarantined; total=" + SItemsNullDenials + ")");
+            }
+            catch { }
+        }
+
         private static bool TryReloadAuthoritative(ChestState state)
         {
             try
@@ -2173,7 +2323,13 @@ namespace BestAutoSort.Tx
                     return false;
                 }
                 if (bytes == null)
+                {
+                    // NO behavior change (hardening observation only): null s_items
+                    // stays fail-closed (quarantine kept, never presumed empty).
+                    // Counted for the runtime-verification checklist.
+                    NoteSItemsNull("reload");
                     return false;
+                }
                 state.Container.GetInventory().Load(new ZPackage(bytes));
                 TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                 TxReflect.UpdateRows(state.Container);
@@ -2342,6 +2498,69 @@ namespace BestAutoSort.Tx
                 TxLog.Warn("floor persist failed: " + ex.Message);
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Propagation request after a ZDO write (CommitResult, fence re-persist,
+        /// handoff reseeds): asks the network layer to push the chest ZDO to
+        /// known viewers NOW instead of waiting for the next periodic sync.
+        ///
+        /// Durability vocabulary (used consistently here and in
+        /// docs/chesttx_runtime_verification.md):
+        /// - local-write: ZDO.Set / Container.Save updated the manager's copy.
+        /// - propagation-request: THIS helper (ForceSendZDO per viewer).
+        /// - observed: a viewer polled a newer DataRevision/s_items.
+        /// - world-save: the server persisted the ZDO to the world file.
+        /// - reciprocal: the client applied its matching inventory change.
+        ///
+        /// This helper is ONLY a propagation-request: best-effort, never an
+        /// ACK/barrier, never proof of observed/world-save/reciprocal. Uses
+        /// solely the attested ZDOMan API shape (ForceSendZDO(peerUid, zdoUid),
+        /// the same call TxContainerOpenPatch makes on the open-grant path).
+        /// Sends to a snapshot of the presence Viewers set (batch-sensibly:
+        /// one call per known viewer, invalid/duplicate peers skipped). Never
+        /// throws; TxVerbose-gated logging only (TxLog.Info).
+        /// </summary>
+        private static void RequestPropagation(ChestState state)
+        {
+            TryForceSendZdo(state);
+        }
+
+        private static void TryForceSendZdo(ChestState state)
+        {
+            try
+            {
+                if (state == null || (Object)state.Container == (Object)null)
+                    return;
+                if (state.Viewers == null || state.Viewers.Count == 0)
+                    return;
+                ZNetView netView = TxReflect.GetNetView(state.Container);
+                if ((Object)netView == (Object)null || !netView.IsValid())
+                    return;
+                ZDOID zdoUid;
+                try { zdoUid = netView.GetZDO().m_uid; }
+                catch { return; }
+                ZDOMan zdoMan = ZDOMan.instance;
+                if (zdoMan == null)
+                    return;
+                System.Collections.Generic.List<long> peers =
+                    new System.Collections.Generic.List<long>(state.Viewers.Keys);
+                int pushed = 0;
+                for (int i = 0; i < peers.Count; i++)
+                {
+                    long peer = peers[i];
+                    if (peer == 0L)
+                        continue;
+                    try
+                    {
+                        zdoMan.ForceSendZDO(peer, zdoUid);
+                        pushed++;
+                    }
+                    catch { }
+                }
+                TxLog.Info("container=" + TxLog.Zid(zdoUid) + " propagation-request pushed=" + pushed + "/" + peers.Count + " (best-effort, no ACK)");
+            }
+            catch { }
         }
 
         /// <summary>

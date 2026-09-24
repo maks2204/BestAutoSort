@@ -7,48 +7,33 @@ namespace BestAutoSort.Tx
 {
     /// <summary>
     /// Encoding of ChestTX request/response bodies into ZPackage.
-    /// Request layout: [proto:int][op:int][baseRev:uint][playerId:long][actorPos:vec3][body]
+    /// Request layout (v3): [proto:int][op:int][baseRev:uint][playerId:long][actorPos:vec3][body]
+    /// where production EncodeCall writes [proto][op][baseRev][playerId][actorPos]
+    /// [EnforceRule:bool][RespectReserves:bool][IsTransientRetry:bool][op body].
+    /// v2 peers (no trailing flag) still decode: the flag defaults false.
+    /// A v3 frame on a v2 peer fails the version gate (fail-safe UnknownTx,
+    /// never executed) — mixed v2/v3 peers are loud, never silent garbage.
     /// Response layout: [txId:long][status:int][revision:uint][totalsOnly:bool][body]
+    /// (status may be TransientUnavailable=5: unknown to v2 peers, which must
+    /// treat it as Indeterminate via the status-first classify seam).
     /// Item layout: [prefabHash:int][itemPkg:ZPackage][amount:int][x:int][y:int][maxStack:int]
     /// Items are never held across RPCs: the snapshot is serialized immediately, and
     /// the manager re-resolves the live object (ResolveIn) by gridPos+type.
     /// </summary>
     internal static class TxCodec
     {
-        public const int ProtoVersion = 2;
+        /// <summary>Wire protocol version (v3 generation). v2 frames decode
+        /// without the transient-retry flag (defaults false); v3 frames carry it.
+        /// Smallest compat bump within the v3 ring generation: ring/floor formats
+        /// unchanged, skew stays fail-safe (version-gate UnknownTx, never execute).</summary>
+        public const int ProtoVersion = 3;
+        /// <summary>Legacy wire version: decodable (flag defaults false).</summary>
+        public const int ProtoVersionV2 = 2;
 
-        public static void WriteHeader(ZPackage pkg, long txId, TxOp op, uint baseRev, long playerId, Vector3 actorPos)
+        /// <summary>True for decodable request versions (v2 legacy, v3 current).</summary>
+        public static bool IsSupportedVersion(int version)
         {
-            pkg.Write(ProtoVersion);
-            pkg.Write(txId);
-            pkg.Write((int)op);
-            pkg.Write(baseRev);
-            pkg.Write(playerId);
-            pkg.Write(actorPos);
-        }
-
-        public static bool ReadHeader(ZPackage pkg, out long txId, out TxOp op, out uint baseRev, out long playerId, out Vector3 actorPos)
-        {
-            txId = 0L;
-            op = 0;
-            baseRev = 0u;
-            playerId = 0L;
-            actorPos = Vector3.zero;
-            try
-            {
-                if (pkg.ReadInt() != ProtoVersion)
-                    return false;
-                txId = pkg.ReadLong();
-                op = (TxOp)pkg.ReadInt();
-                baseRev = pkg.ReadUInt();
-                playerId = pkg.ReadLong();
-                actorPos = pkg.ReadVector3();
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+            return version == ProtoVersion || version == ProtoVersionV2;
         }
 
         public static void WriteResponseHeader(ZPackage pkg, long txId, TxStatus status, uint revision, bool totalsOnly)

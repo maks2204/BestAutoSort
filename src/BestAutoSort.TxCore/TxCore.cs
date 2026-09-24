@@ -63,6 +63,26 @@ namespace BestAutoSort.TxCore
     ///   or degraded-recovered with an intact independent floor (old-gen stays
     ///   blocked, new-gen above the floor may commit fenced-first).
     /// </summary>
+    /// <summary>
+    /// Transient-refusal record (RAM-only, never cached, never persisted): a
+    /// both-copies-failed quarantine refusal for this txId. The client retains
+    /// Pending + claims and retries the SAME txId flagged (TxRequest.
+    /// IsTransientRetry); a flagged resend re-attempts persistence (never
+    /// executes) and a Query answers TransientUnavailable before the
+    /// cache-miss UnknownTx. Populated ONLY on both-fail; removed after a
+    /// durable resolution; dropped on ownership loss and on ring/floor reload
+    /// (restart/handoff — RAM is discarded, the flagged client retry covers
+    /// the handoff); kept across quarantine clear (TryRecover) so the retry
+    /// still resolves authoritatively.
+    /// </summary>
+    public sealed class TransientRefusal
+    {
+        public long TxId;
+        public TxOp Op;
+        public long Sender;
+        public uint Counter;
+    }
+
     public sealed class TxCore
     {
         private readonly object _gate = new object();
@@ -70,9 +90,11 @@ namespace BestAutoSort.TxCore
         private readonly Dictionary<long, TxResult> _processed = new Dictionary<long, TxResult>();
         private readonly List<RingEntry> _ring = new List<RingEntry>();
         private readonly Dictionary<long, uint> _floor = new Dictionary<long, uint>();
+        private readonly Dictionary<long, TransientRefusal> _transient = new Dictionary<long, TransientRefusal>();
         private bool _corrupt;
         private bool _floorCorrupt;
         private bool _quarantined;
+        private int _executeCalls;
 
         public uint Revision { get; private set; }
 
@@ -98,6 +120,28 @@ namespace BestAutoSort.TxCore
         public int FloorCount
         {
             get { lock (_gate) { return _floor.Count; } }
+        }
+
+        /// <summary>How many txIds sit in the transient-refusal RAM map.</summary>
+        public int TransientCount
+        {
+            get { lock (_gate) { return _transient.Count; } }
+        }
+
+        /// <summary>How many times Execute ran mutations (test seam: transient
+        /// paths must never execute — assert this stays 0 across retries).</summary>
+        public int ExecuteCalls
+        {
+            get { lock (_gate) { return _executeCalls; } }
+        }
+
+        /// <summary>Copy of the transient-refusal RAM map (test seam).</summary>
+        public Dictionary<long, TransientRefusal> DumpTransient()
+        {
+            lock (_gate)
+            {
+                return new Dictionary<long, TransientRefusal>(_transient);
+            }
         }
 
         public bool RingCorrupt
@@ -208,6 +252,68 @@ namespace BestAutoSort.TxCore
                 // cache lookup above is read-only. See EphemeralSpoofReject.
                 if (TxDecision.ClassifySenderBinding(request.Sender, request.TxId) == TxDecision.SenderBinding.UnboundStranger)
                     return EphemeralSpoofReject(request);
+                TransientRefusal tref;
+                if (_transient.TryGetValue(request.TxId, out tref))
+                {
+                    // Transient same-tx retry (both durable copies failed earlier).
+                    // MatchesPeer FIRST (spoof-safe): a stranger mutates nothing
+                    // and the map is untouched (ephemeral Rejected, no payload).
+                    // Sender-0 legacy skips the gate (lookup only, never executes).
+                    if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
+                        return EphemeralSpoofReject(request);
+                    if (request.Op == TxOp.Query || !request.IsTransientRetry)
+                    {
+                        // Lookup or unflagged resend: remind TransientUnavailable.
+                        // Persistence is re-attempted ONLY for a flagged mutation
+                        // resend below — never executes on this path either way.
+                        return TransientResult(tref);
+                    }
+                    // Flagged same-tx mutation retry: re-attempt persistence of
+                    // the refused record ONLY (seed + ring + floor). Execute NEVER
+                    // runs here — the tx stays non-committed until a durable
+                    // resolution, so a retry can never double-apply.
+                    TxResult reRefusal = new TxResult();
+                    reRefusal.Op = request.Op;
+                    reRefusal.Status = TxStatus.Rejected;
+                    reRefusal.Revision = Revision;
+                    reRefusal.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
+                    bool reseeded = false;
+                    if (!_processed.ContainsKey(request.TxId))
+                    {
+                        _processed[request.TxId] = reRefusal.Clone();
+                        _order.AddLast(request.TxId);
+                        while (_order.Count > TxLimits.ProcessedCacheCap)
+                        {
+                            long oldest = _order.First.Value;
+                            _order.RemoveFirst();
+                            _processed.Remove(oldest);
+                            _takeBlobs.Remove(oldest);
+                        }
+                        reseeded = true;
+                    }
+                    AdvanceFloor(peer, ctr);
+                    RebuildRing();
+                    bool reRingOk = true;
+                    bool reFloorOk = true;
+                    if (Durability != null)
+                    {
+                        reRingOk = PersistRingHook();
+                        reFloorOk = PersistFloorHook();
+                    }
+                    TxStatus reTerminal = TxDecision.HandoffDropTerminal(reRingOk, reFloorOk);
+                    if (reTerminal == TxStatus.Rejected)
+                    {
+                        // Durable resolution: the refusal is now stable (retry the
+                        // NEXT request as a NEW txId) — drop the transient entry.
+                        _transient.Remove(request.TxId);
+                        if (Durability != null)
+                            FirePropagation(TxPropagationPoint.AfterFence);
+                        return reRefusal;
+                    }
+                    if (reseeded)
+                        Evict(request.TxId);
+                    return TransientResult(tref);
+                }
                 if (_quarantined)
                 {
                     // Fail-closed quarantine: speculative RAM may be dirty. Safe
@@ -270,6 +376,21 @@ namespace BestAutoSort.TxCore
                     }
                     if (seeded)
                         Evict(request.TxId);
+                    if (!ringOk && !floorOk)
+                    {
+                        // Both copies failed: nothing durable. Record the txId in
+                        // the transient-refusal RAM map (populated ONLY on both-fail)
+                        // and answer TransientUnavailable (non-terminal — the client
+                        // retains Pending + claims and retries the SAME txId flagged).
+                        // Never cached, never persisted, never executed.
+                        TransientRefusal note = new TransientRefusal();
+                        note.TxId = request.TxId;
+                        note.Op = request.Op;
+                        note.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
+                        note.Counter = ctr;
+                        _transient[request.TxId] = note;
+                        return TransientResult(note);
+                    }
                     return UnknownResult();
                 }
                 uint hw;
@@ -312,6 +433,9 @@ namespace BestAutoSort.TxCore
                         // Ownership lost after the fence (production ZDO.Set is
                         // owner-gated, so the fence write may itself have no-op'd):
                         // no mutation may follow. The fence stays — never rolls back.
+                        // The transient-refusal RAM map is dropped (RAM is discarded
+                        // on handoff/restart; the flagged client retry covers it).
+                        _transient.Clear();
                         return UnknownResult();
                     }
                 }
@@ -485,6 +609,17 @@ namespace BestAutoSort.TxCore
                     r.IsReplay = true;
                     return r;
                 }
+                TransientRefusal tq;
+                if (_transient.TryGetValue(txId, out tq))
+                {
+                    // Transient BEFORE the cache-miss UnknownTx: the txId is held
+                    // (both copies failed), not forgotten. Sender-validated via
+                    // MatchesPeer semantics — a stranger gets Rejected with no
+                    // payload, never the entry. Never executes (lookup only).
+                    if (sender != 0 && TxIdGen.PeerKey(sender) != TxIdGen.PeerKey(tq.Sender))
+                        return TransientSenderMismatch(tq, sender);
+                    return TransientResult(tq);
+                }
                 for (int i = _ring.Count - 1; i >= 0; i--)
                 {
                     if (_ring[i].TxId == txId)
@@ -525,7 +660,8 @@ namespace BestAutoSort.TxCore
 
         /// <summary>
         /// Load the persistent ring after a manager handoff. TRUE RESET: clears
-        /// _processed, _order, _ring and the floor, then restores. v2 entries
+        /// _processed, _order, _ring, the floor and the transient-refusal RAM map,
+        /// then restores. v2 entries
         /// restore their original status (exact payloads when available,
         /// totals-only otherwise); legacy v1 entries restore as Duplicate
         /// totals-only. A corrupt payload fails closed (RingCorrupt: Apply
@@ -548,6 +684,7 @@ namespace BestAutoSort.TxCore
                 _ring.Clear();
                 _floor.Clear();
                 _takeBlobs.Clear();
+                _transient.Clear();
                 _corrupt = false;
                 _floorCorrupt = false;
                 Revision = 0;
@@ -679,6 +816,7 @@ namespace BestAutoSort.TxCore
                 _ring.Clear();
                 _floor.Clear();
                 _takeBlobs.Clear();
+                _transient.Clear();
                 _corrupt = false;
                 _floorCorrupt = false;
                 Revision = 0;
@@ -759,6 +897,7 @@ namespace BestAutoSort.TxCore
                 _ring.Clear();
                 _floor.Clear();
                 _takeBlobs.Clear();
+                _transient.Clear();
                 MergeFloor(floor.Floor);
                 _floorCorrupt = false;
                 Revision = 0;
@@ -882,6 +1021,44 @@ namespace BestAutoSort.TxCore
                 Op = e.Op,
                 Sender = TxIdGen.PeerKey(sender),
                 IsReplay = true
+            };
+        }
+
+        /// <summary>
+        /// Transient refusal answer (non-terminal, IsReplay=false): the txId is
+        /// held in the RAM map (both copies failed), never committed, never
+        /// cached, never persisted. No payload (nothing committed to describe).
+        /// </summary>
+        private TxResult TransientResult(TransientRefusal tref)
+        {
+            return new TxResult
+            {
+                Status = TxStatus.TransientUnavailable,
+                Revision = Revision,
+                Accepted = new List<int>(),
+                TotalsOnly = false,
+                Op = tref.Op,
+                Sender = tref.Sender,
+                IsReplay = false
+            };
+        }
+
+        /// <summary>
+        /// Stranger asking about another sender's transient txId: Rejected with
+        /// no payload (never the entry), mirroring SenderMismatch. The map is
+        /// untouched and nothing executes.
+        /// </summary>
+        private TxResult TransientSenderMismatch(TransientRefusal tref, long sender)
+        {
+            return new TxResult
+            {
+                Status = TxStatus.Rejected,
+                Revision = Revision,
+                Accepted = new List<int>(),
+                TotalsOnly = false,
+                Op = tref.Op,
+                Sender = TxIdGen.PeerKey(sender),
+                IsReplay = false
             };
         }
 
@@ -1619,10 +1796,12 @@ namespace BestAutoSort.TxCore
             e.TxId = BitConverter.ToInt64(buf, o); o += 8;
             e.Op = (TxOp)BitConverter.ToInt32(buf, o); o += 4;
             byte st = buf[o++];
-            if (st > (byte)TxStatus.UnknownTx)
+            if (st > (byte)TxStatus.TransientUnavailable)
                 return false;
             e.Status = (TxStatus)st;
-            if (e.Status == TxStatus.UnknownTx)
+            // TransientUnavailable is RAM-only (never cached, never persisted):
+            // an entry carrying it is fail-closed like UnknownTx.
+            if (e.Status == TxStatus.UnknownTx || e.Status == TxStatus.TransientUnavailable)
                 return false;
             e.Revision = BitConverter.ToUInt32(buf, o); o += 4;
             long senderKey = (long)BitConverter.ToUInt32(buf, o); o += 4;
@@ -1686,10 +1865,12 @@ namespace BestAutoSort.TxCore
             e.TxId = BitConverter.ToInt64(buf, o); o += 8;
             e.Op = (TxOp)BitConverter.ToInt32(buf, o); o += 4;
             byte st = buf[o++];
-            if (st > (byte)TxStatus.UnknownTx)
+            if (st > (byte)TxStatus.TransientUnavailable)
                 return false;
             e.Status = (TxStatus)st;
-            if (e.Status == TxStatus.UnknownTx)
+            // TransientUnavailable is RAM-only (never cached, never persisted):
+            // an entry carrying it is fail-closed like UnknownTx.
+            if (e.Status == TxStatus.UnknownTx || e.Status == TxStatus.TransientUnavailable)
                 return false;
             e.Revision = BitConverter.ToUInt32(buf, o); o += 4;
             long rawSender = BitConverter.ToInt64(buf, o); o += 8;
@@ -1751,6 +1932,7 @@ namespace BestAutoSort.TxCore
 
         private TxResult Execute(ModelChest chest, TxRequest request)
         {
+            _executeCalls++;
             switch (request.Op)
             {
                 case TxOp.Add:

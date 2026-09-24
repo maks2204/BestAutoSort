@@ -236,7 +236,7 @@ namespace BestAutoSort.TxCore
         public static string FormatBlockedMarker(string reason)
         {
             string stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-            return "BestAutoSort txId-counter issuance BLOCKED (fail-closed) since " + stamp + "\n"
+            return "BestAutoSort txId-counter issuance BLOCKED (fail-closed, crash-resistant marker) since " + stamp + "\n"
                 + "Reason: " + (reason ?? "counter copies untrustworthy") + "\n"
                 + "Repair: 1) inspect the .corrupt-* sidecars; "
                 + "2) restore ONE trustworthy counter file to the canonical path; "
@@ -245,12 +245,16 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
-        /// Creates (or refreshes) the persistent fail-closed marker. Never throws;
-        /// false = marker NOT created (the caller must stay fail-closed in RAM
-        /// and log loudly — issuance refusal must never depend on this write).
-        /// Called BEFORE corrupt copies are archived aside, so a crash between
-        /// the marker write and the archive still leaves FailClosed evidence.
+        /// LEGACY-ONLY: creates (or refreshes) the persistent fail-closed marker
+        /// by blind overwrite. Production routes through
+        /// <see cref="ConfirmBlockedMarker"/> (crash-resistant tmp + flush +
+        /// install that never overwrites an existing marker); new code must call
+        /// that gate instead. Kept for the offline marker-body contract tests.
+        /// Never throws; false = marker NOT created (the caller must stay
+        /// fail-closed in RAM and log loudly — issuance refusal must never
+        /// depend on this write).
         /// </summary>
+        [Obsolete("Legacy-only (blind overwrite): use ConfirmBlockedMarker.")]
         public static bool WriteBlockedMarker(string counterPath, string reason)
         {
             try
@@ -259,6 +263,81 @@ namespace BestAutoSort.TxCore
                     return false;
                 File.WriteAllText(BlockedPathFor(counterPath), FormatBlockedMarker(reason));
                 return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Crash-resistant marker install (tmp + OS flush + install, never throws):
+        /// the production archive gate (ConfirmBlockedMarker). Unlike
+        /// WriteBlockedMarker it NEVER overwrites an existing marker blindly —
+        /// presence is the signal, so a raced/older install wins and the body
+        /// is left untouched. True = the marker is confirmed present (written
+        /// or already there); false = NOT confirmed (the caller must skip the
+        /// archive and stay fail-closed in RAM). Terminology is deliberate:
+        /// crash-RESISTANT, not crash-atomic — a crash between tmp flush and
+        /// install leaves a torn .tmp the loader ignores (presence is checked
+        /// on the final .blocked path only).
+        /// </summary>
+        public static bool WriteBlockedMarkerCrashResistant(string counterPath, string reason)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(counterPath))
+                    return false;
+                string blocked = BlockedPathFor(counterPath);
+                if (File.Exists(blocked))
+                    return true;
+                string tmp = blocked + TmpSuffix;
+                byte[] bytes = Encoding.ASCII.GetBytes(FormatBlockedMarker(reason));
+                using (FileStream fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(bytes, 0, bytes.Length);
+                    fs.Flush(true);
+                }
+                try
+                {
+                    if (File.Exists(blocked))
+                    {
+                        try { File.Delete(tmp); }
+                        catch { }
+                        return true;
+                    }
+                    File.Move(tmp, blocked);
+                }
+                catch
+                {
+                    try { File.Delete(tmp); }
+                    catch { }
+                    return File.Exists(blocked);
+                }
+                return File.Exists(blocked);
+            }
+            catch
+            {
+                try { return !string.IsNullOrEmpty(counterPath) && File.Exists(BlockedPathFor(counterPath)); }
+                catch { return false; }
+            }
+        }
+
+        /// <summary>
+        /// Archive gate: confirms the crash-resistant fail-closed marker BEFORE
+        /// any corrupt copy is moved aside. True = marker confirmed present
+        /// (safe to archive the evidence aside — the marker carries safety
+        /// across the restart); false = archive MUST be skipped (stay
+        /// fail-closed in RAM and log loudly — a restart would otherwise see
+        /// "neither file exists" and go Fresh at 1). Never throws.
+        /// </summary>
+        public static bool ConfirmBlockedMarker(string counterPath, string reason)
+        {
+            try
+            {
+                if (WriteBlockedMarkerCrashResistant(counterPath, reason))
+                    return true;
+                return BlockedMarkerPresent(counterPath);
             }
             catch
             {

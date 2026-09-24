@@ -115,6 +115,23 @@ namespace BestAutoSort.Tx
                     EncodeCachedBody(cached), cached.TotalsOnly, cached.Op);
                 return;
             }
+            TransientRefusal tref;
+            if (TransientRefusals.TryGetValue(txId, out tref))
+            {
+                // Transient BEFORE the cache-miss UnknownTx: the txId is held
+                // (both copies failed), not forgotten. Sender-validated via
+                // MatchesPeer — a stranger gets Rejected with no payload, never
+                // the entry. Lookup only: never executes, never caches.
+                if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " TRANSIENT-QUERY sender mismatch");
+                    Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, TxOp.Query);
+                    return;
+                }
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " TRANSIENT-QUERY hit (same-tx retry retained)");
+                Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, tref.Op);
+                return;
+            }
             Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, TxOp.Query);
         }
 
@@ -185,6 +202,23 @@ namespace BestAutoSort.Tx
             // is Indeterminate — never "applied", never a rejection. A committed
             // totals-only replay never fabricates per-item payloads.
             TxCompletionKind disp = TxResponsePolicy.Classify(status, totalsOnly, pending.Op, pending.ExpectedItems);
+            if (disp == TxCompletionKind.TransientRetrySameTx)
+            {
+                // NON-terminal (v3): the manager holds the txId (both durable
+                // copies failed) and asks for a SAME-tx retry. Keep Pending +
+                // claims, fire NO callback, flag the entry transient and re-arm
+                // with bounded backoff — the deadline is re-armed, never
+                // finalized, while transient (see PumpPending/DecideTransient).
+                // The next resend carries IsTransientRetry and re-attempts
+                // persistence on the manager (never executes).
+                pending.IsTransientRetry = true;
+                float backoff = TxPendingDrain.TransientBackoffSeconds(pending.TransientAttempts + 1);
+                pending.NextTryAt = Time.realtimeSinceStartup + backoff;
+                pending.Deadline = Time.realtimeSinceStartup + FailDeadline;
+                TxLog.Warn("tx=" + txId + " TRANSIENT op=" + pending.Op + " (same-tx retry retained, backoff " + backoff + "s — nothing credited/removed)");
+                RefreshNow(pending.Container);
+                return;
+            }
             if (disp == TxCompletionKind.Indeterminate)
             {
                 // Terminal callback attempt (once per Pending entry — at-most-once
@@ -984,6 +1018,8 @@ namespace BestAutoSort.Tx
                 {
                     if ((Object)p.Container == (Object)null)
                         return TxPendingDrain.Step.Terminal;
+                    if (p.IsTransientRetry)
+                        return TxPendingDrain.DecideTransient(now, p.NextTryAt);
                     return TxPendingDrain.Decide(now, p.NextTryAt, p.Deadline, p.Attempts,
                         p.QuerySent, p.FinalQuerySent, PayloadAttempts, QueryAttempts);
                 },
@@ -992,9 +1028,14 @@ namespace BestAutoSort.Tx
                     switch (step)
                     {
                         case TxPendingDrain.Step.Resend:
-                            SendPayload(p.Container, p.Payload);
+                            if (p.IsTransientRetry)
+                                SendTransientRetry(p);
+                            else
+                                SendPayload(p.Container, p.Payload);
                             p.Attempts++;
-                            p.NextTryAt = now + RequestTimeout;
+                            p.NextTryAt = now + (p.IsTransientRetry
+                                ? TxPendingDrain.TransientBackoffSeconds(p.TransientAttempts)
+                                : RequestTimeout);
                             break;
                         case TxPendingDrain.Step.Query:
                             p.QuerySent = true;
@@ -1023,9 +1064,39 @@ namespace BestAutoSort.Tx
                 });
         }
 
+        private static void SendTransientRetry(PendingTx p)
+        {
+            // Flagged same-tx retry: re-encode the stored call with
+            // IsTransientRetry so the manager re-attempts persistence of the
+            // refused record (never executes). Falls back to the original bytes
+            // (unflagged resend: reminded TransientUnavailable, still safe).
+            try
+            {
+                if (p.Call != null)
+                {
+                    p.Call.IsTransientRetry = true;
+                    ZPackage payload = EncodeCall(p.Call, CurrentRevision(p.Container), LocalPlayerId(), LocalActorPos());
+                    ZPackage request = new ZPackage();
+                    request.Write(p.TxId);
+                    request.Write(payload);
+                    p.Payload = request;
+                }
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("tx=" + p.TxId + " transient re-encode failed, resending original bytes: " + ex.Message);
+            }
+            p.TransientAttempts++;
+            TxLog.Info("tx=" + p.TxId + " TRANSIENT-RETRY (flagged same-tx resend #" + p.TransientAttempts + ")");
+            SendPayload(p.Container, p.Payload);
+        }
+
         private static void SendQuery(PendingTx p)
         {
             // Query: same txId, empty body. The manager returns the cache without re-applying.
+            // A transient entry queries flagged (IsTransientRetry set only after
+            // TransientUnavailable); the manager checks the transient map BEFORE
+            // the cache-miss UnknownTx (sender-validated).
             ZPackage body = new ZPackage();
             body.Write(TxCodec.ProtoVersion);
             body.Write((int)TxOp.Query);
@@ -1034,6 +1105,7 @@ namespace BestAutoSort.Tx
             body.Write(LocalActorPos());
             body.Write(false);
             body.Write(false);
+            body.Write(p.IsTransientRetry);
             ZPackage request = new ZPackage();
             request.Write(p.TxId);
             request.Write(body);
@@ -1172,6 +1244,7 @@ namespace BestAutoSort.Tx
             body.Write(0u);
             body.Write(LocalPlayerId());
             body.Write(LocalActorPos());
+            body.Write(false);
             body.Write(false);
             body.Write(false);
             ZPackage request = new ZPackage();

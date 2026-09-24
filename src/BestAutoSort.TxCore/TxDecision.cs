@@ -102,6 +102,14 @@ namespace BestAutoSort.TxCore
         /// a restart; a both-copies failure on a remote tx stays SILENT (no
         /// terminal response at all) so the client retains and retries the SAME
         /// txId instead of terminally forgetting a non-durable outcome.
+        /// The v3.x transient refinement answers TransientUnavailable
+        /// (TxStatus.TransientUnavailable: non-terminal, never cached, never
+        /// persisted) for the both-fail case and records the txId in the
+        /// manager's transient-refusal RAM map (populated ONLY on both-fail,
+        /// dropped on ownership loss/restart, kept across quarantine clear): a
+        /// flagged same-tx mutation retry re-attempts persistence (never
+        /// executes) and a Query for the txId answers TransientUnavailable
+        /// BEFORE the cache-miss UnknownTx (sender-validated via MatchesPeer).
         /// Shared by the remote (request), local (MutateLocal/ApplyJob) and
         /// queued (Drain) paths.
         /// </summary>

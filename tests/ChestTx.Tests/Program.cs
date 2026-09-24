@@ -28,6 +28,8 @@ namespace ChestTx.Tests
             TxFenceCrashTests.RunAll();
             TxDirtyRamTests.RunAll();
             TxWave1IsolationTests.RunAll();
+            TxTransientTests.RunAll();
+            TxMarkerCrashTests.RunAll();
             TxHardeningTests.RunAll();
             TxPropagationTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");

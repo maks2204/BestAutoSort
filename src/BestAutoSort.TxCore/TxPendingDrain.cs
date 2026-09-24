@@ -43,6 +43,40 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// Transient-entry decision (pure, testable): the counterpart of Decide
+        /// for entries in TransientRetrySameTx state. The deadline NEVER
+        /// finalizes a transient entry — past-deadline due entries Resend (the
+        /// same txId, flagged, re-attempts persistence on the manager and never
+        /// executes), not-due entries Wait. There is deliberately no
+        /// FinalQuery/Terminal leg here: a transient entry leaves Transient
+        /// state only via a durable manager response (or ownership loss), never
+        /// via elapsed time. Callers MUST route transient entries here instead
+        /// of Decide (production PumpPending branches on PendingTx.IsTransientRetry).
+        /// Backoff between resends is bounded (see TransientBackoffSeconds).
+        /// </summary>
+        public static Step DecideTransient(float now, float nextTryAt)
+        {
+            if (now < nextTryAt)
+                return Step.Wait;
+            return Step.Resend;
+        }
+
+        /// <summary>
+        /// Bounded backoff between transient same-tx resends (pure, testable):
+        /// 3s base (one RequestTimeout), doubling per transient attempt, capped
+        /// at 30s. Bounded delay, unbounded patience: the entry never goes
+        /// Terminal on timing alone.
+        /// </summary>
+        public static float TransientBackoffSeconds(int transientAttempts)
+        {
+            if (transientAttempts <= 0)
+                return 3f;
+            if (transientAttempts >= 4)
+                return 30f;
+            return 3f * (float)(1 << transientAttempts);
+        }
+
+        /// <summary>
         /// Pure timing/attempts decision on primitives (no Unity refs): the exact
         /// table ChestTxService.PumpPending used to inline. Deadline first (a hit
         /// deadline with the last-chance query unspent gets FinalQuery, otherwise

@@ -839,8 +839,10 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Corrupt-counter evidence preservation (diagnostic only): FIRST stamps
-        /// the persistent fail-closed (.blocked) marker, THEN renames
+        /// Corrupt-counter evidence preservation (diagnostic only): FIRST confirms
+        /// the persistent fail-closed (.blocked) marker through the crash-resistant
+        /// gate (tmp + OS flush + install, never overwrites an existing marker
+        /// blindly — see TxCounterFile.ConfirmBlockedMarker), THEN renames
         /// untrustworthy primary/backup copies aside with a timestamp suffix so
         /// the failure stays inspectable. Marker-first ordering is safety, not
         /// tidiness: archiving REMOVES the file evidence, so a crash (or the
@@ -848,7 +850,10 @@ namespace BestAutoSort.Tx
         /// otherwise see "neither file exists" and go Fresh (restart issuance
         /// at 1 — a same-UID reset counter colliding below the persisted
         /// execution floor). With the marker written first, every later load is
-        /// FailClosed until a human repairs. Never throws. Does NOT invent a
+        /// FailClosed until a human repairs. NO archive without a confirmed marker:
+        /// when the marker cannot be confirmed the copies are left in place and
+        /// issuance stays fail-closed in RAM (loud log) — a restart may lose the
+        /// evidence, so inspect the copies immediately. Never throws. Does NOT invent a
         /// replacement counter — the caller refuses issuance fail-closed
         /// (IssueTxId 0) until restart after inspection.
         /// </summary>
@@ -856,13 +861,17 @@ namespace BestAutoSort.Tx
         {
             try
             {
-                // Marker BEFORE the moves: a crash between marker and archive
-                // still leaves FailClosed evidence either way.
+                // Marker BEFORE the moves, through the crash-resistant gate: a
+                // crash between marker and archive still leaves FailClosed
+                // evidence either way. Unconfirmed marker = NO archive.
                 bool markerOk = false;
-                try { markerOk = TxCounterFile.WriteBlockedMarker(path, "counter copies untrustworthy (primary AND backup)"); }
+                try { markerOk = TxCounterFile.ConfirmBlockedMarker(path, "counter copies untrustworthy (primary AND backup)"); }
                 catch { }
                 if (!markerOk)
-                    TxLog.Warn("tx counter .blocked marker NOT created (staying fail-closed in RAM; restart may lose the evidence — inspect the .corrupt-* sidecars immediately)");
+                {
+                    TxLog.Warn("tx counter .blocked marker NOT confirmed (archive SKIPPED: copies left in place, staying fail-closed in RAM — inspect them immediately)");
+                    return;
+                }
                 string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
                 try
                 {
@@ -1041,6 +1050,7 @@ namespace BestAutoSort.Tx
                 pending.Container = container;
                 pending.Payload = request;
                 pending.Op = call.Op;
+                pending.Call = call;
                 pending.Claimed = claimed;
                 pending.Attempts = 0;
                 pending.ExpectedItems = expectedItems;
@@ -1115,6 +1125,7 @@ namespace BestAutoSort.Tx
             pkg.Write(actorPos.HasValue ? actorPos.Value : LocalActorPos());
             pkg.Write(call.EnforceRule);
             pkg.Write(call.RespectReserves);
+            pkg.Write(call.IsTransientRetry);
             switch (call.Op)
             {
                 case TxOp.Add:
@@ -1268,6 +1279,52 @@ namespace BestAutoSort.Tx
                     EncodeCachedBody(replay), replay.TotalsOnly, replay.Op);
                 return;
             }
+            TransientRefusal tref;
+            if (TransientRefusals.TryGetValue(txId, out tref))
+            {
+                // Transient same-tx retry (both durable copies failed earlier).
+                // MatchesPeer FIRST (spoof-safe): a stranger gets an ephemeral
+                // Rejected and the map is untouched. Sender-0 legacy skips the
+                // gate (lookup only, never executes). Durable cache above already
+                // won; this path NEVER executes — a flagged mutation resend
+                // re-attempts persistence of the refused record, anything else
+                // is reminded TransientUnavailable.
+                if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
+                {
+                    TxLog.Warn("tx=" + txId + " REJECT transient sender mismatch sender=" + sender + " (ephemeral: no state change)");
+                    Respond(container, sender, txId, TxDecision.SpoofTerminal(), CurrentRevision(container), new ZPackage(), false, call.Op);
+                    return;
+                }
+                if (!call.IsTransientRetry)
+                {
+                    TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " TRANSIENT (unflagged resend reminded, never executes)");
+                    Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
+                    return;
+                }
+                bool reDurable;
+                TxStatus reTerminal = PersistQuarantineRefusal(state, txId, call.Op, sender, out reDurable);
+                if (reTerminal != TxStatus.Rejected)
+                {
+                    // Core gate (TxCore.Apply transient leg): resolve ONLY on a
+                    // both-copies-durable Rejected. A partial persist (exactly one
+                    // copy) is NOT durable — re-note, keep the map, and answer
+                    // TransientUnavailable (same-tx retained, never executes).
+                    // reDurable (either-copy) is informational only; the gate is
+                    // reTerminal == Rejected (ring AND floor persisted).
+                    NoteTransientRefusal(state, txId, call.Op, sender);
+                    TxLog.Warn("tx=" + txId + " TRANSIENT still not durable (status=" + reTerminal + ", same-tx retry retained, never executes)");
+                    Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
+                    return;
+                }
+                // Durable resolution: the refusal is now stable — drop the
+                // transient entry so later retries replay the terminal outcome.
+                TransientRefusals.Remove(txId);
+                if (reTerminal == TxStatus.Rejected)
+                    RequestPropagation(state, sender);
+                TxLog.Warn("tx=" + txId + " transient resolved durable (status=" + reTerminal + ")");
+                Respond(container, sender, txId, reTerminal, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
             if (state.RingCorrupt && state.FloorCorrupt)
             {
                 // Fully fail closed: both copies untrustworthy, mutate nothing.
@@ -1292,7 +1349,9 @@ namespace BestAutoSort.Tx
                 TxStatus terminal = PersistQuarantineRefusal(state, txId, call.Op, sender, out anyDurable);
                 if (!anyDurable)
                 {
-                    TxLog.Warn("tx=" + txId + " quarantined and refusal not persisted (silent: same-tx retry retained)");
+                    NoteTransientRefusal(state, txId, call.Op, sender);
+                    TxLog.Warn("tx=" + txId + " quarantined and refusal not persisted (TRANSIENT recorded: same-tx retry retained)");
+                    Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
                     return;
                 }
                 if (terminal == TxStatus.Rejected)
@@ -1410,7 +1469,8 @@ namespace BestAutoSort.Tx
             actorPos = Vector3.zero;
             try
             {
-                if (payload.ReadInt() != TxCodec.ProtoVersion)
+                int version = payload.ReadInt();
+                if (!TxCodec.IsSupportedVersion(version))
                     return false;
                 TxOp op = (TxOp)payload.ReadInt();
                 baseRev = payload.ReadUInt();
@@ -1420,6 +1480,16 @@ namespace BestAutoSort.Tx
                 call.Op = op;
                 call.EnforceRule = payload.ReadBool();
                 call.RespectReserves = payload.ReadBool();
+                // v3 trailing flag (client-set ONLY after TransientUnavailable);
+                // v2 frames predate it (defaults false). Tolerant read: a truncated
+                // v3 frame fails closed to unflagged (reminded TransientUnavailable,
+                // safe Indeterminate — never executes), never to a misframed body.
+                call.IsTransientRetry = false;
+                if (version == TxCodec.ProtoVersion)
+                {
+                    try { call.IsTransientRetry = payload.ReadBool(); }
+                    catch { call.IsTransientRetry = false; }
+                }
                 switch (op)
                 {
                     case TxOp.Add:
@@ -1512,7 +1582,10 @@ namespace BestAutoSort.Tx
             if (state == null || state.Draining)
                 return;
             if ((Object)state.Container == (Object)null || !state.Container.IsOwner())
+            {
+                DropTransientFor(state);
                 return;
+            }
             state.Draining = true;
             try
             {
@@ -1539,7 +1612,10 @@ namespace BestAutoSort.Tx
                             RequestPropagation(state, job.Sender);
                         TxLog.Warn("tx=" + job.TxId + " quarantined: answered " + qterminal + " without executing (durable=" + anyDurable + ")");
                         if (!anyDurable && !job.IsLocal)
+                        {
+                            NoteTransientRefusal(state, job.TxId, qop, job.Sender);
                             continue;
+                        }
                         StoredResult q = new StoredResult();
                         q.Op = qop;
                         q.Status = qterminal;
@@ -1728,6 +1804,9 @@ namespace BestAutoSort.Tx
                 // Ownership lost after the fence (ZDO.Set is owner-gated, so the fence
                 // write above may itself have no-op'd): no mutation may follow. The floor
                 // stays advanced — never rolls back — and the answer is Indeterminate.
+                // Transient RAM for this chest is dropped (handoff discards RAM;
+                // the flagged client retry covers it).
+                DropTransientFor(state);
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " lost ownership after fence (indeterminate)");
                 StoredResult ownerLost = new StoredResult();
                 ownerLost.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
@@ -1762,7 +1841,10 @@ namespace BestAutoSort.Tx
                 quarantined.Status = rterminal;
                 quarantined.Revision = CurrentRevision(job.Container);
                 if (!ranyDurable && !job.IsLocal)
+                {
                     quarantined.SilentDrop = true;
+                    NoteTransientRefusal(state, job.TxId, rop, job.Sender);
+                }
                 return quarantined;
             }
             // Pre-mutation snapshot AFTER the durable fence + ownership recheck: the
@@ -2425,6 +2507,87 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
+        /// Transient-refusal RAM map (v3): txId -&gt; minimal refusal metadata.
+        /// Populated ONLY on both-copies-failed quarantine refusals (nothing
+        /// durable). A held txId answers TransientUnavailable (non-terminal) and
+        /// a flagged same-tx mutation retry re-attempts persistence (never
+        /// executes); a Query for it answers TransientUnavailable BEFORE the
+        /// cache-miss UnknownTx (sender-validated). Entries are removed after a
+        /// durable resolution and dropped on ownership loss / ring reload
+        /// (restart/handoff discards RAM — the flagged client retry covers the
+        /// handoff); quarantine clear (TryReloadAuthoritative) keeps them
+        /// authoritative. Never cached, never persisted, never executed.
+        /// </summary>
+        internal sealed class TransientRefusal
+        {
+            public long TxId;
+            public TxOp Op;
+            public long Sender;
+            public ZDOID ZdoId;
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<long, TransientRefusal> TransientRefusals =
+            new System.Collections.Generic.Dictionary<long, TransientRefusal>();
+
+        /// <summary>Test seam: how many txIds sit in the transient-refusal RAM map.</summary>
+        internal static int TransientRefusalCount
+        {
+            get { return TransientRefusals.Count; }
+        }
+
+        /// <summary>
+        /// Record a both-copies-failed refusal (ONLY call site: both-fail legs).
+        /// Overwrites any prior entry for the txId (same-tx retries re-note).
+        /// </summary>
+        private static void NoteTransientRefusal(ChestState state, long txId, TxOp op, long sender)
+        {
+            try
+            {
+                TransientRefusal note = new TransientRefusal();
+                note.TxId = txId;
+                note.Op = op;
+                note.Sender = sender;
+                note.ZdoId = state != null ? state.ZdoId : new ZDOID();
+                TransientRefusals[txId] = note;
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// Drop transient entries for one chest (ownership loss / ring reload:
+        /// RAM is discarded on handoff — the flagged client retry covers it).
+        /// Quarantine clear deliberately does NOT call this (transient stays
+        /// authoritative across TryReloadAuthoritative).
+        /// </summary>
+        private static void DropTransientFor(ChestState state)
+        {
+            try
+            {
+                if (state == null)
+                    return;
+                ZDOID zid = state.ZdoId;
+                System.Collections.Generic.List<long> dead = null;
+                foreach (System.Collections.Generic.KeyValuePair<long, TransientRefusal> kv in TransientRefusals)
+                {
+                    if (kv.Value != null && kv.Value.ZdoId == zid)
+                    {
+                        if (dead == null)
+                            dead = new System.Collections.Generic.List<long>();
+                        dead.Add(kv.Key);
+                    }
+                }
+                if (dead != null)
+                    for (int i = 0; i < dead.Count; i++)
+                        TransientRefusals.Remove(dead[i]);
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
         /// Best-effort removal of a just-seeded (never committed) Rejected entry whose
         /// persistence failed, so the same txId retries persistence instead of replaying
         /// a non-durable answer. Never touches committed outcomes: callers only evict
@@ -3018,6 +3181,9 @@ namespace BestAutoSort.Tx
             // their ORIGINAL status with exact payloads when available; legacy
             // v1 entries (Status==Duplicate) restore totals-only. A corrupt
             // payload fails closed: empty caches + RingCorrupt (no mutation).
+            // The transient-refusal RAM map is dropped (restart/handoff discards
+            // RAM — the flagged client retry covers it).
+            DropTransientFor(state);
             state.Processed.Clear();
             state.ProcOrder.Clear();
             state.Floor.Clear();

@@ -27,6 +27,13 @@ namespace BestAutoSort.Tx
         /// Manual player Takes pass false (explicit action). Automation passes true.
         /// </summary>
         public bool RespectReserves;
+        /// <summary>
+        /// Same-tx transient retry flag (v3 wire). Set client-side ONLY after
+        /// receiving TransientUnavailable for this txId: a flagged mutation
+        /// resend re-attempts persistence of the refused record and NEVER
+        /// executes. Never set on a first attempt.
+        /// </summary>
+        public bool IsTransientRetry;
     }
 
     internal sealed class TxOpItem
@@ -189,6 +196,18 @@ namespace BestAutoSort.Tx
         public bool QuerySent;
         /// <summary>Last-chance query already spent (decode failure / deadline): no more extensions.</summary>
         public bool FinalQuerySent;
+        /// <summary>
+        /// Transient state (v3): set ONLY after receiving TransientUnavailable for
+        /// this txId. While set the entry NEVER goes terminal on timing alone:
+        /// PumpPending routes it to DecideTransient (same-tx flagged resend with
+        /// bounded backoff) and the deadline is re-armed, never finalized.
+        /// Cleared only by a durable (terminal) manager response.
+        /// </summary>
+        public bool IsTransientRetry;
+        /// <summary>Transient resend attempts (bounded-backoff index, never a terminal budget).</summary>
+        public int TransientAttempts;
+        /// <summary>Original call (for re-encoding flagged transient resends).</summary>
+        public TxOpCall Call;
         /// <summary>Item arity the response body must carry (-1 = unknown, legacy behavior).</summary>
         public int ExpectedItems = -1;
         /// <summary>Completion context (closures over live refs — valid only until the deadline).</summary>

@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace BestAutoSort;
 
-[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.5.11")]
+[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.5.12")]
 [BepInProcess("valheim.exe")]
 [BepInProcess("valheim_server.exe")]
 [BepInIncompatibility("goldenrevolver.quick_stack_store")]
@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.5.11";
+	internal const string PluginVersion = "0.5.12";
 
 
 	private Harmony? _harmony;

@@ -136,6 +136,15 @@ namespace ChestTx.Tests
             return r;
         }
 
+        /// <summary>Flagged same-tx transient retry (IsTransientRetry set: the client
+        /// received TransientUnavailable for this txId).</summary>
+        private static TxRequest AddReqF(long txId, long sender, ItemKey key, int amount)
+        {
+            TxRequest r = AddReq(txId, sender, key, amount);
+            r.IsTransientRetry = true;
+            return r;
+        }
+
         private static TxRequest TakeReq(long txId, long sender, ItemKey key, int amount)
         {
             TxRequest r = new TxRequest();
@@ -866,15 +875,18 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Matrix leg 4/4 (both-fail => NO terminal-forget): nothing durable, so
-        /// the answer is UnknownTx with the seed evicted — but the SAME txId is
-        /// retained, not forgotten. A same-tx retry re-attempts persistence
-        /// (quarantine precedes the stale gate, so it never stales out
-        /// in-session): while the faults persist it answers UnknownTx again, and
-        /// once the writes heal the SAME txId persists durably (stable Rejected)
-        /// with no new txId needed. Nothing ever executes. Production twin: the
-        /// manager stays SILENT for remote txs (no terminal response — the
-        /// client's Pending pump resends/queries the SAME txId) and completes
+        /// Matrix leg 4/4 (both-fail => TRANSIENT, never terminal-forget): nothing
+        /// durable, so the answer is TransientUnavailable (non-terminal) with the
+        /// seed evicted — but the SAME txId is retained, not forgotten. The txId is
+        /// recorded in the RAM-only transient-refusal map (populated ONLY on
+        /// both-fail); a same-tx retry is reminded TransientUnavailable unflagged
+        /// and re-attempts persistence flagged (quarantine precedes the stale gate,
+        /// so it never stales out in-session): while the faults persist it answers
+        /// TransientUnavailable again, and once the writes heal the SAME flagged
+        /// txId persists durably (stable Rejected) with no new txId needed.
+        /// Nothing ever executes. Production twin: the manager answers
+        /// TransientUnavailable for remote txs (the client's Pending pump keeps the
+        /// entry and resends/queries the SAME txId flagged) and completes
         /// UnknownTx for local txs (no Pending entry; a retry as a NEW txId
         /// applies at-most-once).
         /// </summary>
@@ -893,32 +905,40 @@ namespace ChestTx.Tests
             w.FailRingWrite = true;
             w.FailFloorWrite = true;
             TxResult refusal = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
-            Check.That(refusal.Status == TxStatus.UnknownTx && !refusal.IsReplay,
-                "both-fail => UnknownTx, got " + refusal.Status);
+            Check.That(refusal.Status == TxStatus.TransientUnavailable && !refusal.IsReplay,
+                "both-fail => TransientUnavailable (non-terminal), got " + refusal.Status);
             Check.Equal(1, core.ProcessedCount, "seed evicted: no terminal kept (nothing durable to forget)");
-            Check.That(core.Query(Tx(11, 3)).Status == TxStatus.UnknownTx,
-                "nothing cached: query is UnknownTx");
+            Check.That(core.TransientCount == 1, "both-fail populates the transient RAM map");
+            Check.That(core.Query(Tx(11, 3)).Status == TxStatus.TransientUnavailable,
+                "transient checked before cache-miss: query answers TransientUnavailable");
             uint hw;
             Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
                 "RAM high-water kept (11->3, monotonic, never rolls back)");
             Check.Equal(10, chest.TotalOf(Wood), "refusal executes nothing (live holds only the failed-tx dirt: 5 seed + 5 speculative)");
 
-            // Same-tx retry while faults persist: re-attempts persistence (never
-            // stales out in-session), still UnknownTx, still evicted, still idle.
+            // Same-tx retry while faults persist: unflagged resends are reminded
+            // TransientUnavailable; flagged resends re-attempt persistence (never
+            // stales out in-session), still TransientUnavailable, still idle.
             TxResult retry = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
-            Check.That(retry.Status == TxStatus.UnknownTx && !retry.IsReplay,
-                "same-tx retry re-attempts (not stale-gated in-session), got " + retry.Status);
+            Check.That(retry.Status == TxStatus.TransientUnavailable && !retry.IsReplay,
+                "same-tx retry reminded transient (not stale-gated in-session), got " + retry.Status);
             Check.Equal(1, core.ProcessedCount, "still nothing cached");
+            Check.That(core.TransientCount == 1, "still held");
             Check.Equal(10, chest.TotalOf(Wood), "retry executes nothing");
+            TxResult flaggedFailing = core.Apply(chest, AddReqF(Tx(11, 3), 11, Wood, 7));
+            Check.That(flaggedFailing.Status == TxStatus.TransientUnavailable && !flaggedFailing.IsReplay,
+                "flagged retry while failing re-attempts but stays transient, got " + flaggedFailing.Status);
+            Check.Equal(10, chest.TotalOf(Wood), "flagged retry executes nothing");
 
-            // Writes heal: the SAME txId now persists durably — transient recovery
-            // without a restart and without a new txId.
+            // Writes heal: the SAME flagged txId now persists durably — transient
+            // recovery without a restart and without a new txId.
             w.FailRingWrite = false;
             w.FailFloorWrite = false;
-            TxResult healed = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
+            TxResult healed = core.Apply(chest, AddReqF(Tx(11, 3), 11, Wood, 7));
             Check.That(healed.Status == TxStatus.Rejected && !healed.IsReplay,
                 "healed same-tx retry persists durably (stable Rejected, fresh refusal — never a replay), got " + healed.Status);
             Check.Equal(2, core.ProcessedCount, "healed refusal is cached");
+            Check.That(core.TransientCount == 0, "durable resolution drops the map entry");
             Check.Equal(10, chest.TotalOf(Wood), "healed refusal executes nothing");
             TxResult stable = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
             Check.That(stable.Status == TxStatus.Rejected && stable.IsReplay,

@@ -67,7 +67,10 @@ namespace BestAutoSort.TxCore
 
         /// <summary>
         /// Every terminal outcome that may be cached and persisted. UnknownTx is
-        /// never a cached outcome and must never enter the ring.
+        /// never a cached outcome and must never enter the ring. TransientUnavailable
+        /// is likewise never terminal and never persists: it is a RAM-only refusal
+        /// signal (both durable copies failed — retry the SAME txId flagged), so
+        /// Snapshot skips it and ring readers reject its byte as corrupt.
         /// </summary>
         public static bool IsTerminalStatus(TxStatus status)
         {

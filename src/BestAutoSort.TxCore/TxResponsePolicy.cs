@@ -24,7 +24,14 @@ namespace BestAutoSort.TxCore
         CommittedMultiAddDetailsUnavailable = 3,
         /// <summary>Local timeout exhaustion with no usable response: applied-or-not
         /// is genuinely indeterminate. Loud terminal completion, no auto-retry.</summary>
-        Indeterminate = 4
+        Indeterminate = 4,
+        /// <summary>Transient refusal: the manager holds the txId (both durable
+        /// copies failed) and explicitly asks for a SAME-tx retry. NON-terminal:
+        /// keep Pending + claims, schedule a flagged same-tx resend/Query with
+        /// bounded backoff; the deadline never finalizes while transient
+        /// (see TxPendingDrain.DecideTransient). Never cascades, never restores
+        /// drag remainder, never credits/removes (nothing committed).</summary>
+        TransientRetrySameTx = 5
     }
 
     /// <summary>
@@ -79,10 +86,14 @@ namespace BestAutoSort.TxCore
         /// Status-first response classification.
         /// Wire Rejected means known-not-committed. Wire UnknownTx (evicted or
         /// lost record) says NOTHING about commitment, so it is Indeterminate.
+        /// Wire TransientUnavailable (both durable copies failed on the manager)
+        /// is NON-terminal: TransientRetrySameTx — retain and retry the SAME txId.
         /// expectedItems: item arity the body must carry (&lt;=0 = unknown/singleton).
         /// </summary>
         public static TxCompletionKind Classify(TxStatus status, bool totalsOnly, bool isTake, int expectedItems)
         {
+            if (status == TxStatus.TransientUnavailable)
+                return TxCompletionKind.TransientRetrySameTx;
             if (status == TxStatus.UnknownTx)
                 return TxCompletionKind.Indeterminate;
             if (status == TxStatus.Rejected)

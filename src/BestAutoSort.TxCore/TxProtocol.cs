@@ -22,6 +22,15 @@ namespace BestAutoSort.TxCore
 
     /// <summary>
     /// Transaction processing status.
+    /// TransientUnavailable (5) is a NON-terminal RAM-only refusal signal:
+    /// the manager holds the txId in its transient-refusal map (both durable
+    /// copies failed) and the client must retain Pending + claims and retry
+    /// the SAME txId (flagged), never a new one. It is never cached, never
+    /// persisted to the ring (ring readers reject it as corrupt), never
+    /// committed, and never terminal (see TxResponsePolicy.Classify and
+    /// TxRing.IsTerminalStatus). Wire skew: a peer that does not know this
+    /// value must treat it as Indeterminate (never execute, never forget
+    /// silently) — production decodes it status-first through the same seam.
     /// </summary>
     public enum TxStatus
     {
@@ -29,7 +38,8 @@ namespace BestAutoSort.TxCore
         Partial = 1,
         Rejected = 2,
         Duplicate = 3,
-        UnknownTx = 4
+        UnknownTx = 4,
+        TransientUnavailable = 5
     }
 
     /// <summary>

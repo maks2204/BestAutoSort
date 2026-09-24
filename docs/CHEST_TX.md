@@ -49,7 +49,22 @@ operations (exception: one-shot explicit acquire for upgrades — no loops).
   placed/full-merge/partial rule (verified against `Inventory.AddItem`); the client
   removes exactly accepted.
 - Timeouts: 3s, up to 4 attempts with the same txId, then 2× Query, then
-  an explicit failure with refresh.
+  an explicit failure with refresh. This always-times-out rule holds for
+  ordinary entries; TRANSIENT entries (see below) never finalize on timing alone.
+- Transient (v3, non-terminal): when BOTH durable copies fail on a quarantine
+  refusal, the manager holds the txId in a RAM-only transient-refusal map
+  (populated ONLY on both-fail, dropped on ownership loss/restart, kept across
+  quarantine clear) and answers TransientUnavailable. The client keeps Pending
+  + claims, fires no callback, and retries the SAME txId flagged
+  (IsTransientRetry, v3 wire — set ONLY after TransientUnavailable): a flagged
+  mutation resend re-attempts persistence and NEVER executes; a Query for a held
+  txId answers TransientUnavailable BEFORE the cache-miss UnknownTx
+  (sender-validated via MatchesPeer, strangers get Rejected with no payload).
+  Transient resends use bounded backoff (3s base, doubling, 30s cap) and the
+  deadline is re-armed, never finalized, while transient. Durable resolution
+  drops the map entry (later retries replay the terminal outcome). v3 limits kept
+  explicit: no ACK/journal (committed-but-Indeterminate windows stay residual),
+  at-most-once submit, exactly-once callback ATTEMPT per terminal.
 
 ## 3. ChestTransactionService operations
 

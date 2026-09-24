@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1 (experimental: full review-loop fixes on 0.6.x)
+
+- Review-loop hardening: dead authority seams wired into production (remote-mutation ban, stale-route drop, structural single rule); quarantine gates on craft consume/loan and SortLocal paths (incl. priority loan); manifest 0.6.x packaging consistent; README experimental banner + wire/ops table; threat model stated; verification table narrowed to seam-confirmed with wiring-assumed + transient C15 row.
+- Residuals unchanged from 0.6.0 (live multi-peer traces outstanding).
+
+## 0.6.0 (experimental: server-authoritative chests, invariant NOT claimed pending live multi-peer verification)
+
+- Server-authority migration (waves 1-3): canonical eligible-chest policy, authority UID, ServerAuthority (default) + LegacyDistributed modes with Hello/mode compat; source guards (open/stack/take-all without SetOwner, ReleaseNearbyZDOS exclusion, RPC_ZDOData boundary, ClaimOwnership block); server-only metadata adoption with quarantine-first; IsAuthorityManager routing for every mutation path with stale-route drop; host queue-serialized; remote Upgrade fail-closed; timer null-heals disabled in authority mode; ForceSendZDO documented as viewer-propagation hint.
+- Server-mediated remote chest upgrade (`TxOp.UpgradeRequest`, honest-weak): ghost protocol (spawn -> sync reverse-link -> copy -> Ready -> one-way pointer switch -> receipt -> idempotent retire); op-keyed entitlements; legacy direct-upgrade frames refused. Residuals in `docs/remote-upgrade-mediated.md`.
+- Residuals: live multi-peer traces outstanding; client-crash/ACK/eviction/post-write/SetRule/Upgrade-structural/response-trust gaps unchanged from v0.5.x; vanilla clients unsupported for managed chests.
+
 ## 0.6.x-Dedicated-Test remote upgrade (experimental slice, honest-weak)
 
 - Server-mediated remote chest upgrade (`TxOp.UpgradeRequest`): client sends a REQUEST (source ZDOID + authenticated sender + durable client nonce = fencing txId counter half + tier); the server executes the ghost protocol in its per-chest manager queue (pure core `TxUpgradeManager`/`TxUpgradeGate` in `BestAutoSort.TxCore/TxUpgradeOp.cs`, production host in `src/Tx/TxRemoteUpgrade.cs`). Spawn -> synchronous reverse-link write -> non-destructive copy -> validate Ready -> one-way pointer switch -> receipt -> idempotent retire; same op never spawns twice (record gate + reverse-link adoption); different ops queue behind the prepared head.

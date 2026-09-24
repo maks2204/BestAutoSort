@@ -1,5 +1,13 @@
 # Structural upgrade: NO-GO verdict (verified)
 
+> **Supersession note (0.6.0):** this verdict still stands for the
+> *exactly-once* variant — pre-reserved replacement IDs remain impossible
+> on the public Valheim API. The *honest-weak* variant (ghost protocol with
+> quarantine-instead-of-delete, documented residuals) is now implemented in
+> `src/Tx/TxRemoteUpgrade.cs` + `src/BestAutoSort.TxCore/TxUpgradeOp.cs`;
+> see `docs/remote-upgrade-mediated.md`. Remote Upgrade is therefore
+> serviced (weak contract), not refused, as of 0.6.0.
+
 Date: 2026-09-24. Branch: `0.6.x-Dedicated-Test`. Assembly:
 `valheim_Data/Managed/assembly_valheim.dll` (ilspycmd 11.0.0.9375).
 

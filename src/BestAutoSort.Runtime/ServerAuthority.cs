@@ -238,24 +238,41 @@ internal static class ServerAuthority
     }
 
     /// <summary>
+    /// Local-server probe for TxAuthorityRouting seams: true only when this
+    /// peer IS the server process. Unknown/null net reads as false (fail
+    /// closed: callers deny). Never throws.
+    /// </summary>
+    internal static bool IsLocalServer()
+    {
+        try
+        {
+            ZNet net = ZNet.instance;
+            return (Object)net != (Object)null && net.IsServer();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Wave-2 fail-closed gate for direct-mutation fallbacks: under
     /// ServerAuthority a NON-SERVER peer must never run vanilla mutations
     /// against a managed chest (its replica is stale by construction).
     /// True = the caller must block loudly (message + log, no mutation, no
     /// ownership claim). Legacy mode and unmanaged chests return false.
+    /// Decision rule is TxAuthorityRouting.RemoteMustNotMutate (single rule).
     /// </summary>
     internal static bool DenyRemoteDirectMutation(Container container, string op)
     {
         try
         {
-            if (!IsAuthorityMode())
-                return false;
             if ((Object)container == (Object)null)
                 return false;
-            if (!IsServerManagedContainer(container))
-                return false;
-            ZNet net = ZNet.instance;
-            if ((Object)net != (Object)null && net.IsServer())
+            // Single rule: the pure TxAuthorityRouting.RemoteMustNotMutate pinned
+            // by AUTHORITY_RemoteNeverMutates. Reverting the seam changes this
+            // wrapper's verdict by construction (verified by inspection).
+            if (!TxAuthorityRouting.RemoteMustNotMutate(IsAuthorityMode(), IsServerManagedContainer(container), IsLocalServer()))
                 return false;
             try
             {
@@ -292,18 +309,18 @@ internal static class ServerAuthority
     /// no replacement ClaimOwnership. The manager (host/server-local, already
     /// authority) proceeds unchanged. Legacy/unmanaged chests return false
     /// (caller keeps its legacy verdict).
+    /// Decision rule is TxAuthorityRouting.CanStructuralUpgrade (single rule:
+    /// block == NOT-may-proceed, with legacy-verdict-true so legacy mode and
+    /// unmanaged chests never block). Reverting the seam changes this wrapper
+    /// by construction (verified by inspection).
     /// </summary>
     internal static bool BlockStructuralForRemote(Container container, string op)
     {
         try
         {
-            if (!IsAuthorityMode())
-                return false;
             if ((Object)container == (Object)null)
                 return false;
-            if (!IsServerManagedContainer(container))
-                return false;
-            if (IsAuthorityManager(container))
+            if (TxAuthorityRouting.CanStructuralUpgrade(IsAuthorityMode(), IsServerManagedContainer(container), IsAuthorityManager(container), true))
                 return false;
             try
             {

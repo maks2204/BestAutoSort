@@ -20,6 +20,17 @@ Notes:
 - Console command: `bestautosort`.
 - All players + server must run the same version (exact-match hello gate).
 
+> **0.6.x experimental:** the `0.6.x-Dedicated-Test` line migrates chests to
+> server authority (server/host permanently owns eligible chests; remote
+> clients are viewers/requesters only). The server-authority invariant is
+> **not yet claimed** pending live multi-peer verification. Mode/hello gate:
+> peers must match on `version` AND `auth` mode (`version;auth=N`); mismatched
+> peers are rejected. Vanilla (mod-less) clients are **unsupported** for
+> managed chests (view-only grant at best; local vanilla takes fork ghost
+> items). Remote chest upgrade runs only via the server-mediated
+> `TxOp.UpgradeRequest` contract (legacy direct-upgrade frames refused);
+> see `docs/remote-upgrade-mediated.md` including its 4 documented residuals.
+
 ## Multiplayer protocol (ChestTX)
 
 ```
@@ -56,7 +67,7 @@ Details: `docs/CHEST_TX.md`.
 | Take body | `[count:int]` then per entry `[prefabHash:int]` `[item:ZPackage]` `[accepted:int]` |
 | Add body | `[count:int]` then per entry `[accepted:int]` |
 | Item snapshot | `[prefabHash]` `[itemPkg]` `[amount]` `[x]` `[y]` `[maxStack]`; `itemPkg` = `ItemData.Save` (quality/variant/durability/stack/crafter/customData/world/gridPos) |
-| Ops | Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade / SetRule / ViewerOpen / ViewerClose / Query |
+| Ops | Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade (legacy direct frames refused on managed chests) / UpgradeRequest (server-mediated, v3) / SetRule / ViewerOpen / ViewerClose / Query |
 | Statuses | Accepted / Partial / Rejected / Duplicate / UnknownTx / TransientUnavailable (v3, non-terminal: retain same txId, never terminal-forget) |
 
 ### Take one stack (GUI drag)

@@ -168,6 +168,25 @@ namespace BestAutoSort.Tx
             return container.IsOwner();
         }
 
+        /// <summary>
+        /// Quarantine gate for manager-direct vanilla mutation sites (consume,
+        /// loan, sort): true when a ChestState exists and is quarantined.
+        /// Unknown/absent state reads as NOT quarantined (legacy behavior for
+        /// unmanaged chests without transaction state). Never throws.
+        /// </summary>
+        internal static bool IsQuarantined(Container container)
+        {
+            try
+            {
+                ChestState state = GetState(container);
+                return state != null && state.TxQuarantined;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static ChestState GetState(Container container)
         {
             if ((Object)container == (Object)null)
@@ -1291,8 +1310,11 @@ namespace BestAutoSort.Tx
             // contradict the real outcome (e.g. finalize Indeterminate for a tx
             // the new manager already committed), so only the manager answers.
             // Wave-2: the manager verdict is authority-routed (remote never
-            // answers for a managed chest).
-            if (!Plugin.IsActive || !IsShared(container) || !IsManager(container))
+            // answers for a managed chest). Stale-route drop consults the pure
+            // TxAuthorityRouting.ShouldDropStaleRoute seam (single rule:
+            // drop == NOT manager); reverting the seam changes this gate by
+            // construction (verified by inspection).
+            if (!Plugin.IsActive || !IsShared(container) || TxAuthorityRouting.ShouldDropStaleRoute(IsManager(container)))
                 return;
             long txId;
             ZPackage payload;

@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace BestAutoSort;
 
-[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.6.0")]
+[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.6.1")]
 [BepInProcess("valheim.exe")]
 [BepInProcess("valheim_server.exe")]
 [BepInIncompatibility("goldenrevolver.quick_stack_store")]
@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.6.0";
+	internal const string PluginVersion = "0.6.1";
 
 
 	private Harmony? _harmony;
@@ -162,8 +162,18 @@ public sealed class Plugin : BaseUnityPlugin
 				// Non-shared (carts/ships/vanilla): manager only, as before.
 				// Wave-2: authority-routed, so remote managed chests fail closed
 				// (never SortLocal against a stale replica).
-				if (ChestTxService.IsManager(val))
+				// Quarantine gate (mirrors MutateLocal): sorting re-persists
+				// the whole inventory, so a quarantined chest must refuse —
+				// saving speculative RAM would defeat authoritative reload.
+				if (ChestTxService.IsManager(val) && !ChestTxService.IsQuarantined(val))
 					SortLocal(val);
+				else if (ChestTxService.IsQuarantined(val))
+				{
+					TxLog.Warn("sort refused: chest quarantined (fail closed)");
+					Player quarantinePlayer = Player.m_localPlayer;
+					if ((Object)(object)quarantinePlayer != (Object)(object)null)
+						((Character)quarantinePlayer).Message((MessageType)2, "Chest state is still being verified. Try sorting again shortly.", 0, (Sprite)null, false);
+				}
 				return;
 			}
 			ChestTxService.RequestSort(val, (int)ModConfig.ChestSortMode.Value, ModConfig.SortDescending.Value);

@@ -639,6 +639,10 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 			// chest never consumes directly (fail closed: waits for prefetch).
 			if (!ChestTxService.IsManager(eligibleContainer))
 				continue;
+			// Quarantine gate (mirrors MutateLocal): a quarantined chest may
+			// hold speculative RAM — never consume from it nor re-persist it.
+			if (ChestTxService.IsQuarantined(eligibleContainer))
+				continue;
 		// Manager-side sync consume: drain queued remote ops first so the
 			// take below commits strictly after them (same-thread order).
 			ChestTxService.DrainForLocal(eligibleContainer);
@@ -688,6 +692,10 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 					string name = val2.m_shared.m_name;
 					if (container.GetInventory().ContainsItem(val2) && ChestReserveStore.Available(container, val2) > 0)
 					{
+						// Quarantine gate (mirrors MutateLocal): never loan from
+						// speculative RAM nor re-persist a quarantined chest.
+						if (ChestTxService.IsQuarantined(container))
+							continue;
 						// Manager-side sync loan: drain queued remote ops first.
 						ChestTxService.DrainForLocal(container);
 						int quality = val2.m_quality;
@@ -740,6 +748,10 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 						}
 						else if (container.GetInventory().ContainsItem(val2) && ChestReserveStore.Available(container, val2) > 0)
 						{
+							// Quarantine gate (mirrors MutateLocal): never loan from
+							// speculative RAM nor re-persist a quarantined chest.
+							if (ChestTxService.IsQuarantined(container))
+								continue;
 							// Manager-side sync loan: drain queued remote ops first.
 							ChestTxService.DrainForLocal(container);
 							int quality = val2.m_quality;

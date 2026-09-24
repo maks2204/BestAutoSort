@@ -91,6 +91,17 @@ owner-only, synchronous (serial on the main thread).
 `TOTAL BEFORE + legitimate creation − legitimate consumption = TOTAL AFTER`
 for any item. Covered by tests 1–12 + soak (see tests/ChestTx.Tests).
 
+### Threat model
+
+ChestTX assumes an honest client for *position* (range checks use the
+client-stamped `actorPos` as a usability gate, not a security boundary).
+Malicious sender/txId traffic is contained by canonical `MatchesPeer`
+binding: a mismatched sender can never mutate another peer's floor, ring,
+cache, or payload. The actual security gates are vanilla `CheckAccess`
+plus ward/private-area checks. No anti-cheat claim is made for fabricated
+client item snapshots (Add bodies) — Valheim provides no authoritative
+server-side player inventory to verify them against.
+
 ## 5. `[ChestTX]` logs (Debug → TxVerbose option)
 
 - `container=<zdoid> tx=<id> peer=<id> op=ADD ... revision=123->124`

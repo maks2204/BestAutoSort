@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.15
+
+- s_items load-gate hardening: null is never empty, blobs validated before Load with RAM-snapshot restore, defensive byte clones, vanilla handoff order.
+
+## 0.5.14
+
+- Transient send-path one-way invariant: no unflagged fallback after transient state; flagged Query-or-Wait with Pending/claims retained.
+
+## 0.5.13
+
+- Authoritative transient-retry flag: flagged requests never execute as fresh, even on a clean new manager; clean-handoff proof.
+
+## 0.5.12
+
+- Transient same-tx retry (non-terminal) with bounded backoff; crash-resistant counter blocked marker.
+
+## 0.5.11
+
+- Quarantine durable-terminal matrix; persistent counter block surviving restart; replay op-mismatch guard.
+
+## 0.5.10
+
+- Quarantine fence-first, counter fail-closed, replay op guard, fence propagation requests.
+
+## 0.5.9
+
+- Wave-1 isolation + v3 hardening: ephemeral spoof, quarantine fencing, drain/claims lifecycle, drag gate, atomic counter.
+
+## 0.5.8
+
+- Authoritative inventory reload + quarantine for post-fence failures.
+
+## 0.5.7
+
+- Durable pre-execution floor fence before every fresh mutation; crash-safe tx ordering.
+
+## 0.5.6
+
+- Canonical peer identity (negative UID support), durable floor, corrupt-ring degraded recovery.
+
+## 0.5.5
+
+- Persistent ring v2 with stable terminal outcomes across handoff; UnknownTx is Indeterminate.
+
+## 0.5.4
+
+- Ring includes the committed tx before handoff; UnknownTx no longer treated as committed.
+
+## 0.5.3
+
+- Eggs quick-stackable behind TreatEggsAsAutoStack (default on); quickstack empty-diagnosis logging; issue #10 listen-server actor-first authority fix.
+- Quick-stack duplication race fix (also on branch): ExecuteAdd credits clamped to the live source stack.
+
 ## 0.4.0
 
 - Legacy chests no longer shrink a larger runtime inventory applied by other mods (final = max(current, template), issue #8).

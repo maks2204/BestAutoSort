@@ -5,6 +5,11 @@ namespace ChestTx.Tests
 {
     /// <summary>
     /// Regression coverage for the quick-stack duplication race in ExecuteAdd.
+    /// Pins the helper + mirror order only: the clamp-before-credit order, the
+    /// amount&lt;=0 skip, and the full-counting live in the test-local
+    /// ManagerCredit mirror, NOT in production ExecuteAdd — reverting the
+    /// production clamp block would keep this suite green. Production wiring
+    /// (src/Tx/ChestTxService.cs ExecuteAdd) is assumed, verified by review.
     ///
     /// Production rule (src/Tx/ChestTxService.cs, ExecuteAdd): the planned item amount
     /// (TxOpItem.Amount, fixed when a cascade/batch is built) is clamped to the live

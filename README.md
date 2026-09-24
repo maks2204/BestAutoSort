@@ -51,13 +51,13 @@ Details: `docs/CHEST_TX.md`.
 | Packet | Layout |
 |---|---|
 | Request outer | `[txId:long]` `txId = peerId<<32 \| counter` + `[body:ZPackage]` |
-| Request body | `[proto:int=2]` `[op:int]` `[baseRev:uint]` `[playerId:long]` `[actorPos:vec3]` `[enforceRule:bool]` `[respectReserves:bool]` `[op-body...]` |
+| Request body | `[proto:int=2/3]` `[op:int]` `[baseRev:uint]` `[playerId:long]` `[actorPos:vec3]` `[enforceRule:bool]` `[respectReserves:bool]` `[op-body...]` (+ v3 trailing `[isTransientRetry:bool]`) |
 | Response | `[txId:long]` `[status:int]` `[revision:uint]` `[totalsOnly:bool]` `[body:ZPackage]` |
 | Take body | `[count:int]` then per entry `[prefabHash:int]` `[item:ZPackage]` `[accepted:int]` |
 | Add body | `[count:int]` then per entry `[accepted:int]` |
 | Item snapshot | `[prefabHash]` `[itemPkg]` `[amount]` `[x]` `[y]` `[maxStack]`; `itemPkg` = `ItemData.Save` (quality/variant/durability/stack/crafter/customData/world/gridPos) |
 | Ops | Add / AddBatch / Take / TakeBatch / Move / Sort / Upgrade / SetRule / ViewerOpen / ViewerClose / Query |
-| Statuses | Accepted / Partial / Rejected / Duplicate / UnknownTx |
+| Statuses | Accepted / Partial / Rejected / Duplicate / UnknownTx / TransientUnavailable (v3, non-terminal: retain same txId, never terminal-forget) |
 
 ### Take one stack (GUI drag)
 

@@ -1479,7 +1479,7 @@ namespace BestAutoSort.Tx
                         if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
                             seeded.Add(dj.TxId);
                     bool ringOk = WriteRing(state);
-                    bool floorOk = ringOk ? WriteFloor(state) : false;
+                    bool floorOk = WriteFloor(state);
                     droppedStatus = TxDecision.HandoffDropTerminal(ringOk, floorOk);
                     if (droppedStatus == TxStatus.UnknownTx)
                     {

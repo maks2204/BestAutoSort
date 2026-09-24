@@ -586,7 +586,7 @@ namespace BestAutoSort.Tx
                             if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
                                 seeded.Add(dj.TxId);
                         bool ringOk = WriteRing(state);
-                        bool floorOk = ringOk ? WriteFloor(state) : false;
+                        bool floorOk = WriteFloor(state);
                         droppedStatus = TxDecision.HandoffDropTerminal(ringOk, floorOk);
                         if (droppedStatus == TxStatus.UnknownTx)
                         {
@@ -1805,9 +1805,11 @@ namespace BestAutoSort.Tx
 
         private static StoredResult ApplyJob(ChestState state, TxJob job)
         {
-            // Idempotency is absolute: the ORIGINAL outcome is returned and a
-            // committed tx is NEVER re-applied, even when the cache entry is
-            // totals-only after a handoff. Re-pulling live stock for a Take retry
+            // Idempotency: a committed tx is NEVER re-applied. The ORIGINAL
+            // outcome is replayed while the entry is cached/ring-retained;
+            // after ring/cache eviction the floor gate answers Indeterminate
+            // (stale) instead — safe direction (no double-apply), but the
+            // original outcome is then no longer returned. Re-pulling live stock for a Take retry
             // double-debits the chest while the client credits once (or zero
             // times on Query). Authenticated replay identity is checked first:
             // a stranger gets Rejected with no payload, never another sender's
@@ -1999,7 +2001,18 @@ namespace BestAutoSort.Tx
             }
             try
             {
-                CommitResult(state, job, applied);
+                bool commitPersisted = CommitResult(state, job, applied);
+                if (!commitPersisted)
+                {
+                    // Accepted residual (loud, no retry): the mutation is committed
+                    // and the RAM cache holds the exact result, but ring/floor
+                    // persistence failed — a handoff before the next successful
+                    // commit replays this txId as Indeterminate (floor stale-gate)
+                    // instead of the original Accepted. At-most-once still holds
+                    // via the pre-execution fence (never double-applies); the next
+                    // successful commit heals the ring. Response stays Accepted.
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " commit result NOT ring-persisted (accepted residual: at-most-once holds, replay may answer Indeterminate until ring heals)");
+                }
             }
             catch (Exception ex)
             {

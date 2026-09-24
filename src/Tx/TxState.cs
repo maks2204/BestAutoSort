@@ -31,7 +31,11 @@ namespace BestAutoSort.Tx
         /// Same-tx transient retry flag (v3 wire). Set client-side ONLY after
         /// receiving TransientUnavailable for this txId: a flagged mutation
         /// resend re-attempts persistence of the refused record and NEVER
-        /// executes. Never set on a first attempt.
+        /// executes — including on a clean manager whose transient-refusal RAM
+        /// map was discarded by a handoff/restart (the authoritative flagged
+        /// branch reconciles from the persisted ring/floor copies). A flagged
+        /// Query with no record answers TransientUnavailable (never terminal
+        /// UnknownTx). Never set on a first attempt.
         /// </summary>
         public bool IsTransientRetry;
     }

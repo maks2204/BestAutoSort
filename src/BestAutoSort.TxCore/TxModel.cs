@@ -91,10 +91,13 @@ namespace BestAutoSort.TxCore
         /// <summary>
         /// Same-tx transient retry flag (client-set ONLY after receiving
         /// TransientUnavailable for this txId). A flagged mutation resend
-        /// re-attempts persistence of the refused record and NEVER executes;
+        /// re-attempts persistence of the refused record and NEVER executes —
+        /// including on a clean manager whose transient-refusal RAM map was
+        /// discarded by a handoff/restart (the flagged branch reconciles from
+        /// the persisted ring/floor copies via TxDecision.FlaggedRefusalTerminal);
         /// an unflagged resend of a transient txId is reminded TransientUnavailable.
-        /// Never set on a first attempt: the manager treats a flagged unknown
-        /// txId as a plain request (no transient entry exists to resolve).
+        /// Never set on a first attempt: a flagged txId with no record anywhere
+        /// reconciles (never executes), it is never treated as a fresh mutation.
         /// </summary>
         public bool IsTransientRetry;
     }

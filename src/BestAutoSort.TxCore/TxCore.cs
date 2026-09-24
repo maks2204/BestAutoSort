@@ -71,9 +71,11 @@ namespace BestAutoSort.TxCore
     /// executes) and a Query answers TransientUnavailable before the
     /// cache-miss UnknownTx. Populated ONLY on both-fail; removed after a
     /// durable resolution; dropped on ownership loss and on ring/floor reload
-    /// (restart/handoff — RAM is discarded, the flagged client retry covers
-    /// the handoff); kept across quarantine clear (TryRecover) so the retry
-    /// still resolves authoritatively.
+    /// (restart/handoff discards RAM — the flagged retry then reconciles on the
+    /// clean manager through the authoritative flagged branch, see Apply and
+    /// TxDecision.FlaggedRefusalTerminal, so the handoff needs no RAM entry);
+    /// kept across quarantine clear (TryRecover) so the retry still resolves
+    /// authoritatively.
     /// </summary>
     public sealed class TransientRefusal
     {
@@ -271,7 +273,13 @@ namespace BestAutoSort.TxCore
                     // Flagged same-tx mutation retry: re-attempt persistence of
                     // the refused record ONLY (seed + ring + floor). Execute NEVER
                     // runs here — the tx stays non-committed until a durable
-                    // resolution, so a retry can never double-apply.
+                    // resolution, so a retry can never double-apply. Terminalizes
+                    // on a SINGLE durable copy (TxDecision.FlaggedRefusalTerminal,
+                    // shared with the clean-manager flagged branch below): ring
+                    // persisted => stable Rejected (replayable, ring-embedded floor
+                    // included); floor-only => terminal UnknownTx (seed evicted,
+                    // map dropped, permanently stale-gated); both failed => stays
+                    // TransientUnavailable (same-tx retained, never executes).
                     TxResult reRefusal = new TxResult();
                     reRefusal.Op = request.Op;
                     reRefusal.Status = TxStatus.Rejected;
@@ -300,7 +308,7 @@ namespace BestAutoSort.TxCore
                         reRingOk = PersistRingHook();
                         reFloorOk = PersistFloorHook();
                     }
-                    TxStatus reTerminal = TxDecision.HandoffDropTerminal(reRingOk, reFloorOk);
+                    TxStatus reTerminal = TxDecision.FlaggedRefusalTerminal(reRingOk, reFloorOk);
                     if (reTerminal == TxStatus.Rejected)
                     {
                         // Durable resolution: the refusal is now stable (retry the
@@ -312,7 +320,18 @@ namespace BestAutoSort.TxCore
                     }
                     if (reseeded)
                         Evict(request.TxId);
-                    return TransientResult(tref);
+                    if (reTerminal == TxStatus.TransientUnavailable)
+                    {
+                        // Both copies failed: nothing durable — keep the map entry
+                        // (same-tx retry retained) and stay non-terminal.
+                        return TransientResult(tref);
+                    }
+                    // Floor-only: terminal UnknownTx (never executes). The seed is
+                    // evicted above and the transient entry is dropped — the kept
+                    // floor high-water stale-gates every later retry of this txId
+                    // to the same UnknownTx (permanently stale, never executable).
+                    _transient.Remove(request.TxId);
+                    return UnknownResult();
                 }
                 if (_quarantined)
                 {
@@ -393,6 +412,78 @@ namespace BestAutoSort.TxCore
                     }
                     return UnknownResult();
                 }
+                if (request.IsTransientRetry && request.Op != TxOp.Query)
+                {
+                    // AUTHORITATIVE flagged branch (clean manager): no cache entry
+                    // and no transient entry (RAM map discarded by handoff/restart,
+                    // or never held), yet the client proves a held refusal by
+                    // retrying flagged with the SAME txId. Reconciliation ONLY —
+                    // seed the refusal + persist ring/floor, NEVER Execute, even
+                    // when the floor sits below this counter (a fresh-looking
+                    // flagged txId must not run as a new mutation). Placed after
+                    // the exact-cache replay + sender-binding gate above and the
+                    // transient-map / quarantine legs, but BEFORE the stale/fresh
+                    // gates: the stale gate would terminally forget a non-durable
+                    // outcome, and the fresh path would double-apply it. Matrix:
+                    // TxDecision.FlaggedRefusalTerminal (single-copy-durable) —
+                    // ring persisted => stable Rejected (replayable via the ring-
+                    // embedded floor); floor-only => terminal UnknownTx (seed
+                    // evicted, permanently stale-gated below); both failed =>
+                    // TransientUnavailable (noted, same-tx retained). Spoof-safe:
+                    // a stranger mutates nothing (ephemeral Rejected, no floor
+                    // advance, no seed); sender-0 legacy proceeds (lookup-grade,
+                    // never executes).
+                    if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
+                        return EphemeralSpoofReject(request);
+                    TxResult cleanRefusal = new TxResult();
+                    cleanRefusal.Op = request.Op;
+                    cleanRefusal.Status = TxStatus.Rejected;
+                    cleanRefusal.Revision = Revision;
+                    cleanRefusal.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
+                    bool cleanSeeded = false;
+                    if (!_processed.ContainsKey(request.TxId))
+                    {
+                        _processed[request.TxId] = cleanRefusal.Clone();
+                        _order.AddLast(request.TxId);
+                        while (_order.Count > TxLimits.ProcessedCacheCap)
+                        {
+                            long oldest = _order.First.Value;
+                            _order.RemoveFirst();
+                            _processed.Remove(oldest);
+                            _takeBlobs.Remove(oldest);
+                        }
+                        cleanSeeded = true;
+                    }
+                    AdvanceFloor(peer, ctr);
+                    RebuildRing();
+                    bool cleanRingOk = true;
+                    bool cleanFloorOk = true;
+                    if (Durability != null)
+                    {
+                        cleanRingOk = PersistRingHook();
+                        cleanFloorOk = PersistFloorHook();
+                    }
+                    TxStatus cleanTerminal = TxDecision.FlaggedRefusalTerminal(cleanRingOk, cleanFloorOk);
+                    if (cleanTerminal == TxStatus.Rejected)
+                    {
+                        if (Durability != null)
+                            FirePropagation(TxPropagationPoint.AfterFence);
+                        return cleanRefusal;
+                    }
+                    if (cleanSeeded)
+                        Evict(request.TxId);
+                    if (cleanTerminal == TxStatus.TransientUnavailable)
+                    {
+                        TransientRefusal cleanNote = new TransientRefusal();
+                        cleanNote.TxId = request.TxId;
+                        cleanNote.Op = request.Op;
+                        cleanNote.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
+                        cleanNote.Counter = ctr;
+                        _transient[request.TxId] = cleanNote;
+                        return TransientResult(cleanNote);
+                    }
+                    return UnknownResult();
+                }
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
                 {
@@ -434,7 +525,8 @@ namespace BestAutoSort.TxCore
                         // owner-gated, so the fence write may itself have no-op'd):
                         // no mutation may follow. The fence stays — never rolls back.
                         // The transient-refusal RAM map is dropped (RAM is discarded
-                        // on handoff/restart; the flagged client retry covers it).
+                        // on handoff/restart — the flagged retry reconciles on the
+                        // clean manager through the authoritative flagged branch).
                         _transient.Clear();
                         return UnknownResult();
                     }
@@ -597,6 +689,23 @@ namespace BestAutoSort.TxCore
 
         public TxResult Query(long txId, long sender)
         {
+            return Query(txId, sender, false);
+        }
+
+        /// <summary>
+        /// Flagged Query (IsTransientRetry-authoritative patch): the client sets the
+        /// flag on a Query ONLY after receiving TransientUnavailable for this txId,
+        /// so a flagged Query proves a held refusal even when the RAM map was
+        /// discarded by a handoff/restart. With no cache AND no map entry a flagged
+        /// Query answers TransientUnavailable (non-terminal — the client keeps
+        /// retrying the SAME txId, whose flagged mutation reconciles through the
+        /// authoritative flagged branch) instead of terminally forgetting the
+        /// outcome as UnknownTx. Never executes, never mutates (no seed, no floor
+        /// advance, no ring write). Spoof-safe: a stranger gets Rejected with no
+        /// payload and changes nothing; cached outcomes still beat the flag.
+        /// </summary>
+        public TxResult Query(long txId, long sender, bool isTransientRetry)
+        {
             lock (_gate)
             {
                 TxResult cached;
@@ -653,6 +762,36 @@ namespace BestAutoSort.TxCore
                             IsReplay = true
                         };
                     }
+                }
+                if (isTransientRetry)
+                {
+                    // Flagged Query with no record anywhere: the txId is held,
+                    // not forgotten (the flag is only set after TransientUnavailable).
+                    // Lookup only — no seed, no floor advance, no ring write, never
+                    // executes. A stranger gets Rejected with no payload; the bound
+                    // owner (or sender-0 legacy) is told to keep retrying the SAME
+                    // txId flagged, whose mutation reconciles authoritatively.
+                    if (sender != 0 && !TxIdGen.MatchesPeer(sender, txId))
+                        return new TxResult
+                        {
+                            Status = TxStatus.Rejected,
+                            Revision = Revision,
+                            Accepted = new List<int>(),
+                            TotalsOnly = false,
+                            Op = TxOp.Query,
+                            Sender = TxIdGen.PeerKey(sender),
+                            IsReplay = false
+                        };
+                    return new TxResult
+                    {
+                        Status = TxStatus.TransientUnavailable,
+                        Revision = Revision,
+                        Accepted = new List<int>(),
+                        TotalsOnly = false,
+                        Op = TxOp.Query,
+                        Sender = sender != 0 ? TxIdGen.PeerKey(sender) : TxIdGen.PeerOf(txId),
+                        IsReplay = false
+                    };
                 }
                 return new TxResult { Status = TxStatus.UnknownTx, Revision = Revision };
             }

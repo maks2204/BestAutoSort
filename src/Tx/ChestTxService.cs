@@ -1230,7 +1230,7 @@ namespace BestAutoSort.Tx
             }
             if (call.Op == TxOp.Query)
             {
-                RespondQuery(container, sender, txId);
+                RespondQuery(container, sender, txId, call.IsTransientRetry);
                 return;
             }
             if (TxDecision.ClassifySenderBinding(sender, txId) == TxDecision.SenderBinding.UnboundStranger)
@@ -1301,19 +1301,34 @@ namespace BestAutoSort.Tx
                     Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
                     return;
                 }
-                bool reDurable;
-                TxStatus reTerminal = PersistQuarantineRefusal(state, txId, call.Op, sender, out reDurable);
+                bool reRingOk;
+                bool reFloorOk;
+                TxStatus reTerminal = PersistFlaggedRefusal(state, txId, call.Op, sender, out reRingOk, out reFloorOk);
                 if (reTerminal != TxStatus.Rejected)
                 {
-                    // Core gate (TxCore.Apply transient leg): resolve ONLY on a
-                    // both-copies-durable Rejected. A partial persist (exactly one
-                    // copy) is NOT durable — re-note, keep the map, and answer
-                    // TransientUnavailable (same-tx retained, never executes).
-                    // reDurable (either-copy) is informational only; the gate is
-                    // reTerminal == Rejected (ring AND floor persisted).
-                    NoteTransientRefusal(state, txId, call.Op, sender);
-                    TxLog.Warn("tx=" + txId + " TRANSIENT still not durable (status=" + reTerminal + ", same-tx retry retained, never executes)");
-                    Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
+                    // Core gate (TxCore.Apply transient leg, shared seam
+                    // TxDecision.FlaggedRefusalTerminal): single-copy-durable
+                    // terminalizes — the tx never executes, so one persisted copy
+                    // is enough for a stable answer. reTerminal == Rejected means
+                    // the ring copy is durable (ring-embedded floor included);
+                    // UnknownTx means floor-only (seed evicted below, map dropped,
+                    // permanently stale-gated); TransientUnavailable means both
+                    // copies failed (re-note, same-tx retained, never executes).
+                    if (reTerminal == TxStatus.TransientUnavailable)
+                    {
+                        NoteTransientRefusal(state, txId, call.Op, sender);
+                        TxLog.Warn("tx=" + txId + " TRANSIENT still not durable (same-tx retry retained, never executes)");
+                        Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
+                        return;
+                    }
+                    // Floor-only terminal: evict the non-durable seed and drop the
+                    // transient entry — the kept floor high-water stale-gates every
+                    // later retry of this txId to the same UnknownTx (terminal,
+                    // never executable). Never executes on this path either way.
+                    EvictSeededReject(state, txId);
+                    TransientRefusals.Remove(txId);
+                    TxLog.Warn("tx=" + txId + " transient floor-only (terminal UnknownTx, permanently stale, never executes)");
+                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
                     return;
                 }
                 // Durable resolution: the refusal is now stable — drop the
@@ -1358,6 +1373,57 @@ namespace BestAutoSort.Tx
                     RequestPropagation(state, sender);
                 TxLog.Warn("tx=" + txId + " refused: quarantined after post-fence failure (status=" + terminal + ")");
                 Respond(container, sender, txId, terminal, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
+            if (call.IsTransientRetry && call.Op != TxOp.Query)
+            {
+                // AUTHORITATIVE flagged branch (clean manager): no cache entry and
+                // no transient entry (RAM map discarded by handoff/restart, or never
+                // held), yet the client proves a held refusal by retrying flagged
+                // with the SAME txId. Reconciliation ONLY — seed the refusal +
+                // persist ring/floor, NEVER ExecuteCall, even when the floor sits
+                // below this counter (a fresh-looking flagged txId must not run as
+                // a new mutation). After the sender/tx binding + exact-cache replay
+                // gates above and the transient-map / quarantine legs, but BEFORE
+                // the stale/fresh gates: the stale gate would terminally forget a
+                // non-durable outcome, and the fresh path would double-apply it.
+                // Matrix: TxDecision.FlaggedRefusalTerminal (single-copy-durable,
+                // shared with TxCore.Apply) — ring persisted => stable Rejected
+                // (replayable via the ring-embedded floor); floor-only => terminal
+                // UnknownTx (permanently stale-gated below); both failed =>
+                // TransientUnavailable (noted, same-tx retained). Spoof-safe:
+                // MatchesPeer FIRST — a stranger gets an ephemeral Rejected and the
+                // map/floor/cache are untouched. Sender-0 legacy skips the gate
+                // (lookup-grade, never executes).
+                if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
+                {
+                    TxLog.Warn("tx=" + txId + " REJECT clean-manager flagged sender mismatch sender=" + sender + " (ephemeral: no state change)");
+                    Respond(container, sender, txId, TxDecision.SpoofTerminal(), CurrentRevision(container), new ZPackage(), false, call.Op);
+                    return;
+                }
+                bool cleanRingOk;
+                bool cleanFloorOk;
+                TxStatus cleanTerminal = PersistFlaggedRefusal(state, txId, call.Op, sender, out cleanRingOk, out cleanFloorOk);
+                if (cleanTerminal == TxStatus.Rejected)
+                {
+                    RequestPropagation(state, sender);
+                    TxLog.Warn("tx=" + txId + " clean-manager flagged resolved durable (status=" + cleanTerminal + ")");
+                    Respond(container, sender, txId, cleanTerminal, CurrentRevision(container), new ZPackage(), true, call.Op);
+                    return;
+                }
+                if (cleanTerminal == TxStatus.TransientUnavailable)
+                {
+                    NoteTransientRefusal(state, txId, call.Op, sender);
+                    TxLog.Warn("tx=" + txId + " clean-manager flagged not durable (TRANSIENT recorded: same-tx retry retained, never executes)");
+                    Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, call.Op);
+                    return;
+                }
+                // Floor-only terminal: the seed was evicted inside
+                // PersistFlaggedRefusal and no transient entry is noted — the kept
+                // floor high-water stale-gates every later retry of this txId to
+                // the same UnknownTx (terminal, never executable).
+                TxLog.Warn("tx=" + txId + " clean-manager flagged floor-only (terminal UnknownTx, permanently stale, never executes)");
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }
             if (IsFloorStale(state, txId))
@@ -1804,8 +1870,9 @@ namespace BestAutoSort.Tx
                 // Ownership lost after the fence (ZDO.Set is owner-gated, so the fence
                 // write above may itself have no-op'd): no mutation may follow. The floor
                 // stays advanced — never rolls back — and the answer is Indeterminate.
-                // Transient RAM for this chest is dropped (handoff discards RAM;
-                // the flagged client retry covers it).
+                // Transient RAM for this chest is dropped (handoff discards RAM —
+                // the flagged retry reconciles on the clean manager through the
+                // authoritative flagged branch, see OnTxRequest).
                 DropTransientFor(state);
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " lost ownership after fence (indeterminate)");
                 StoredResult ownerLost = new StoredResult();
@@ -2507,6 +2574,32 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
+        /// Flagged-retry reconciliation persist (IsTransientRetry-authoritative patch,
+        /// shared seam TxDecision.FlaggedRefusalTerminal — the same rule as the
+        /// TxCore.Apply flagged legs): seed the txId as Rejected (known-not-committed —
+        /// a flagged txId never executes), then persist ring + floor. Unlike
+        /// PersistQuarantineRefusal (both-copies gate, preserved for the quarantine-
+        /// fresh path), a SINGLE durable copy terminalizes here: ring persisted =>
+        /// stable Rejected (seed kept — the ring entry carries the refusal and the
+        /// ring-embedded floor, so the outcome replays after handoff/restart);
+        /// floor-only => UnknownTx terminal (seed evicted — a RAM-only Rejected
+        /// would flip after a restart — the kept floor high-water stale-gates the
+        /// txId permanently); both failed => TransientUnavailable (seed evicted,
+        /// caller re-notes the transient map). The floor advance is always KEPT
+        /// (seen-high-water, monotonic). Never executes.
+        /// </summary>
+        private static TxStatus PersistFlaggedRefusal(ChestState state, long txId, TxOp op, long sender, out bool ringOk, out bool floorOk)
+        {
+            bool seeded = SeedReject(state, txId, op, sender, true);
+            ringOk = WriteRing(state);
+            floorOk = WriteFloor(state);
+            TxStatus terminal = TxDecision.FlaggedRefusalTerminal(ringOk, floorOk);
+            if (!ringOk && seeded)
+                EvictSeededReject(state, txId);
+            return terminal;
+        }
+
+        /// <summary>
         /// Transient-refusal RAM map (v3): txId -&gt; minimal refusal metadata.
         /// Populated ONLY on both-copies-failed quarantine refusals (nothing
         /// durable). A held txId answers TransientUnavailable (non-terminal) and
@@ -2514,9 +2607,11 @@ namespace BestAutoSort.Tx
         /// executes); a Query for it answers TransientUnavailable BEFORE the
         /// cache-miss UnknownTx (sender-validated). Entries are removed after a
         /// durable resolution and dropped on ownership loss / ring reload
-        /// (restart/handoff discards RAM — the flagged client retry covers the
-        /// handoff); quarantine clear (TryReloadAuthoritative) keeps them
-        /// authoritative. Never cached, never persisted, never executed.
+        /// (restart/handoff discards RAM — the flagged retry then reconciles on
+        /// the clean manager through the authoritative flagged branch, see
+        /// OnTxRequest and TxDecision.FlaggedRefusalTerminal, so the handoff
+        /// needs no RAM entry); quarantine clear (TryReloadAuthoritative) keeps
+        /// them authoritative. Never cached, never persisted, never executed.
         /// </summary>
         internal sealed class TransientRefusal
         {
@@ -2557,7 +2652,9 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Drop transient entries for one chest (ownership loss / ring reload:
-        /// RAM is discarded on handoff — the flagged client retry covers it).
+        /// RAM is discarded on handoff — the flagged retry then reconciles on the
+        /// clean manager through the authoritative flagged branch, see OnTxRequest
+        /// and TxDecision.FlaggedRefusalTerminal, so the handoff needs no RAM entry).
         /// Quarantine clear deliberately does NOT call this (transient stays
         /// authoritative across TryReloadAuthoritative).
         /// </summary>
@@ -3182,7 +3279,8 @@ namespace BestAutoSort.Tx
             // v1 entries (Status==Duplicate) restore totals-only. A corrupt
             // payload fails closed: empty caches + RingCorrupt (no mutation).
             // The transient-refusal RAM map is dropped (restart/handoff discards
-            // RAM — the flagged client retry covers it).
+            // RAM — the flagged retry reconciles on the clean manager through
+            // the authoritative flagged branch, see OnTxRequest).
             DropTransientFor(state);
             state.Processed.Clear();
             state.ProcOrder.Clear();

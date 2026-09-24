@@ -156,6 +156,38 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// Flagged-retry reconciliation terminal (v0.5.x IsTransientRetry-authoritative
+        /// patch, shared seam for the core + production flagged legs): a flagged
+        /// same-tx mutation retry re-attempts persistence of the refused record and
+        /// NEVER executes, so a single durable copy is enough to terminalize — the
+        /// tx provably never applied, and Rejected is known-not-committed either way.
+        /// - ring persisted (floor either way) => Rejected, STABLE: the ring entry
+        ///   carries the refusal AND the ring-embedded floor copy, so the outcome
+        ///   replays after a restart/handoff (keep the seed, drop the transient
+        ///   entry, propagate, answer terminally; the client releases as
+        ///   FailedNotCommitted and retries further work as a NEW txId).
+        /// - ring failed + floor persisted => UnknownTx, TERMINAL: the seeded record
+        ///   is evicted (a RAM-only Rejected would flip after a restart) and the
+        ///   transient entry is dropped; the kept floor high-water leaves the txId
+        ///   permanently stale-gated, so every later retry (flagged or not) answers
+        ///   the same UnknownTx without executing (the client releases as
+        ///   Indeterminate — reconcile manually, retry as a NEW txId).
+        /// - both failed => TransientUnavailable, NON-terminal: the seed is evicted,
+        ///   the txId is (re-)noted in the transient-refusal RAM map, and the client
+        ///   retains Pending + claims and retries the SAME txId flagged.
+        /// Callers must still never execute on this path and must run the
+        /// sender-binding / MatchesPeer spoof gate BEFORE any mutation.
+        /// </summary>
+        public static TxStatus FlaggedRefusalTerminal(bool ringPersisted, bool floorPersisted)
+        {
+            if (ringPersisted)
+                return TxStatus.Rejected;
+            if (floorPersisted)
+                return TxStatus.UnknownTx;
+            return TxStatus.TransientUnavailable;
+        }
+
+        /// <summary>
         /// Drag-remainder gate (alreadyRemoved path): restore ONLY when the
         /// outcome is known-safe — Normal (accepted counts observed: restore the
         /// uncommitted remainder) or FailedNotCommitted (known-not-committed:

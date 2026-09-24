@@ -90,7 +90,7 @@ namespace BestAutoSort.Tx
             return body;
         }
 
-        private static void RespondQuery(Container container, long sender, long txId)
+        private static void RespondQuery(Container container, long sender, long txId, bool isTransientRetry)
         {
             ChestState state = GetState(container);
             if (state == null)
@@ -130,6 +130,26 @@ namespace BestAutoSort.Tx
                 }
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " TRANSIENT-QUERY hit (same-tx retry retained)");
                 Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, tref.Op);
+                return;
+            }
+            if (isTransientRetry)
+            {
+                // Flagged Query with no record anywhere: the client sets the flag
+                // ONLY after TransientUnavailable, so this txId is held, not
+                // forgotten (the RAM map was discarded by handoff/restart). Lookup
+                // only — no seed, no floor advance, no ring write, never executes —
+                // answering TransientUnavailable (non-terminal) so the client keeps
+                // retrying the SAME txId, whose flagged mutation reconciles through
+                // the authoritative flagged branch. Spoof-safe: a stranger gets an
+                // ephemeral Rejected with no payload and changes nothing.
+                if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " FLAGGED-QUERY sender mismatch");
+                    Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, TxOp.Query);
+                    return;
+                }
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " FLAGGED-QUERY no record (same-tx retry retained)");
+                Respond(container, sender, txId, TxStatus.TransientUnavailable, CurrentRevision(container), new ZPackage(), false, TxOp.Query);
                 return;
             }
             Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, TxOp.Query);

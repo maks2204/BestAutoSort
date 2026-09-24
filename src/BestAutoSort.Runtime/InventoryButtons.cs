@@ -467,7 +467,7 @@ internal static class InventoryButtons
 				List<TxOpItem> trashItems = new List<TxOpItem>();
 				trashItems.Add(opItem);
 				string trashName = val.m_shared.m_name;
-				ChestTxService.RequestTakeCustom(trashContainer, trashItems, false, delegate (List<DecodedTake> results, TxStatus status, uint rev)
+				ChestTxService.RequestTakeCustom(trashContainer, trashItems, false, delegate (List<DecodedTake> results, TxStatus status, uint rev, TxCompletionKind disp)
 					{
 						int destroyed = 0;
 						if (results != null)

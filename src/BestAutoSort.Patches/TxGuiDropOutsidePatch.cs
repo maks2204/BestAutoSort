@@ -47,7 +47,7 @@ namespace BestAutoSort.Patches
             int before = TxGui.CountInPlayer(playerInv, name, quality, variant, world);
             TxGui.CancelDrag(__instance);
             ChestTxService.RequestTake(container, playerInv, dragItem, amount,
-                delegate (ZPackage pkg, TxStatus status, uint rev)
+                delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
                 {
                     if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
                         return;

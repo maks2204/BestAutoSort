@@ -265,7 +265,7 @@ namespace BestAutoSort.Patches
             if (items.Count == 0)
                 return false;
             ChestTxService.RequestTakeBatchChunked(container, playerInv, items,
-                delegate (ZPackage pkg, TxStatus status, uint rev)
+                delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
                 {
                     List<DecodedTake> takes = TxCodec.ReadTakeResults(pkg);
                     if (takes == null)
@@ -386,7 +386,7 @@ namespace BestAutoSort.Patches
             int world = item.m_worldLevel;
             int before = TxGui.CountInPlayer(playerInv, name, quality, variant, world);
             ChestTxService.RequestTake(container, playerInv, item, 1,
-                delegate (ZPackage pkg, TxStatus status, uint rev)
+                delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
                 {
                     if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
                         return;

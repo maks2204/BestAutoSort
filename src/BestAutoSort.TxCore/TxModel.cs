@@ -74,6 +74,8 @@ namespace BestAutoSort.TxCore
 
     /// <summary>
     /// Mutation request.
+    /// Sender: authenticated sender peer (0 = unknown/legacy, skips identity checks).
+    /// Must equal TxIdGen.PeerOf(TxId) or the request is a spoofed txId.
     /// </summary>
     public sealed class TxRequest
     {
@@ -85,11 +87,18 @@ namespace BestAutoSort.TxCore
         public int DstY = -1;
         public int Mode;
         public bool Desc;
+        public long Sender;
     }
 
     /// <summary>
     /// Result. Accepted — accepted amounts per item (for Add*/Take*).
-    /// TotalsOnly=true — entry from the persistent ring (totals only, no full data).
+    /// TotalsOnly=true — entry restored without exact payloads (legacy ring or
+    /// inexact Take metadata): never fabricate per-item data from it.
+    /// Status on a replay is the ORIGINAL terminal outcome (Accepted/Partial/
+    /// Rejected stable across handoff); IsReplay separates replay from original.
+    /// Wire Duplicate survives only where the original status is genuinely
+    /// unavailable (legacy v1 ring entries).
+    /// Sender: authenticated sender peer recorded at commit (0 = legacy unknown).
     /// </summary>
     public sealed class TxResult
     {
@@ -97,6 +106,9 @@ namespace BestAutoSort.TxCore
         public uint Revision;
         public List<int> Accepted = new List<int>();
         public bool TotalsOnly;
+        public TxOp Op;
+        public long Sender;
+        public bool IsReplay;
 
         public int AcceptedTotal()
         {
@@ -113,18 +125,43 @@ namespace BestAutoSort.TxCore
                 Status = Status,
                 Revision = Revision,
                 Accepted = new List<int>(Accepted),
-                TotalsOnly = TotalsOnly
+                TotalsOnly = TotalsOnly,
+                Op = Op,
+                Sender = Sender,
+                IsReplay = IsReplay
             };
         }
     }
 
     /// <summary>
+    /// One Take payload in a v2 ring entry: the ACTUAL debited item metadata
+    /// (production: TakeEntry.Item.Save bytes + prefab hash; offline: encoded
+    /// ItemKey). Null entries mean "no payload" (accepted==0 there). A Take
+    /// entry whose payloads do not cover every accepted&gt;0 slot is inexact and
+    /// restores totals-only — never fabricated.
+    /// </summary>
+    public sealed class TakePayload
+    {
+        public int PrefabHash;
+        public byte[] Bytes;
+    }
+
+    /// <summary>
     /// Persistent ring entry (for manager handoff via ZDO).
+    /// v2: Op/Status(original terminal outcome)/Sender/exact Accepted[]/TakePayloads.
+    /// v1 legacy: only TxId/AcceptedTotal/Revision; Status==Duplicate marks a
+    /// legacy entry (original outcome genuinely unavailable) and restores
+    /// totals-only. A Duplicate status NEVER appears on a freshly committed entry.
     /// </summary>
     public struct RingEntry
     {
         public long TxId;
         public int AcceptedTotal;
         public uint Revision;
+        public TxOp Op;
+        public TxStatus Status;
+        public long Sender;
+        public List<int> Accepted;
+        public List<TakePayload> TakePayloads;
     }
 }

@@ -104,9 +104,9 @@ namespace ChestTx.Tests
 
         /// <summary>
         /// Ownership handoff with local-owner=0: the new manager seeds from the
-        /// ring; a replayed Take returns Duplicate totals-only WITHOUT re-applying
-        /// (no double-debit). Treating local-owner=0 as an error would contradict
-        /// the handoff architecture.
+        /// ring; a replayed Take returns its ORIGINAL outcome (exact, IsReplay)
+        /// WITHOUT re-applying (no double-debit). Treating local-owner=0 as an
+        /// error would contradict the handoff architecture.
         /// </summary>
         private static void Test16_HandoffTotalsOnly()
         {
@@ -124,13 +124,13 @@ namespace ChestTx.Tests
             TxCore coreB = new TxCore();
             coreB.LoadRing(coreA.DumpRing());
             TxResult q = coreB.Query(101);
-            Check.That(q.Status == TxStatus.Duplicate && q.TotalsOnly,
-                "handoff Query of committed take must be Duplicate totals-only");
+            Check.That(q.Status == TxStatus.Accepted && !q.TotalsOnly && q.IsReplay,
+                "handoff Query of committed take must replay the original outcome, got " + q.Status);
 
             ModelChest chestB = new ModelChest(4, 4);
             chestB.AddItem(Wood, 14, 50);
             TxResult replay = coreB.Apply(chestB, take);
-            Check.That(replay.Status == TxStatus.Duplicate, "replayed take after handoff must be Duplicate");
+            Check.That(replay.Status == TxStatus.Accepted && replay.IsReplay, "replayed take after handoff keeps its outcome, got " + replay.Status);
             Check.Equal(14, CountIn(chestB, Wood), "replayed take must NOT double-debit the chest");
         }
 
@@ -157,7 +157,7 @@ namespace ChestTx.Tests
             Check.That(r.Status == TxStatus.Accepted, "fresh tx after handoff must be Accepted");
             Check.Equal(10, CountIn(chestB, Wood), "fresh take applies exactly once after handoff");
             TxResult dup = coreB.Apply(chestB, fresh);
-            Check.That(dup.Status == TxStatus.Duplicate, "repeat of fresh tx must be Duplicate");
+            Check.That(dup.Status == TxStatus.Accepted && dup.IsReplay, "repeat of fresh tx keeps outcome (replay), got " + dup.Status);
             Check.Equal(10, CountIn(chestB, Wood), "repeat must not re-apply");
         }
 

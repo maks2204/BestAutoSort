@@ -213,7 +213,11 @@ namespace ChestTx.Tests
             r.Items.Add(Lot(Wood, 50, 50));
             TxResult first = core.Apply(chest, r);
             TxResult second = core.Apply(chest, r); // redelivery of the same txId
-            Check.That(second.Status == TxStatus.Duplicate, "second must be Duplicate");
+            // Replay-vs-original: the ORIGINAL outcome is stable (Accepted here),
+            // separated from the original by IsReplay — Duplicate is reserved for
+            // legacy ring entries whose original status is genuinely unavailable.
+            Check.That(second.Status == first.Status && second.IsReplay, "replay keeps original status, got " + second.Status);
+            Check.That(!first.IsReplay, "original is not a replay");
             Check.Equal(first.AcceptedTotal(), second.AcceptedTotal(), "duplicate returns cached total");
             Check.Equal(50, chest.TotalOf(Wood), "applied exactly once");
             ClientApplyAdd(a, r.Items[0], first.AcceptedTotal());
@@ -235,13 +239,18 @@ namespace ChestTx.Tests
             TxRequest r2 = a.NewRequest(TxOp.Add);
             r2.Items.Add(Lot(Stone, 30, 50));
             r2.BaseRevision = 0;
+            // TX2 clocked before TX1: the durable per-sender floor makes the
+            // delayed out-of-order first-timer (counter below high-water, no
+            // record) INDETERMINATE — it must never execute, otherwise an
+            // evicted txId would be indistinguishable from a reordered one and
+            // re-execution would double-apply. The client retries as a NEW tx.
             TxResult res2 = core.Apply(chest, r2); // arrived first
-            TxResult res1 = core.Apply(chest, r1); // arrived second, baseRev stale
-            Check.That(res1.Status == TxStatus.Accepted, "stale baseRev still applied, got " + res1.Status);
-            ClientApplyAdd(a, r1.Items[0], res1.AcceptedTotal());
+            TxResult res1 = core.Apply(chest, r1); // arrived second, counter below floor
+            Check.That(res2.Status == TxStatus.Accepted, "first arrival applied, got " + res2.Status);
+            Check.That(res1.Status == TxStatus.UnknownTx, "out-of-order first-timer must be indeterminate, got " + res1.Status);
             ClientApplyAdd(a, r2.Items[0], res2.AcceptedTotal());
-            Check.Equal(80, chest.GrandTotal(), "both applied");
-            Check.Equal(80, Total(chest, a), "conservation");
+            Check.Equal(30, chest.GrandTotal(), "only the first arrival applied");
+            Check.Equal(80, Total(chest, a), "conservation (nothing removed for the indeterminate tx)");
         }
 
         public static void Test7_DisconnectDuringTx()
@@ -256,7 +265,7 @@ namespace ChestTx.Tests
             r.Items.Add(Lot(Wood, 40, 50));
             TxResult committed = core.Apply(chest, r);
             TxResult queried = core.Query(r.TxId); // client re-asks instead of re-applying
-            Check.That(queried.Status == TxStatus.Duplicate, "query returns cached");
+            Check.That(queried.Status == committed.Status && queried.IsReplay, "query returns original outcome, got " + queried.Status);
             Check.Equal(committed.AcceptedTotal(), queried.AcceptedTotal(), "query total matches");
             ClientApplyTake(a, Wood, queried.AcceptedTotal(), 50);
             Check.Equal(50, Total(chest, a), "conservation after lost response");
@@ -286,9 +295,9 @@ namespace ChestTx.Tests
             TxCore core2 = new TxCore();
             core2.LoadRing(core1.DumpRing());
             Check.Equal(revBefore, core2.Revision, "revision continues after handoff");
-            // Same txId retried by the new manager: no re-apply.
+            // Same txId retried by the new manager: original outcome, no re-apply.
             TxResult dup = core2.Apply(chest2, r);
-            Check.That(dup.Status == TxStatus.Duplicate, "handoff duplicate, got " + dup.Status);
+            Check.That(dup.Status == res.Status && dup.IsReplay, "handoff replay keeps outcome, got " + dup.Status);
             Check.Equal(res.AcceptedTotal(), dup.AcceptedTotal(), "handoff totals match");
             Check.Equal(chest.TotalOf(Wood), chest2.TotalOf(Wood), "state identical");
             ClientApplyTake(a, Wood, res.AcceptedTotal(), 50);

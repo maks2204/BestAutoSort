@@ -303,9 +303,16 @@ internal static class AutoFeedService
 		List<TxOpItem> items = new List<TxOpItem>();
 		items.Add(op);
 		// Flights must end at the ANIMAL, not at the feeder: stamp its position.
-		ChestTxService.RequestTakeCustom(container, items, true, delegate(List<DecodedTake> decoded, TxStatus status, uint rev)
+		ChestTxService.RequestTakeCustom(container, items, true, delegate(List<DecodedTake> decoded, TxStatus status, uint rev, TxCompletionKind disp)
 		{
 			FeedingAnimals.Remove(animalId);
+			if (disp == TxCompletionKind.Indeterminate)
+			{
+				// Outcome unknown: the chest may have been debited. Never feed,
+				// never compensate-as-failed, never take again - stay loud.
+				LogProductionDiagnostic(tameable, "Feed take indeterminate: outcome unknown, check the chest before retrying.", warning: true);
+				return;
+			}
 			DecodedTake got = null;
 			if (decoded != null)
 			{

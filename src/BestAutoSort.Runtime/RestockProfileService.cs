@@ -367,11 +367,17 @@ internal static class RestockProfileService
 		opItem.Snapshot.m_shared.m_name = need.Name;
 		List<TxOpItem> items = new List<TxOpItem>();
 		items.Add(opItem);
-		ChestTxService.RequestTakeCustom(need.Container, items, true, delegate (List<DecodedTake> results, TxStatus status, uint rev)
+		ChestTxService.RequestTakeCustom(need.Container, items, true, delegate (List<DecodedTake> results, TxStatus status, uint rev, TxCompletionKind disp)
 			{
 				try
 				{
-					if (results != null)
+					if (disp == TxCompletionKind.Indeterminate)
+					{
+						// Outcome unknown: place nothing, take nothing more for this
+						// need. The chain still advances (per-need terminal).
+						Plugin.LogInstance.LogWarning((object)("Restock take indeterminate: outcome unknown, check the chest before retrying."));
+					}
+					else if (results != null)
 					{
 						for (int i = 0; i < results.Count; i++)
 						{

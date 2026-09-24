@@ -47,6 +47,9 @@ namespace BestAutoSort.Tx
 
     /// <summary>
     /// Cached result for idempotency (full — includes Take items).
+    /// Status is the ORIGINAL terminal outcome (Accepted/Partial/Rejected stable
+    /// across handoff); IsReplay separates a replay from the original.
+    /// Sender is the authenticated committer (Replay identity check).
     /// </summary>
     internal sealed class StoredResult
     {
@@ -65,8 +68,12 @@ namespace BestAutoSort.Tx
         }
         /// <summary>Take-result items (clones with the actual stack). Same-manager only.</summary>
         public List<TakeEntry> Takes = new List<TakeEntry>();
-        /// <summary>True when the entry was restored from the ZDO ring (no items).</summary>
+        /// <summary>True when the entry was restored without exact payloads (legacy ring or inexact Take metadata).</summary>
         public bool TotalsOnly;
+        /// <summary>Authenticated sender peer recorded at commit (PeerOf(txId)).</summary>
+        public long Sender;
+        /// <summary>True when served from cache/ring instead of freshly executed.</summary>
+        public bool IsReplay;
     }
 
     internal sealed class TakeEntry
@@ -106,6 +113,11 @@ namespace BestAutoSort.Tx
 
     /// <summary>
     /// Per-chest state on this peer.
+    /// Floor: durable per-sender execution high-water (peer -&gt; highest tx
+    /// counter), persisted with the ring, NEVER evicted. An absent txId at or
+    /// below its sender's high-water is indeterminate and must never execute.
+    /// RingCorrupt: persisted bytes were untrustworthy — fail closed (answer
+    /// UnknownTx, mutate nothing) until trustworthy state is rebuilt.
     /// </summary>
     internal sealed class ChestState
     {
@@ -115,6 +127,9 @@ namespace BestAutoSort.Tx
         public bool Draining;
         public Dictionary<long, StoredResult> Processed = new Dictionary<long, StoredResult>();
         public LinkedList<long> ProcOrder = new LinkedList<long>();
+        public Dictionary<long, uint> Floor = new Dictionary<long, uint>();
+        public bool RingCorrupt;
+        public byte[] LastRingBytes;
         public long LastOwner;
         // Viewer (we watch a foreign chest):
         public bool ViewedByMe;

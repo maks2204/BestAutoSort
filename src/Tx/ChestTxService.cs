@@ -136,12 +136,12 @@ namespace BestAutoSort.Tx
 
         // ============================ public API: GUI/automation ============================
 
-        internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
             RequestAdd(container, srcInv, item, amount, wantX, wantY, onDone, false);
         }
 
-        internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint> onDone, bool alreadyRemoved)
+        internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, bool alreadyRemoved)
         {
             // A stale grid may report a cell outside the inventory (beyond W/H):
             // then auto-place instead of refusing (like click-move).
@@ -175,11 +175,11 @@ namespace BestAutoSort.Tx
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
                 int accepted = ReadAcceptedAt(pkg, 0);
-                CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone, alreadyRemoved);
+                CompleteAdd(srcInv, item, opItem, accepted, status, rev, container, onDone, alreadyRemoved, disp);
             }, 0L, null, 1);
         }
 
-        internal static void RequestAddBatch(Container container, Inventory srcInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestAddBatch(Container container, Inventory srcInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
             if (items == null || items.Count == 0)
                 return;
@@ -196,7 +196,7 @@ namespace BestAutoSort.Tx
                     TellPlayer("Chest request outcome unknown. Check the chest before retrying.");
                     RefreshNow(container);
                     if (onDone != null)
-                        onDone(EmptyCountBody(), status, rev);
+                        onDone(EmptyCountBody(), status, rev, disp);
                     return;
                 }
                 if (disp == TxCompletionKind.CommittedMultiAddDetailsUnavailable)
@@ -208,15 +208,15 @@ namespace BestAutoSort.Tx
                     TellPlayer("Chest applied the move but per-item counts are unknown. Check the chest before retrying.");
                     RefreshNow(container);
                     if (onDone != null)
-                        onDone(EmptyCountBody(), status, rev);
+                        onDone(EmptyCountBody(), status, rev, disp);
                     return;
                 }
                 List<int> accepted = ReadAcceptedList(pkg, items.Count);
                 for (int i = 0; i < items.Count && i < accepted.Count; i++)
-                    CompleteAdd(srcInv, null, items[i], accepted[i], status, rev, container, null);
+                    CompleteAdd(srcInv, null, items[i], accepted[i], status, rev, container, null, false, disp);
                 RefreshNow(container);
                 if (onDone != null)
-                    onDone(pkg, status, rev);
+                    onDone(pkg, status, rev, disp);
             }, 0L, null, items.Count);
         }
 
@@ -257,7 +257,7 @@ namespace BestAutoSort.Tx
             return opItem;
         }
 
-        internal static void RequestTake(Container container, Inventory dstInv, ItemData snapshot, int amount, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1)
+        internal static void RequestTake(Container container, Inventory dstInv, ItemData snapshot, int amount, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, int wantDstX = -1, int wantDstY = -1)
         {
             TxOpItem opItem = SnapshotItem(snapshot, amount, -1, -1);
             if (opItem == null)
@@ -267,11 +267,11 @@ namespace BestAutoSort.Tx
             call.Items.Add(opItem);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, onDone, wantDstX, wantDstY);
+                CompleteTake(dstInv, pkg, status, rev, container, onDone, wantDstX, wantDstY, null, disp);
             });
         }
 
-        internal static void RequestTakeBatchChunked(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestTakeBatchChunked(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
             if (items == null || items.Count == 0)
                 return;
@@ -289,7 +289,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        internal static void RequestTakeBatch(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestTakeBatch(Container container, Inventory dstInv, List<TxOpItem> items, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
             if (items == null || items.Count == 0)
                 return;
@@ -298,11 +298,11 @@ namespace BestAutoSort.Tx
             call.Items.AddRange(items);
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, onDone);
+                CompleteTake(dstInv, pkg, status, rev, container, onDone, -1, -1, null, disp);
             });
         }
 
-        internal static void RequestMove(Container container, ItemData snapshot, int amount, int dstX, int dstY, Action<ZPackage, TxStatus, uint> onDone)
+        internal static void RequestMove(Container container, ItemData snapshot, int amount, int dstX, int dstY, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
             TxOpItem opItem = SnapshotItem(snapshot, amount, -1, -1);
             if (opItem == null)
@@ -320,7 +320,7 @@ namespace BestAutoSort.Tx
                 else if (status == TxStatus.Rejected)
                     TellPlayer("The shared chest changed. Try that item move again.");
                 if (onDone != null)
-                    onDone(pkg, status, rev);
+                    onDone(pkg, status, rev, disp);
             });
         }
 
@@ -398,6 +398,47 @@ namespace BestAutoSort.Tx
             job.BaseRev = CurrentRevision(container);
             job.Call = call;
             job.Complete = onDone;
+            if (state.RingCorrupt)
+            {
+                // Fail closed: persisted state untrustworthy, mutate nothing.
+                TxLog.Warn("tx=" + job.TxId + " local refused: ring corrupt (fail closed)");
+                if (onDone != null)
+                {
+                    StoredResult u = new StoredResult();
+                    u.Op = call.Op;
+                    u.Status = TxStatus.UnknownTx;
+                    u.Revision = CurrentRevision(container);
+                    onDone(u);
+                }
+                return;
+            }
+            if (IsFloorStale(state, job.TxId))
+            {
+                // Same-txId/counter already recorded: indeterminate, never execute.
+                TxLog.Warn("tx=" + job.TxId + " local refused: at/below execution floor (indeterminate)");
+                if (onDone != null)
+                {
+                    StoredResult u = new StoredResult();
+                    u.Op = call.Op;
+                    u.Status = TxStatus.UnknownTx;
+                    u.Revision = CurrentRevision(container);
+                    onDone(u);
+                }
+                return;
+            }
+            if (IsFloorCappedFor(state, job.TxId))
+            {
+                TxLog.Warn("tx=" + job.TxId + " local refused: execution floor at capacity (fail closed)");
+                if (onDone != null)
+                {
+                    StoredResult u = new StoredResult();
+                    u.Op = call.Op;
+                    u.Status = TxStatus.UnknownTx;
+                    u.Revision = CurrentRevision(container);
+                    onDone(u);
+                }
+                return;
+            }
             state.Queue.Enqueue(job);
             Drain(state);
             }
@@ -450,11 +491,18 @@ namespace BestAutoSort.Tx
                 ChestState state = GetState(container);
                 if (state != null)
                 {
-                    RejectQueued(state);
-                    state.Queue.Clear();
+                    // Queued-but-unapplied jobs must keep a stable outcome: seed
+                    // them as Rejected in the FRESH cache (nothing was applied, so
+                    // the sender retries as a NEW tx) instead of letting the same
+                    // txId execute later and flip to Accepted.
+                    List<TxJob> dropped = DequeueAll(state);
                     state.Processed.Clear();
                     state.ProcOrder.Clear();
                     SeedFromRing(state, ReadRing(container));
+                    foreach (TxJob dj in dropped)
+                        SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true);
+                    foreach (TxJob dj in dropped)
+                        AnswerReject(state, dj);
                     state.LastOwner = ZNet.GetUID();
                 }
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " structural acquire by " + ZNet.GetUID());
@@ -548,7 +596,10 @@ namespace BestAutoSort.Tx
                         catch
                         {
                         }
-                        onDone(body, r.Status, r.Revision, TxCompletionKind.Normal);
+                        TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
+                        bool totals = (r != null) && r.TotalsOnly;
+                        onDone(body, st, (r != null) ? r.Revision : CurrentRevision(container),
+                            TxResponsePolicy.Classify(st, totals, call.Op, call.Items.Count));
                     }
                 }, playerId, actorPos);
                 return;
@@ -715,13 +766,29 @@ namespace BestAutoSort.Tx
             Vector3 actorPos;
             if (!DecodeCall(payload, out call, out baseRev, out playerId, out actorPos))
             {
+                // Undecodable: indeterminate (never applied, never cached). The
+                // client resends byte-identical bytes on timeout, so the retry
+                // answers the same way — stable without poisoning the txId.
                 TxLog.Warn("tx=" + txId + " undecodable request from " + sender);
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, TxOp.Query);
                 return;
             }
+            ChestState state = GetState(container);
+            if (state == null)
+                return;
             if (!TxNet.IsCompatiblePeer(sender) && sender != ZNet.GetUID())
             {
+                // Cache first: a committed txId keeps its ORIGINAL outcome even
+                // when re-sent over a version-skewed link — never overwrite it
+                // with a fresh Rejected (same sender-mismatch rule as replays).
+                if (TryRespondCached(container, sender, txId, state))
+                    return;
+                // Deterministic version mismatch: persist the definitive Rejected
+                // so the same txId can never execute later (not even after handoff).
                 TxLog.Warn("tx=" + txId + " REJECT incompatible peer " + sender);
-                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), true, call.Op);
+                SeedReject(state, txId, call.Op, sender, true);
+                WriteRing(state);
+                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
             if ((call.Op == TxOp.ViewerOpen || call.Op == TxOp.ViewerClose))
@@ -736,16 +803,77 @@ namespace BestAutoSort.Tx
                 RespondQuery(container, sender, txId);
                 return;
             }
+            if (sender != TxIdGen.PeerOf(txId))
+            {
+                // Cache first: a committed txId keeps its ORIGINAL outcome even
+                // when re-sent with mismatched sender bytes — never overwrite
+                // it with a fresh spoof Rejected (stranger => Rejected without
+                // payload; true sender => original status/body).
+                if (TryRespondCached(container, sender, txId, state))
+                    return;
+                // Spoofed txId (authenticated sender disagrees with the txId peer
+                // bits). Cache Rejected under the PEER (not the spoofer) without
+                // advancing the floor: the exact counter is blocked, lower/upper
+                // counters of the true owner are unaffected.
+                TxLog.Warn("tx=" + txId + " REJECT sender/txId mismatch sender=" + sender);
+                SeedReject(state, txId, call.Op, TxIdGen.PeerOf(txId), false);
+                WriteRing(state);
+                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
+                return;
+            }
+            StoredResult replay;
+            if (state.Processed.TryGetValue(txId, out replay) && replay != null)
+            {
+                // Authenticated replay BEFORE access re-evaluation: a committed
+                // retry must return its original outcome even after permissions
+                // changed — re-checking access here would flip it to Rejected.
+                if (replay.Sender != 0 && replay.Sender != sender)
+                {
+                    // Stranger asking for another sender's tx: reject WITHOUT the
+                    // cached payload (never leak Take bytes across senders).
+                    TxLog.Warn("tx=" + txId + " REJECT replay sender mismatch sender=" + sender);
+                    Respond(container, sender, txId, TxStatus.Rejected, replay.Revision, new ZPackage(), false, replay.Op);
+                    return;
+                }
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " REPLAY status=" + replay.Status);
+                Respond(container, sender, txId, replay.Status, replay.Revision,
+                    EncodeCachedBody(replay), replay.TotalsOnly, replay.Op);
+                return;
+            }
+            if (state.RingCorrupt)
+            {
+                // Fail closed: persisted state untrustworthy, mutate nothing.
+                TxLog.Warn("tx=" + txId + " refused: ring corrupt (fail closed)");
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
+            if (IsFloorStale(state, txId))
+            {
+                // At/below the sender's high-water with no record: evicted,
+                // rejected-and-forgotten, or out-of-order. Indeterminate — never
+                // execute (a forgotten Rejected would flip to Accepted here).
+                TxLog.Warn("tx=" + txId + " refused: at/below execution floor (indeterminate, never executes)");
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
+            if (IsFloorCappedFor(state, txId))
+            {
+                // The floor never evicts: refuse new-peer mutations loudly.
+                // Nothing cached or executed, so retries answer identically.
+                TxLog.Warn("tx=" + txId + " refused: execution floor at capacity (fail closed)");
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
             string accessWhy;
             if (!ChestAuthority.CanUse(container, sender, playerId, actorPos, out accessWhy))
             {
+                // Persist the definitive Rejected: same txId, same answer forever.
                 LogAccessReject(container, txId, sender, playerId, call.Op, accessWhy);
-                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), true, call.Op);
+                SeedReject(state, txId, call.Op, sender, true);
+                WriteRing(state);
+                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
-            ChestState state = GetState(container);
-            if (state == null)
-                return;
             TxJob job = new TxJob();
             job.Container = container;
             job.TxId = txId;
@@ -942,13 +1070,18 @@ namespace BestAutoSort.Tx
                     }
                     catch (Exception ex)
                     {
-                        // A throwing op (e.g. structural reflection) must not wedge
-                        // the queue with the sender hanging: answer Rejected.
+                        // The op may have mutated before throwing (inventory and
+                        // ring writes are not atomic): commitment is unknowable, so
+                        // answer INDETERMINATE — never a definitive Rejected that a
+                        // later retry could contradict by executing. The floor still
+                        // advances so the same txId can never execute later.
                         TxLog.Error("tx=" + job.TxId + " apply failed: " + ex.Message);
                         result = new StoredResult();
                         result.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                        result.Status = TxStatus.Rejected;
+                        result.Status = TxStatus.UnknownTx;
                         result.Revision = CurrentRevision(state.Container);
+                        AdvanceFloor(state, job.TxId);
+                        WriteRing(state);
                     }
                     try
                     {
@@ -959,7 +1092,8 @@ namespace BestAutoSort.Tx
                     {
                         TxLog.Error("tx=" + job.TxId + " completion failed: " + ex.Message);
                     }
-                    if ((job.Call.Op == TxOp.Add || job.Call.Op == TxOp.AddBatch || job.Call.Op == TxOp.TakeBatch)
+                    if (!result.IsReplay
+                        && (job.Call.Op == TxOp.Add || job.Call.Op == TxOp.AddBatch || job.Call.Op == TxOp.TakeBatch)
                         && result.AcceptedTotal() > 0)
                     {
                         // Броадкаст с target 0 заходит и локально (loopback),
@@ -976,27 +1110,66 @@ namespace BestAutoSort.Tx
 
         private static StoredResult ApplyJob(ChestState state, TxJob job)
         {
-            // Idempotency: same txId repeated.
+            // Idempotency is absolute: the ORIGINAL outcome is returned and a
+            // committed tx is NEVER re-applied, even when the cache entry is
+            // totals-only after a handoff. Re-pulling live stock for a Take retry
+            // double-debits the chest while the client credits once (or zero
+            // times on Query). Authenticated replay identity is checked first:
+            // a stranger gets Rejected with no payload, never another sender's
+            // Take bytes.
             StoredResult cached;
             if (state.Processed.TryGetValue(job.TxId, out cached))
             {
-                // Idempotency is absolute: a committed tx is NEVER re-applied, even
-                // when the cache entry is totals-only after a handoff. Re-pulling
-                // live stock for a Take retry double-debits the chest while the
-                // client credits once (or zero times on Query).
-                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " DUPLICATE returning cached result");
-                return CloneStored(cached, TxStatus.Duplicate);
+                if (cached.Sender != 0 && cached.Sender != job.Sender)
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REPLAY sender mismatch");
+                    StoredResult denied = new StoredResult();
+                    denied.Op = cached.Op;
+                    denied.Status = TxStatus.Rejected;
+                    denied.Revision = cached.Revision;
+                    return denied;
+                }
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REPLAY status=" + cached.Status);
+                return CloneStored(cached, cached.Status, true);
+            }
+            if (state.RingCorrupt)
+            {
+                // Fail closed (recheck: the ring may have loaded corrupt after
+                // the request was enqueued). Mutate nothing.
+                StoredResult u = new StoredResult();
+                u.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                u.Status = TxStatus.UnknownTx;
+                u.Revision = CurrentRevision(job.Container);
+                return u;
+            }
+            if (IsFloorStale(state, job.TxId))
+            {
+                // Recheck: a same-peer newer tx may have committed while queued.
+                StoredResult u = new StoredResult();
+                u.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                u.Status = TxStatus.UnknownTx;
+                u.Revision = CurrentRevision(job.Container);
+                return u;
             }
             Inventory inv = job.Container.GetInventory();
             if (inv == null)
-                return Reject(state, job);
-            StoredResult result = ExecuteCall(state, job, inv);
-            CommitResult(state, job, result);
+            {
+                // Persist the rejection like any other terminal outcome so the
+                // same txId keeps its answer (CommitResult caches everything).
+                StoredResult result = new StoredResult();
+                result.Op = job.Call.Op;
+                result.Status = TxStatus.Rejected;
+                CommitResult(state, job, result);
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REJECT op=" + job.Call.Op);
+                return result;
+            }
+            StoredResult applied = ExecuteCall(state, job, inv);
+            CommitResult(state, job, applied);
             uint baseRev = job.BaseRev;
             uint now = CurrentRevision(job.Container);
-            if (baseRev != 0u && baseRev != now && baseRev != result.Revision)
+            if (baseRev != 0u && baseRev != now && baseRev != applied.Revision)
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " stale_revision client=" + baseRev + " server=" + now);
-            return result;
+            return applied;
         }
 
         private static StoredResult ExecuteCall(ChestState state, TxJob job, Inventory inv)
@@ -1306,10 +1479,14 @@ namespace BestAutoSort.Tx
             // ZDO.Set(RingKey): the ring write itself may bump the revision, so
             // a read-back would describe the ring write, not the commit.
             result.Revision = CurrentRevision(state.Container);
-            // The just-committed tx enters the cache BEFORE the ring snapshot
-            // is built: an immediate handoff otherwise exposes a ring without
-            // its idempotency record and the replay re-applies (double-apply).
-            state.Processed[job.TxId] = CloneStored(result, result.Status);
+            // Authenticated committer, stamped before caching: replays check it.
+            result.Sender = job.Sender;
+            result.IsReplay = false;
+            // EVERY terminal outcome is cached (including Rejected) BEFORE the
+            // ring snapshot is built: an immediate handoff otherwise exposes a
+            // ring without its idempotency record and the replay re-applies
+            // (double-apply) or flips Rejected to Accepted.
+            state.Processed[job.TxId] = CloneStored(result, result.Status, false);
             state.ProcOrder.AddLast(job.TxId);
             while (state.ProcOrder.Count > TxLimits.ProcessedCacheCap)
             {
@@ -1317,20 +1494,13 @@ namespace BestAutoSort.Tx
                 state.ProcOrder.RemoveFirst();
                 state.Processed.Remove(oldest);
             }
-            if (mutated)
-                WriteRing(state);
+            AdvanceFloor(state, job.TxId);
+            // The ring carries every terminal outcome now (v2), so it is
+            // rewritten on rejections too — WriteRing skips the ZDO write when
+            // the bytes are unchanged.
+            WriteRing(state);
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                 + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
-        }
-
-        private static StoredResult Reject(ChestState state, TxJob job)
-        {
-            StoredResult result = new StoredResult();
-            result.Op = job.Call.Op;
-            result.Status = TxStatus.Rejected;
-            result.Revision = CurrentRevision(job.Container);
-            TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REJECT op=" + job.Call.Op);
-            return result;
         }
 
         private static StoredResult RejectNew()
@@ -1340,7 +1510,7 @@ namespace BestAutoSort.Tx
             return result;
         }
 
-        private static StoredResult CloneStored(StoredResult src, TxStatus status)
+        private static StoredResult CloneStored(StoredResult src, TxStatus status, bool isReplay)
         {
             StoredResult r = new StoredResult();
             r.Op = src.Op;
@@ -1349,12 +1519,158 @@ namespace BestAutoSort.Tx
             r.Accepted = new List<int>(src.Accepted);
             r.Takes = new List<TakeEntry>(src.Takes);
             r.TotalsOnly = src.TotalsOnly;
+            r.Sender = src.Sender;
+            r.IsReplay = isReplay;
             return r;
         }
 
         private static bool IsTakeOp(TxOp op)
         {
             return op == TxOp.Take || op == TxOp.TakeBatch;
+        }
+
+        // ============================ manager: execution floor ============================
+
+        /// <summary>
+        /// Durable per-sender execution floor: peer -&gt; highest tx counter seen.
+        /// Capped at FloorCap peers, NEVER evicted — reaching the cap refuses
+        /// new-peer mutations loudly (fail closed) instead of recreating the
+        /// eviction bug. An absent txId at/below high-water is indeterminate.
+        /// </summary>
+        private static void AdvanceFloor(ChestState state, long txId)
+        {
+            long peer = TxIdGen.PeerOf(txId);
+            uint ctr = (uint)(txId & 0xFFFFFFFFL);
+            uint hw;
+            if (state.Floor.TryGetValue(peer, out hw))
+            {
+                if (ctr > hw)
+                    state.Floor[peer] = ctr;
+            }
+            else if (state.Floor.Count < TxLimits.FloorCap)
+            {
+                state.Floor[peer] = ctr;
+            }
+        }
+
+        private static bool IsFloorStale(ChestState state, long txId)
+        {
+            if (state.Processed.ContainsKey(txId))
+                return false;
+            uint hw;
+            if (!state.Floor.TryGetValue(TxIdGen.PeerOf(txId), out hw))
+                return false;
+            return (uint)(txId & 0xFFFFFFFFL) <= hw;
+        }
+
+        private static bool IsFloorCappedFor(ChestState state, long txId)
+        {
+            if (state.Processed.ContainsKey(txId))
+                return false;
+            if (state.Floor.ContainsKey(TxIdGen.PeerOf(txId)))
+                return false;
+            return state.Floor.Count >= TxLimits.FloorCap;
+        }
+
+        /// <summary>
+        /// Answer from the idempotency cache for pre-replay branches
+        /// (version-skew / spoof resends): a committed txId keeps its ORIGINAL
+        /// outcome — the caller must return without seeding anything.
+        /// Same sender-mismatch rule as replays: a stranger gets Rejected with
+        /// no payload (never another sender's Take bytes); the true sender
+        /// replays the original status/body. Returns true when answered.
+        /// </summary>
+        private static bool TryRespondCached(Container container, long sender, long txId, ChestState state)
+        {
+            StoredResult hit;
+            if (!state.Processed.TryGetValue(txId, out hit) || hit == null)
+                return false;
+            if (hit.Sender != 0L && hit.Sender != sender)
+            {
+                TxLog.Warn("tx=" + txId + " cached answer sender mismatch sender=" + sender);
+                Respond(container, sender, txId, TxStatus.Rejected, hit.Revision, new ZPackage(), false, hit.Op);
+                return true;
+            }
+            TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " CACHED status=" + hit.Status);
+            Respond(container, sender, txId, hit.Status, hit.Revision,
+                EncodeCachedBody(hit), hit.TotalsOnly, hit.Op);
+            return true;
+        }
+
+        /// <summary>
+        /// Seed a definitive Rejected outcome into the fresh cache (pre-queue
+        /// rejects: incompatible peer, access denial, spoof) so the same txId
+        /// keeps its answer forever. Advances the floor unless told otherwise
+        /// (spoof entries must not push the true owner's high-water).
+        /// Never overwrites a committed outcome: pre-replay callers answer from
+        /// cache first (TryRespondCached), and this guard keeps the seeding
+        /// itself idempotent (no outcome flip, no duplicate ProcOrder entry).
+        /// </summary>
+        private static void SeedReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
+        {
+            if (state.Processed.ContainsKey(txId))
+                return;
+            StoredResult r = new StoredResult();
+            r.Op = op;
+            r.Status = TxStatus.Rejected;
+            try
+            {
+                ZNetView nv = TxReflect.GetNetView(state.Container);
+                r.Revision = (nv != null && nv.IsValid()) ? nv.GetZDO().DataRevision : 0u;
+            }
+            catch
+            {
+                r.Revision = 0u;
+            }
+            r.Sender = storedSender;
+            r.IsReplay = false;
+            state.Processed[txId] = r;
+            if (!state.ProcOrder.Contains(txId))
+                state.ProcOrder.AddLast(txId);
+            while (state.ProcOrder.Count > TxLimits.ProcessedCacheCap)
+            {
+                long oldest = state.ProcOrder.First.Value;
+                state.ProcOrder.RemoveFirst();
+                state.Processed.Remove(oldest);
+            }
+            if (advanceFloor)
+                AdvanceFloor(state, txId);
+        }
+
+        /// <summary>Drop the whole queue without answering (caller seeds then answers).</summary>
+        private static List<TxJob> DequeueAll(ChestState state)
+        {
+            List<TxJob> dropped = new List<TxJob>(state.Queue.Count);
+            while (state.Queue.Count > 0)
+                dropped.Add(state.Queue.Dequeue());
+            return dropped;
+        }
+
+        /// <summary>Answer one dropped queued-but-unapplied job as Rejected (nothing applied).</summary>
+        private static void AnswerReject(ChestState state, TxJob job)
+        {
+            try
+            {
+                StoredResult r = new StoredResult();
+                r.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                r.Status = TxStatus.Rejected;
+                try
+                {
+                    ZNetView nv = TxReflect.GetNetView(state.Container);
+                    r.Revision = (nv != null && nv.IsValid()) ? nv.GetZDO().DataRevision : 0u;
+                }
+                catch
+                {
+                    r.Revision = 0u;
+                }
+                r.Sender = job.Sender;
+                if (job.Complete != null)
+                    job.Complete(r);
+            }
+            catch (Exception ex)
+            {
+                TxLog.Error("tx=" + job.TxId + " reject-queued failed: " + ex.Message);
+            }
         }
 
         // ============================ manager: ring persist ============================
@@ -1368,9 +1684,8 @@ namespace BestAutoSort.Tx
                     return;
                 // ProcOrder is oldest-first and already includes the
                 // just-committed tx (CommitResult caches before writing).
-                // TxRing.Snapshot keeps only committed entries: a persisted
-                // Rejected would resurrect as Duplicate (= committed) in
-                // SeedFromRing and falsely imply commitment.
+                // v2 persists EVERY terminal outcome with its original status:
+                // a forgotten Rejected would otherwise resurrect as Accepted.
                 List<RingSlot> slots = new List<RingSlot>(state.ProcOrder.Count);
                 LinkedListNode<long> node = state.ProcOrder.First;
                 while (node != null)
@@ -1383,12 +1698,22 @@ namespace BestAutoSort.Tx
                         s.AcceptedTotal = r.AcceptedTotal();
                         s.Revision = r.Revision;
                         s.Status = r.Status;
+                        s.Op = r.Op;
+                        s.Sender = r.Sender != 0L ? r.Sender : TxIdGen.PeerOf(node.Value);
+                        s.Accepted = new List<int>(r.Accepted);
+                        s.TakePayloads = BuildRingTakePayloads(r);
                         slots.Add(s);
                     }
                     node = node.Next;
                 }
                 List<RingEntry> ring = TxRing.Snapshot(slots);
-                netView.GetZDO().Set(RingKey, TxCore.TxCore.EncodeRing(ring));
+                // The next successful mutation rewrites v2; legacy v1 ZDO bytes
+                // are only ever read (never migrated in place, no world migration).
+                byte[] bytes = TxCore.TxCore.EncodeRingV2(ring, state.Floor);
+                if (SameBytes(bytes, state.LastRingBytes))
+                    return;
+                state.LastRingBytes = bytes;
+                netView.GetZDO().Set(RingKey, bytes);
             }
             catch (Exception ex)
             {
@@ -1396,40 +1721,193 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static List<RingEntry> ReadRing(Container container)
+        /// <summary>
+        /// Take payloads for the ring: the ACTUAL debited item bytes
+        /// (TakeEntry.Item.Save + prefab hash). Request snapshots are NOT
+        /// sufficient: matching does not establish equality of custom data or
+        /// durability, and a reserve-respecting Take may draw from a different
+        /// live stack. Anything uncapturable (oversize, uncapturable, misaligned)
+        /// yields null = inexact: the entry restores totals-only, never fabricated.
+        /// </summary>
+        private static List<TakePayload> BuildRingTakePayloads(StoredResult r)
+        {
+            if (r.Op != TxOp.Take && r.Op != TxOp.TakeBatch)
+                return null;
+            if (r.TotalsOnly)
+                return null;
+            if (r.Takes == null || r.Takes.Count != r.Accepted.Count)
+                return null;
+            List<TakePayload> blobs = new List<TakePayload>(r.Accepted.Count);
+            for (int i = 0; i < r.Accepted.Count; i++)
+            {
+                if (r.Accepted[i] <= 0)
+                {
+                    blobs.Add(null);
+                    continue;
+                }
+                TakeEntry e = r.Takes[i];
+                if (e == null || e.Item == null)
+                    return null;
+                byte[] bytes;
+                try
+                {
+                    ZPackage inner = new ZPackage();
+                    e.Item.Save(inner);
+                    bytes = inner.GetArray();
+                }
+                catch
+                {
+                    return null;
+                }
+                if (bytes == null || bytes.Length == 0 || bytes.Length > TxLimits.MaxTakePayloadBytes)
+                    return null;
+                TakePayload p = new TakePayload();
+                p.PrefabHash = e.PrefabHash;
+                p.Bytes = bytes;
+                blobs.Add(p);
+            }
+            return blobs;
+        }
+
+        private static RingData ReadRing(Container container)
         {
             try
             {
                 ZNetView netView = TxReflect.GetNetView(container);
                 if ((Object)netView == (Object)null || !netView.IsValid())
-                    return new List<RingEntry>();
+                    return new RingData();
                 byte[] bytes = netView.GetZDO().GetByteArray(RingKey.GetStableHashCode());
                 if (bytes == null)
-                    return new List<RingEntry>();
-                return TxCore.TxCore.DecodeRing(bytes);
+                    return new RingData();
+                return TxCore.TxCore.DecodeEnvelope(bytes);
             }
             catch (Exception)
             {
-                return new List<RingEntry>();
+                RingData bad = new RingData();
+                bad.Corrupt = true;
+                return bad;
             }
         }
 
-        private static void SeedFromRing(ChestState state, List<RingEntry> ring)
+        private static void SeedFromRing(ChestState state, RingData data)
         {
-            // The ring holds committed entries only (WriteRing filters via
-            // TxRing), so restoring each as Duplicate (= committed) is sound.
+            // True reset of the idempotency state, then restore. v2 entries keep
+            // their ORIGINAL status with exact payloads when available; legacy
+            // v1 entries (Status==Duplicate) restore totals-only. A corrupt
+            // payload fails closed: empty caches + RingCorrupt (no mutation).
             state.Processed.Clear();
             state.ProcOrder.Clear();
-            for (int i = 0; i < ring.Count && i < TxLimits.RingCap; i++)
+            state.Floor.Clear();
+            state.LastRingBytes = null;
+            state.RingCorrupt = false;
+            if (data == null)
+                return;
+            if (data.Corrupt)
             {
-                StoredResult r = new StoredResult();
-                r.Status = TxStatus.Duplicate;
-                r.Revision = ring[i].Revision;
-                r.Accepted = new List<int> { ring[i].AcceptedTotal };
-                r.TotalsOnly = true;
-                state.Processed[ring[i].TxId] = r;
-                state.ProcOrder.AddLast(ring[i].TxId);
+                state.RingCorrupt = true;
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " ring corrupt: fail closed (no mutations until trustworthy state)");
+                return;
             }
+            if (data.Floor != null)
+            {
+                foreach (KeyValuePair<long, uint> kv in data.Floor)
+                {
+                    if (state.Floor.Count >= TxLimits.FloorCap)
+                        break;
+                    state.Floor[kv.Key] = kv.Value;
+                }
+            }
+            if (data.Entries == null)
+                return;
+            for (int i = 0; i < data.Entries.Count && i < TxLimits.RingCap; i++)
+            {
+                RingEntry e = data.Entries[i];
+                StoredResult r = new StoredResult();
+                r.Op = e.Op;
+                r.Revision = e.Revision;
+                r.Sender = e.Sender != 0L ? e.Sender : TxIdGen.PeerOf(e.TxId);
+                r.IsReplay = false;
+                if (e.Status == TxStatus.Duplicate)
+                {
+                    // Legacy v1: original status genuinely unavailable.
+                    r.Status = TxStatus.Duplicate;
+                    r.Accepted = new List<int> { e.AcceptedTotal };
+                    r.TotalsOnly = true;
+                }
+                else if (TxRing.IsExactEntry(e))
+                {
+                    r.Status = e.Status;
+                    r.Accepted = e.Accepted != null ? new List<int>(e.Accepted) : new List<int>();
+                    r.TotalsOnly = false;
+                    r.Takes = RestoreTakeEntries(e, r.Accepted, out bool takesOk);
+                    if (!takesOk)
+                    {
+                        // Prefab gone: payloads undecodable — totals-only, no fabrication.
+                        r.Takes = new List<TakeEntry>();
+                        r.TotalsOnly = true;
+                    }
+                }
+                else
+                {
+                    // Original status preserved, payloads gone: totals-only.
+                    r.Status = e.Status;
+                    r.Accepted = e.Accepted != null ? new List<int>(e.Accepted) : new List<int> { e.AcceptedTotal };
+                    r.TotalsOnly = true;
+                }
+                state.Processed[e.TxId] = r;
+                state.ProcOrder.AddLast(e.TxId);
+            }
+        }
+
+        /// <summary>
+        /// Rebuild Take entries from ring blobs (manager-side, ObjectDB available).
+        /// Returns false when any payload is undecodable (caller falls back totals-only).
+        /// </summary>
+        private static List<TakeEntry> RestoreTakeEntries(RingEntry e, List<int> accepted, out bool ok)
+        {
+            ok = true;
+            List<TakeEntry> takes = new List<TakeEntry>();
+            if (e.Op != TxOp.Take && e.Op != TxOp.TakeBatch)
+                return takes;
+            if (e.TakePayloads == null || accepted == null || e.TakePayloads.Count != accepted.Count)
+            {
+                ok = false;
+                return takes;
+            }
+            for (int i = 0; i < accepted.Count; i++)
+            {
+                if (accepted[i] <= 0)
+                {
+                    takes.Add(null);
+                    continue;
+                }
+                TakePayload p = e.TakePayloads[i];
+                if (p == null || p.Bytes == null)
+                {
+                    ok = false;
+                    return new List<TakeEntry>();
+                }
+                ItemData item;
+                try
+                {
+                    item = TxCodec.ResolvePrefab(p.PrefabHash, new ZPackage(p.Bytes));
+                }
+                catch
+                {
+                    item = null;
+                }
+                if (item == null)
+                {
+                    ok = false;
+                    return new List<TakeEntry>();
+                }
+                TakeEntry te = new TakeEntry();
+                te.PrefabHash = p.PrefabHash;
+                te.Item = item;
+                te.Accepted = accepted[i];
+                takes.Add(te);
+            }
+            return takes;
         }
     }
 }

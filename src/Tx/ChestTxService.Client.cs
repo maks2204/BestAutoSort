@@ -98,8 +98,17 @@ namespace BestAutoSort.Tx
             StoredResult cached;
             if (state.Processed.TryGetValue(txId, out cached))
             {
-                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " QUERY hit");
-                Respond(container, sender, txId, TxStatus.Duplicate, cached.Revision,
+                // Original outcome (never coerced to Duplicate): the same txId
+                // keeps its answer forever. A stranger gets Rejected with no
+                // payload — never another sender's Take bytes.
+                if (cached.Sender != 0L && cached.Sender != sender)
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " QUERY sender mismatch");
+                    Respond(container, sender, txId, TxStatus.Rejected, cached.Revision, new ZPackage(), false, cached.Op);
+                    return;
+                }
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " QUERY hit status=" + cached.Status);
+                Respond(container, sender, txId, cached.Status, cached.Revision,
                     EncodeCachedBody(cached), cached.TotalsOnly, cached.Op);
                 return;
             }
@@ -397,9 +406,9 @@ namespace BestAutoSort.Tx
             return res;
         }
 
-        private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone)
+        private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
-            CompleteAdd(srcInv, itemRef, sent, accepted, status, rev, container, onDone, false);
+            CompleteAdd(srcInv, itemRef, sent, accepted, status, rev, container, onDone, false, TxCompletionKind.Normal);
         }
 
         private static void LogNonMainInventory(string op, Inventory inv)
@@ -415,7 +424,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, bool alreadyRemoved)
+        private static void CompleteAdd(Inventory srcInv, ItemData itemRef, TxOpItem sent, int accepted, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, bool alreadyRemoved, TxCompletionKind disp)
         {
             LogNonMainInventory("add", srcInv);
             if (alreadyRemoved)
@@ -429,7 +438,7 @@ namespace BestAutoSort.Tx
                 else if (status == TxStatus.Rejected)
                     TellPlayer("The shared chest refused the move. Try again.");
                 if (onDone != null)
-                    onDone(null, status, rev);
+                    onDone(null, status, rev, disp);
                 return;
             }
             if (accepted > 0 && srcInv != null && sent != null)
@@ -453,7 +462,7 @@ namespace BestAutoSort.Tx
             else if (status == TxStatus.Rejected)
                 TellPlayer("The shared chest refused the move. Try again.");
             if (onDone != null)
-                onDone(null, status, rev);
+                onDone(null, status, rev, disp);
         }
 
         private static void RestoreDragRemainder(Inventory srcInv, ItemData itemRef, int accepted)
@@ -493,7 +502,7 @@ namespace BestAutoSort.Tx
                 return;
             List<TxOpItem> items = new List<TxOpItem>();
             items.Add(burn);
-            RequestTakeCustom(container, items, false, delegate (List<DecodedTake> decoded, TxStatus status, uint rev)
+            RequestTakeCustom(container, items, false, delegate (List<DecodedTake> decoded, TxStatus status, uint rev, TxCompletionKind burnDisp)
             {
                 int took = 0;
                 if (decoded != null)
@@ -504,11 +513,11 @@ namespace BestAutoSort.Tx
                             took += dt.Accepted;
                     }
                 }
-                if (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate)
+                if (burnDisp == TxCompletionKind.Indeterminate || (status != TxStatus.Accepted && status != TxStatus.Partial && status != TxStatus.Duplicate))
                 {
                     // Rejected OR indeterminate (UnknownTx): never retry the burn —
                     // retrying an uncertain corrective Take double-debits. Loud.
-                    TxLog.Warn("short-removal burn not applied (" + status + "), excess stays in chest — check the chest");
+                    TxLog.Warn("short-removal burn not applied (" + status + "/" + burnDisp + "), excess stays in chest — check the chest");
                     TellPlayer("Chest could not correct an over-deposit. Check the chest.");
                 }
                 else if (took < amount)
@@ -522,7 +531,7 @@ namespace BestAutoSort.Tx
             });
         }
 
-        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint> onDone, int wantDstX = -1, int wantDstY = -1, Action<System.Collections.Generic.Dictionary<string, int>> onPlaced = null)
+        private static void CompleteTake(Inventory dstInv, ZPackage pkg, TxStatus status, uint rev, Container container, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, int wantDstX = -1, int wantDstY = -1, Action<System.Collections.Generic.Dictionary<string, int>> onPlaced = null, TxCompletionKind disp = TxCompletionKind.Normal)
         {
             LogNonMainInventory("take", dstInv);
             if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && dstInv != null && pkg != null)
@@ -617,7 +626,7 @@ namespace BestAutoSort.Tx
             else if (status == TxStatus.Rejected)
                 TellPlayer("The shared chest changed. Try again.");
             if (onDone != null)
-                onDone(pkg, status, rev);
+                onDone(pkg, status, rev, disp);
         }
 
         private static void CompensateTakeBack(Container container, int prefabHash, ZPackage inner, int amount)
@@ -708,15 +717,19 @@ namespace BestAutoSort.Tx
         {
             Submit(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
-                CompleteTake(dstInv, pkg, status, rev, container, null, -1, -1, onLanded);
+                CompleteTake(dstInv, pkg, status, rev, container, null, -1, -1, onLanded, disp);
             });
         }
 
         /// <summary>
         /// Take request with custom completion for automation (production, feeding, restock).
         /// Received items are NOT placed anywhere automatically — onDone decides.
+        /// The completion disposition is propagated: Indeterminate means no retry,
+        /// no compensate-as-failed, no feeding and no second Take — the chest may
+        /// already have been debited. A null/corrupt body never converts an
+        /// Indeterminate outcome into a Rejected one.
         /// </summary>
-        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint> onDone, long playerId = 0L, Vector3? actorPos = null)
+        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null)
         {
             if (items == null || items.Count == 0)
                 return;
@@ -748,8 +761,11 @@ namespace BestAutoSort.Tx
                     }
                     TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
                     uint rev = (r != null) ? r.Revision : CurrentRevision(container);
+                    TxCompletionKind ownDisp = (r != null)
+                        ? TxResponsePolicy.Classify(st, r.TotalsOnly, TxOp.TakeBatch, items.Count)
+                        : TxCompletionKind.Indeterminate;
                     if (onDone != null)
-                        onDone(direct, st, rev);
+                        onDone(direct, st, rev, ownDisp);
                 }, playerId, actorPos);
                 return;
             }
@@ -758,13 +774,30 @@ namespace BestAutoSort.Tx
                 List<DecodedTake> decoded = TxCodec.ReadTakeResults(pkg);
                 if (decoded == null)
                 {
+                    // Corrupt body: never convert Indeterminate into Rejected. A
+                    // committed-but-undecodable Take debited the chest with the
+                    // payload lost — credit nothing, retry nothing.
+                    if (disp == TxCompletionKind.Indeterminate)
+                    {
+                        TxLog.Warn("take-custom completion decode failed (indeterminate, nothing credited, no retry)");
+                        if (onDone != null)
+                            onDone(new List<DecodedTake>(), status, rev, disp);
+                        return;
+                    }
+                    if (status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate)
+                    {
+                        TxLog.Warn("take-custom completion decode failed (committed, payload lost: nothing credited, no retry)");
+                        if (onDone != null)
+                            onDone(new List<DecodedTake>(), status, rev, TxCompletionKind.CommittedTakeDetailsUnavailable);
+                        return;
+                    }
                     TxLog.Warn("take-custom completion decode failed");
                     if (onDone != null)
-                        onDone(new List<DecodedTake>(), TxStatus.Rejected, rev);
+                        onDone(new List<DecodedTake>(), status, rev, disp);
                     return;
                 }
                 if (onDone != null)
-                    onDone(decoded, status, rev);
+                    onDone(decoded, status, rev, disp);
             }, playerId, actorPos);
         }
 
@@ -820,8 +853,11 @@ namespace BestAutoSort.Tx
                         acc.Add((r != null && r.Accepted != null && i < r.Accepted.Count) ? r.Accepted[i] : 0);
                     TxStatus st = (r != null) ? r.Status : TxStatus.UnknownTx;
                     List<TransferRecord> records = FinishBatchCompletion(container, srcInv, call, r);
+                    TxCompletionKind ownDisp = (r != null)
+                        ? TxResponsePolicy.Classify(st, r.TotalsOnly, call.Op, call.Items.Count)
+                        : TxCompletionKind.Indeterminate;
                     if (onDone != null)
-                        onDone(records, acc, st, TxCompletionKind.Normal);
+                        onDone(records, acc, st, ownDisp);
                 });
                 return;
             }
@@ -856,7 +892,7 @@ namespace BestAutoSort.Tx
                 for (int i = 0; i < call.Items.Count && i < accepted.Count; i++)
                 {
                     TxOpItem sent = call.Items[i];
-                    CompleteAdd(srcInv, sent.SourceRef, sent, accepted[i], status, rev, container, null);
+                    CompleteAdd(srcInv, sent.SourceRef, sent, accepted[i], status, rev, container, null, false, disp);
                     if (accepted[i] > 0 && sent.Snapshot != null && sent.Snapshot.m_shared != null)
                         records.Add(new TransferRecord(sent.Snapshot.m_shared.m_name, sent.Snapshot.GetIcon(), accepted[i], sent.Snapshot.m_shared.m_maxStackSize));
                 }
@@ -1195,12 +1231,18 @@ namespace BestAutoSort.Tx
                     TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(state.Container);
                 }
-                RejectQueued(state);
-                state.Queue.Clear();
+                List<TxJob> dropped = DequeueAll(state);
                 state.Processed.Clear();
                 state.ProcOrder.Clear();
-                List<RingEntry> ring = ReadRing(state.Container);
+                RingData ring = ReadRing(state.Container);
                 SeedFromRing(state, ring);
+                // Queued-but-unapplied jobs keep a stable outcome: seed them as
+                // Rejected in the FRESH cache (nothing was applied — the sender
+                // retries as a NEW tx) so the same txId can never execute later.
+                foreach (TxJob dj in dropped)
+                    SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true);
+                foreach (TxJob dj in dropped)
+                    AnswerReject(state, dj);
                 state.Viewers.Clear();
                 state.SeenRev = 0u;
                 state.SeenOnce = false;
@@ -1215,39 +1257,18 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Answer queued-but-unapplied jobs before the queue is dropped (handoff /
-        /// structural acquire). Rejected is safe: nothing was applied, so the sender
-        /// retries as a NEW tx instead of hanging to its deadline.
+        /// Answer queued-but-unapplied jobs (handoff / structural acquire).
+        /// Prefer the two-phase path in Takeover (DequeueAll + SeedReject +
+        /// AnswerReject) so the Rejected outcome persists in the fresh cache.
+        /// This legacy entry point answers without seeding (callers that already
+        /// hold a seeded cache must not double-answer).
         /// </summary>
         internal static void RejectQueued(ChestState state)
         {
             if (state == null)
                 return;
-            while (state.Queue.Count > 0)
-            {
-                TxJob job = state.Queue.Dequeue();
-                try
-                {
-                    StoredResult r = new StoredResult();
-                    r.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                    r.Status = TxStatus.Rejected;
-                    try
-                    {
-                        ZNetView nv = TxReflect.GetNetView(state.Container);
-                        r.Revision = (nv != null && nv.IsValid()) ? nv.GetZDO().DataRevision : 0u;
-                    }
-                    catch
-                    {
-                        r.Revision = 0u;
-                    }
-                    if (job.Complete != null)
-                        job.Complete(r);
-                }
-                catch (Exception ex)
-                {
-                    TxLog.Error("tx=" + job.TxId + " reject-queued failed: " + ex.Message);
-                }
-            }
+            foreach (TxJob job in DequeueAll(state))
+                AnswerReject(state, job);
         }
 
         private static void PruneViewers(ChestState state)

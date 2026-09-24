@@ -51,8 +51,8 @@ namespace ChestTx.Tests
 
         /// <summary>
         /// A: the just-committed tx must already be in the ring the moment the
-        /// commit returns — an immediate handoff answers Duplicate totals-only,
-        /// never re-applies (no double-debit).
+        /// commit returns — an immediate handoff answers the ORIGINAL outcome
+        /// (exact, IsReplay) and never re-applies (no double-debit).
         /// </summary>
         private static void TestA_ImmediateHandoffSurvives()
         {
@@ -77,8 +77,9 @@ namespace ChestTx.Tests
             chestB.AddItem(Wood, 14, 50);
             coreB.LoadRing(ring);
             TxResult replay = coreB.Apply(chestB, take);
-            Check.That(replay.Status == TxStatus.Duplicate && replay.TotalsOnly,
-                "immediate-handoff replay must be Duplicate totals-only");
+            Check.That(replay.Status == TxStatus.Accepted && !replay.TotalsOnly && replay.IsReplay,
+                "immediate-handoff replay must be the original outcome (exact), got " + replay.Status);
+            Check.Equal(6, replay.AcceptedTotal(), "exact accepted preserved");
             Check.Equal(14, CountIn(chestB, Wood), "replay must NOT double-debit");
         }
 
@@ -101,8 +102,8 @@ namespace ChestTx.Tests
             coreB.LoadRing(coreA.DumpRing());
             TxResult q1 = coreB.Query(401);
             TxResult q2 = coreB.Query(402);
-            Check.That(q1.Status == TxStatus.Duplicate && q1.TotalsOnly, "prev tx survives handoff");
-            Check.That(q2.Status == TxStatus.Duplicate && q2.TotalsOnly, "current tx survives handoff");
+            Check.That(q1.Status == TxStatus.Accepted && !q1.TotalsOnly && q1.IsReplay, "prev tx survives handoff with original outcome, got " + q1.Status);
+            Check.That(q2.Status == TxStatus.Accepted && !q2.TotalsOnly && q2.IsReplay, "current tx survives handoff with original outcome, got " + q2.Status);
             Check.Equal(10, q1.AcceptedTotal(), "prev total preserved");
             Check.Equal(8, q2.AcceptedTotal(), "current total preserved");
         }
@@ -217,10 +218,11 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// J (false-Duplicate guard): rejected-then-committed-then-handoff. The
-        /// Rejected tx must NOT be in the ring, so after handoff it answers
-        /// UnknownTx (→ Indeterminate), never a false Duplicate implying
-        /// commitment. The committed tx still answers Duplicate totals-only.
+        /// J (outcome-stability guard): rejected-then-committed-then-handoff. The
+        /// Rejected tx persists AS Rejected, so after handoff it still answers
+        /// Rejected (FailedNotCommitted) — never a false Duplicate implying
+        /// commitment, and never flipped to Accepted even after the chest gains
+        /// the missing stock. The committed tx replays its original outcome.
         /// </summary>
         private static void TestJ_RejectedNeverPersistsAsDuplicate()
         {
@@ -239,42 +241,50 @@ namespace ChestTx.Tests
             TxCore coreB = new TxCore();
             coreB.LoadRing(coreA.DumpRing());
             TxResult qrej = coreB.Query(501);
-            Check.That(qrej.Status == TxStatus.UnknownTx,
-                "rejected tx must NOT resurrect as Duplicate after handoff");
+            Check.That(qrej.Status == TxStatus.Rejected,
+                "rejected tx must stay Rejected after handoff, got " + qrej.Status);
             Check.That(TxResponsePolicy.Classify(qrej.Status, qrej.TotalsOnly, TxOp.TakeBatch, -1)
-                == TxCompletionKind.Indeterminate, "resurrected-unknown must be Indeterminate");
+                == TxCompletionKind.FailedNotCommitted, "persisted rejection stays failed-not-committed");
+            // The chest now HAS the stock, but the same txId must never execute.
+            chestA.AddItem(Stone, 10, 50);
+            TxRequest retry = new TxRequest { TxId = 501, Op = TxOp.TakeBatch };
+            retry.Items.Add(new TxItem { Key = Stone, Amount = 1, MaxStack = 50 });
+            TxResult re = coreB.Apply(chestA, retry);
+            Check.That(re.Status == TxStatus.Rejected, "same rejected txId must never flip to Accepted, got " + re.Status);
             TxResult qok = coreB.Query(502);
-            Check.That(qok.Status == TxStatus.Duplicate && qok.TotalsOnly,
-                "committed tx still Duplicate totals-only after handoff");
+            Check.That(qok.Status == TxStatus.Accepted && !qok.TotalsOnly && qok.IsReplay,
+                "committed tx replays original outcome after handoff, got " + qok.Status);
         }
 
         /// <summary>
-        /// K: the shared ring helper itself — filters Rejected, keeps order
-        /// oldest-first, caps to RingCap newest survivors.
+        /// K: the shared ring helper itself — keeps every terminal outcome
+        /// (Accepted/Partial/Rejected/Duplicate), oldest-first, capped to
+        /// RingCap newest survivors.
         /// </summary>
         private static void TestK_RingHelperFiltersAndCaps()
         {
             List<RingSlot> slots = new List<RingSlot>();
-            RingSlot a;
-            a.TxId = 1; a.AcceptedTotal = 10; a.Revision = 7; a.Status = TxStatus.Accepted;
+            RingSlot a = new RingSlot();
+            a.TxId = 1; a.AcceptedTotal = 10; a.Revision = 7; a.Status = TxStatus.Accepted; a.Op = TxOp.Add;
             slots.Add(a);
-            RingSlot r;
-            r.TxId = 2; r.AcceptedTotal = 0; r.Revision = 7; r.Status = TxStatus.Rejected;
+            RingSlot r = new RingSlot();
+            r.TxId = 2; r.AcceptedTotal = 0; r.Revision = 7; r.Status = TxStatus.Rejected; r.Op = TxOp.Take;
             slots.Add(r);
-            RingSlot b;
-            b.TxId = 3; b.AcceptedTotal = 4; b.Revision = 8; b.Status = TxStatus.Partial;
+            RingSlot b = new RingSlot();
+            b.TxId = 3; b.AcceptedTotal = 4; b.Revision = 8; b.Status = TxStatus.Partial; b.Op = TxOp.Add;
             slots.Add(b);
             List<RingEntry> snap = TxRing.Snapshot(slots);
-            Check.Equal(2, snap.Count, "Rejected must be filtered from the ring");
+            Check.Equal(3, snap.Count, "every terminal outcome persists (incl Rejected)");
             Check.Equal(1, (int)snap[0].TxId, "oldest-first order kept");
-            Check.Equal(3, (int)snap[1].TxId, "current entry included");
-            Check.Equal(8u, snap[1].Revision, "commit-checkpoint revision carried");
+            Check.That(snap[1].Status == TxStatus.Rejected, "rejected outcome preserved in ring");
+            Check.Equal(3, (int)snap[2].TxId, "current entry included");
+            Check.Equal(8u, snap[2].Revision, "commit-checkpoint revision carried");
 
             List<RingSlot> many = new List<RingSlot>();
             for (int i = 0; i < TxLimits.RingCap + 10; i++)
             {
-                RingSlot s;
-                s.TxId = 100 + i; s.AcceptedTotal = 1; s.Revision = (uint)i; s.Status = TxStatus.Accepted;
+                RingSlot s = new RingSlot();
+                s.TxId = 100 + i; s.AcceptedTotal = 1; s.Revision = (uint)i; s.Status = TxStatus.Accepted; s.Op = TxOp.Add;
                 many.Add(s);
             }
             List<RingEntry> capped = TxRing.Snapshot(many);

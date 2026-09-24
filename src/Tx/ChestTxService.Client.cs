@@ -1048,10 +1048,16 @@ namespace BestAutoSort.Tx
                     switch (step)
                     {
                         case TxPendingDrain.Step.Resend:
+                            // Transient entries NEVER resend the stored bytes here:
+                            // SendTransientRetry re-encodes flagged or falls back to
+                            // a flagged Query (never the unflagged first-attempt frame
+                            // — see its one-way-invariant comment + CanSendStoredMutationPayload).
                             if (p.IsTransientRetry)
                                 SendTransientRetry(p);
-                            else
+                            else if (CanSendStoredMutationPayload(p))
                                 SendPayload(p.Container, p.Payload);
+                            else
+                                TxLog.Warn("tx=" + p.TxId + " resend skipped: no stored payload (entry retained)");
                             p.Attempts++;
                             p.NextTryAt = now + (p.IsTransientRetry
                                 ? TxPendingDrain.TransientBackoffSeconds(p.TransientAttempts)
@@ -1084,31 +1090,95 @@ namespace BestAutoSort.Tx
                 });
         }
 
+        /// <summary>
+        /// Stored-mutation-bytes send gate: the unflagged first-attempt frame in
+        /// p.Payload may go back on the wire ONLY for non-transient entries.
+        /// Transient entries never touch the stored bytes — SendTransientRetry
+        /// re-encodes the call flagged or falls back to a flagged Query (pure
+        /// mirror: TxPendingDrain.CanSendStoredMutationPayload /
+        /// DecideTransientSend). Any future Resend-leg edit must keep this gate:
+        /// IsTransientRetry is one-way (set once on TransientUnavailable, never
+        /// reset while pending).
+        /// </summary>
+        private static bool CanSendStoredMutationPayload(PendingTx p)
+        {
+            return p != null && TxPendingDrain.CanSendStoredMutationPayload(p.IsTransientRetry) && p.Payload != null;
+        }
+
         private static void SendTransientRetry(PendingTx p)
         {
-            // Flagged same-tx retry: re-encode the stored call with
-            // IsTransientRetry so the manager re-attempts persistence of the
-            // refused record (never executes). Falls back to the original bytes
-            // (unflagged resend: reminded TransientUnavailable, still safe).
+            // ONE-WAY INVARIANT: p.IsTransientRetry is set true exactly once (on
+            // the TransientUnavailable response) and NEVER resets to false while
+            // the entry lives. A transient entry leaves Pending only via a durable
+            // manager response (or container-destroyed FinalizeUnknownTx — the
+            // ownership-loss escape hatch). Consequences, all load-bearing:
+            //  - The stored p.Payload bytes are the UNFLAGGED first-attempt frame
+            //    and must NEVER go back on the wire for this entry: an unflagged
+            //    resend of a held txId is only reminded TransientUnavailable
+            //    (never reconciles, never executes) — a non-progress ping that
+            //    still consumes a backoff step. There is no unflagged-fallback leg.
+            //  - Resend re-encodes p.Call with IsTransientRetry (flagged same-tx
+            //    mutation: the manager re-attempts persistence of the refused
+            //    record, never executes). p.Payload is replaced ONLY on success,
+            //    so a failed encode can never leak stale bytes to SendPayload.
+            //  - Re-encode can throw: WriteOpItem has no null guard (a stale/null
+            //    Snapshot NREs), Move indexes Items[0] with no count check, and
+            //    CurrentRevision/LocalPlayerId/LocalActorPos can fail on a torn-down
+            //    client. SourceRef staleness never affects encoding (Snapshot only),
+            //    but the throw is handled regardless of cause.
+            //  - On ANY encode failure (throw OR null call) the entry sends a
+            //    FLAGGED Query for the SAME txId instead (SendQuery writes
+            //    p.IsTransientRetry, which is true here): the manager answers
+            //    TransientUnavailable while the refusal is held, or the cached
+            //    terminal once durable — never UnknownTx for a held/flagged txId.
+            //    Pending + claims + txId are retained, TransientAttempts still
+            //    advances (backoff), nothing goes terminal, no new txId is minted.
+            //  - v3 limits (explicit): a flagged frame over a version-skewed link
+            //    is answered ephemeral-Rejected BEFORE the transient map (fail-closed
+            //    — transient patience does not survive version skew, by design);
+            //    a v2-build peer reads the flag as false (unflagged reminder leg).
+            // Production mirror of the TxPendingDrain.DecideTransientSend seam
+            // (pinned by TRANSIENT_Send* tests): encode-ok => FlaggedMutation,
+            // encode-fail => FlaggedQuery. No third leg exists.
+            bool encoded = false;
             try
             {
                 if (p.Call != null)
                 {
+                    // One-way: set before encode, never reset (see invariant above).
                     p.Call.IsTransientRetry = true;
                     ZPackage payload = EncodeCall(p.Call, CurrentRevision(p.Container), LocalPlayerId(), LocalActorPos());
                     ZPackage request = new ZPackage();
                     request.Write(p.TxId);
                     request.Write(payload);
-                    p.Payload = request;
+                    p.Payload = request;   // replaced ONLY on success
+                    encoded = true;
+                }
+                else
+                {
+                    TxLog.Warn("tx=" + p.TxId + " transient re-encode skipped (no stored call), sending flagged query instead");
                 }
             }
             catch (Exception ex)
             {
-                TxLog.Warn("tx=" + p.TxId + " transient re-encode failed, resending original bytes: " + ex.Message);
+                TxLog.Warn("tx=" + p.TxId + " transient re-encode failed, sending flagged query instead (stored bytes never resent): " + ex.Message);
             }
             p.TransientAttempts++;
-            TxLog.Info("tx=" + p.TxId + " TRANSIENT-RETRY (flagged same-tx resend #" + p.TransientAttempts + ")");
-            SendPayload(p.Container, p.Payload);
+            switch (TxPendingDrain.DecideTransientSend(encoded))
+            {
+                case TxPendingDrain.TransientSendAction.FlaggedMutation:
+                    // p.Payload was JUST re-encoded flagged above — never the
+                    // stored first-attempt bytes (encoded is true only on that path).
+                    TxLog.Info("tx=" + p.TxId + " TRANSIENT-RETRY (flagged same-tx resend #" + p.TransientAttempts + ")");
+                    SendPayload(p.Container, p.Payload);
+                    break;
+                default:
+                    // Flagged-query fallback: same txId, flagged (p.IsTransientRetry
+                    // is true), entry fully retained — Wait-and-retain with a ping.
+                    TxLog.Info("tx=" + p.TxId + " TRANSIENT-QUERY (flagged same-tx query #" + p.TransientAttempts + ", re-encode unavailable)");
+                    SendQuery(p);
+                    break;
+            }
         }
 
         private static void SendQuery(PendingTx p)

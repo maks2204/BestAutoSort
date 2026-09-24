@@ -29,6 +29,7 @@ namespace ChestTx.Tests
             TxDirtyRamTests.RunAll();
             TxWave1IsolationTests.RunAll();
             TxTransientTests.RunAll();
+            TxTransientSendTests.RunAll();
             TxMarkerCrashTests.RunAll();
             TxHardeningTests.RunAll();
             TxPropagationTests.RunAll();

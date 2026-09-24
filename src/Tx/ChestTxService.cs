@@ -1194,9 +1194,14 @@ namespace BestAutoSort.Tx
             Vector3 actorPos;
             if (!DecodeCall(payload, out call, out baseRev, out playerId, out actorPos))
             {
-                // Undecodable: indeterminate (never applied, never cached). The
-                // client resends byte-identical bytes on timeout, so the retry
-                // answers the same way — stable without poisoning the txId.
+                // Undecodable: indeterminate (never applied, never cached). A
+                // non-transient client resends the stored bytes on timeout, so the
+                // retry answers the same way — stable without poisoning the txId.
+                // (Transient entries never reach this leg flagged: an undecodable
+                // tx answers UnknownTx, never TransientUnavailable, so no entry
+                // becomes transient for it; transient resends re-encode flagged via
+                // SendTransientRetry — never byte-identical — or fall back to a
+                // flagged Query for the same txId.)
                 TxLog.Warn("tx=" + txId + " undecodable request from " + sender);
                 Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, TxOp.Query);
                 return;

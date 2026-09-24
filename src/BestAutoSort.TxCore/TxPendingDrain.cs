@@ -77,6 +77,56 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// What a transient Resend step may put on the wire (pure, testable).
+        /// There are exactly two legs — deliberately NO unflagged-resend value:
+        /// the stored first-attempt frame of a transient entry is unflagged and
+        /// must never be resent (an unflagged resend of a held txId is only
+        /// reminded TransientUnavailable: never reconciles, never executes —
+        /// a non-progress ping). Encode-ok re-sends the freshly re-encoded
+        /// flagged mutation (FlaggedMutation); ANY re-encode failure (stale
+        /// Snapshot, empty Move items, destroyed container, missing call) sends
+        /// a flagged Query for the SAME txId instead (FlaggedQuery: the manager
+        /// answers TransientUnavailable while the refusal is held, or the cached
+        /// terminal once durable — never UnknownTx for a held/flagged txId).
+        /// Both legs retain Pending + claims + txId with backoff; neither goes
+        /// terminal and neither mints a new txId. Production SendTransientRetry
+        /// mirrors this seam statement by statement (see DecideTransientSend).
+        /// </summary>
+        public enum TransientSendAction
+        {
+            /// <summary>Freshly re-encoded flagged same-tx mutation.</summary>
+            FlaggedMutation = 0,
+            /// <summary>Flagged Query for the same txId (encode unavailable).</summary>
+            FlaggedQuery = 1
+        }
+
+        /// <summary>
+        /// Transient send-path decision (pure, testable): maps the re-encode
+        /// outcome to the single wire action. encodeSucceeded true ONLY when the
+        /// stored call was just re-encoded with IsTransientRetry in this pass
+        /// (the fresh buffer replaces the stored unflagged bytes); false covers
+        /// every other case (throw, null call) and NEVER maps back to the stored
+        /// bytes. No third leg exists — see TransientSendAction.
+        /// </summary>
+        public static TransientSendAction DecideTransientSend(bool encodeSucceeded)
+        {
+            return encodeSucceeded ? TransientSendAction.FlaggedMutation : TransientSendAction.FlaggedQuery;
+        }
+
+        /// <summary>
+        /// Stored-mutation-bytes send gate (pure, testable): the unflagged
+        /// first-attempt frame may go back on the wire ONLY for non-transient
+        /// entries. Transient entries never touch the stored bytes — they
+        /// re-encode flagged or fall back to a flagged Query (see
+        /// DecideTransientSend). IsTransientRetry is one-way (never resets
+        /// while pending), so a false here stays false for the entry's life.
+        /// </summary>
+        public static bool CanSendStoredMutationPayload(bool isTransientRetry)
+        {
+            return !isTransientRetry;
+        }
+
+        /// <summary>
         /// Pure timing/attempts decision on primitives (no Unity refs): the exact
         /// table ChestTxService.PumpPending used to inline. Deadline first (a hit
         /// deadline with the last-chance query unspent gets FinalQuery, otherwise

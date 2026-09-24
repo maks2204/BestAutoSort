@@ -16,6 +16,38 @@ namespace BestAutoSort.Patches
     {
         private static bool Prefix(Container __instance, long uid, long playerID)
         {
+            if (ServerAuthority.IsServerManagedContainer(__instance))
+            {
+                // Wave-1 server authority: access-checked grant WITHOUT SetOwner
+                // for EVERY eligible chest (independent of lease/concurrent
+                // toggles). Lease still denies; ownership never moves.
+                if (AutoFeedService.IsLocked(__instance))
+                {
+                    Plugin.LogInstance.LogInfo((object)("[ChestTX] open denied (autofeed lease, server-authority) for peer=" + uid));
+                    ZNetView leaseView = TxReflect.GetNetView(__instance);
+                    if (leaseView != null)
+                        leaseView.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
+                    return false;
+                }
+                if (!TxReflect.HasAccess(__instance, playerID))
+                {
+                    ZNetView denyView = TxReflect.GetNetView(__instance);
+                    if (denyView != null)
+                        denyView.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
+                    return false;
+                }
+                ZNetView authView = TxReflect.GetNetView(__instance);
+                if (authView != null && authView.IsValid())
+                {
+                    ZDOMan.instance.ForceSendZDO(uid, authView.GetZDO().m_uid);
+                    authView.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { true });
+                    return false;
+                }
+                ZNetView denyView2 = TxReflect.GetNetView(__instance);
+                if (denyView2 != null)
+                    denyView2.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
+                return false;
+            }
             bool leased = AutoFeedService.IsLocked(__instance);
             if (leased)
             {

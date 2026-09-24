@@ -112,7 +112,12 @@ namespace BestAutoSort.Patches
         {
             Container container = InventoryAccess.CurrentContainer(__instance);
             if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(container, "gui-select"))
+                    return false;
                 return true;
+            }
             if (TxGui.BlockedByFeed(container))
                 return false;
             Player player = Player.m_localPlayer;
@@ -122,7 +127,9 @@ namespace BestAutoSort.Patches
             Inventory playerInv = ((Humanoid)player).GetInventory();
             Inventory targetInv = grid.GetInventory();
 
-            if (container.IsOwner())
+            // Wave-2: authority-routed. Only the manager runs vanilla here (after
+            // draining the remote queue); remote managed chests always go via tx.
+            if (ChestTxService.IsManager(container))
             {
                 ChestTxService.DrainForLocal(container);
                 return true;
@@ -239,7 +246,12 @@ namespace BestAutoSort.Patches
         {
             Container container = InventoryAccess.CurrentContainer(__instance);
             if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(container, "gui-takeall"))
+                    return false;
                 return true;
+            }
             if (TxGui.BlockedByFeed(container))
                 return false;
             // Всегда через tx (владелец — локально в очередь): иначе у владельца
@@ -291,7 +303,12 @@ namespace BestAutoSort.Patches
         {
             Container container = InventoryAccess.CurrentContainer(__instance);
             if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(container, "gui-stackall"))
+                    return false;
                 return true;
+            }
             if (TxGui.BlockedByFeed(container))
                 return false;
             // Всегда через tx (владелец — локально в очередь): иначе у владельца
@@ -359,14 +376,20 @@ namespace BestAutoSort.Patches
         {
             Container container = InventoryAccess.CurrentContainer(__instance);
             if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(container, "gui-useclick"))
+                    return false;
                 return true;
+            }
             if (TxGui.BlockedByFeed(container))
                 return false;
             if (grid.GetInventory() != container.GetInventory())
                 return true;
             if (item != null && item.m_shared != null && item.m_shared.m_questItem)
                 return true;
-            if (container.IsOwner())
+            // Wave-2: authority-routed (manager-only vanilla, remote via tx).
+            if (ChestTxService.IsManager(container))
             {
                 ChestTxService.DrainForLocal(container);
                 return true;

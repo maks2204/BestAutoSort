@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.x-Dedicated-Test wave 1 (experimental slice, invariant NOT claimed)
+
+- Server-authority migration, vertical slice: canonical eligible-chest policy (stationary storage in, player/tomb/wagon/ship/moving/unknown out), authority UID (server GetUID / client server-peer uid, unknown fail closed), ServerAuthority (default) + LegacyDistributed modes with Hello/mode compat negotiation (mismatched peers rejected; vanilla clients unsupported for managed chests).
+- Source guards for eligible chests only: access-checked open grant without SetOwner (lease still denies); request-stack/take-all denied regardless of IsShared; TakeAllResponse claim suppressed; ZDO.SetOwner/SetOwnerInternal ownership backstop (toward-authority only); mod/client ClaimOwnership blocked with diagnosis; ReleaseNearbyZDOS redistribution exclusion via verified transpiler (2/2 sites, fail-closed SetOwner backstop on IL change); GUI/TakeAll/StackAll view-only for non-owners outside the shared path.
+- Server-only EnsureServerOwnership (awake/discovery/tx-request hooks, metadata-only, pre-mutation s_items + ring/floor read, quarantine on untrusted, verified-init empty-blob materialize only, ZDOID/old/new/reason logs + repair counters). AutoFeed untouched (animal-owner scheduling, no creature ownership change). Takeover/LastOwner/TxNullEscape retained.
+
 ## 0.5.15
 
 - s_items load-gate hardening: null is never empty, blobs validated before Load with RAM-snapshot restore, defensive byte clones, vanilla handoff order.

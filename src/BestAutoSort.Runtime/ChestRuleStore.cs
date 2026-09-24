@@ -45,6 +45,13 @@ internal static class ChestRuleStore
 		}
 		if (!component.IsOwner())
 		{
+			// Wave-2: remote managed chests are ruleset by the manager via SetRule
+			// tx (fail closed here, never a direct write); legacy keeps the wait.
+			if (ServerAuthority.IsServerManagedContainer(container))
+			{
+				error = "This server-managed chest saves rules on the server. Reopen it and try Save again.";
+				return false;
+			}
 			error = "Waiting for chest ownership. Try Save again.";
 			return false;
 		}

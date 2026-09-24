@@ -174,14 +174,18 @@ namespace BestAutoSort.Tx
         /// answer. Cleared only by a successful authoritative s_items reload
         /// (pump/takeover/reacquire path), never by elapsed time. The failed tx
         /// keeps its fence (never rolls back).
-        /// Null escape (v0.5.x empty-chest fix) is the ONLY time-based
-        /// clear, on TWO legs: TxNullEscape.ShouldEscape (dead source:
-        /// quarantined + s_items still null + old owner provably not live +
-        /// bounded wait elapsed) and TxNullEscape.ShouldEscapeLiveQuiescent
-        /// (live owner: quarantined + still null + old owner still live +
-        /// EXTENDED quiescence window of total null persistence elapsed) —
-        /// each + provably empty live RAM + verified self-heal save. The
-        /// short grace alone never clears a live owner.
+        /// Null escape (v0.5.x empty-chest fix, LegacyDistributed ONLY — inert
+        /// in ServerAuthority mode for managed chests, see
+        /// TxNullEscape.EscapeAllowed and docs/server_authority_wave3.md) is
+        /// the ONLY time-based clear, on TWO legs: TxNullEscape.ShouldEscape
+        /// (dead source: quarantined + s_items still null + old owner provably
+        /// not live + bounded wait elapsed) and
+        /// TxNullEscape.ShouldEscapeLiveQuiescent (live owner: quarantined +
+        /// still null + old owner still live + EXTENDED quiescence window of
+        /// total null persistence elapsed) — each + provably empty live RAM +
+        /// verified self-heal save. The short grace alone never clears a live
+        /// owner. In ServerAuthority mode a managed null stays quarantined
+        /// (loud diagnose, no timer exit).
         /// QuarantinedSince/QuarantineOldOwner/QuarantineWarns carry the
         /// escape evidence (quarantine start, dead-source candidate UID with
         /// 0 = no claimant to wait for, stuck-pump retry count for Warn

@@ -1,6 +1,7 @@
 using System;
 using BepInEx.Configuration;
 using BestAutoSort.Core;
+using BestAutoSort.TxCore;
 using UnityEngine;
 
 namespace BestAutoSort.Runtime;
@@ -55,6 +56,8 @@ internal static class ModConfig
 
 	internal static ConfigEntry<bool> AllowConcurrentChestUse { get; private set; }
 
+	internal static ConfigEntry<ServerAuthorityMode> ChestAuthorityMode { get; private set; }
+
 	internal static ConfigEntry<bool> AutoFeedEnabled { get; private set; }
 
 	internal static ConfigEntry<float> AutoFeedRange { get; private set; }
@@ -103,6 +106,7 @@ internal static class ModConfig
 		CraftFromNearbyChests = config.Bind<bool>("Shared Resources", "CraftFromNearbyChests", true, "Use eligible nearby chests for crafting, building, and manually filling torches, fires, kilns, furnaces, cooking stations, fermenters, and other supported production structures.");
 		SharedResourceRange = config.Bind<float>("Shared Resources", "Range", 30f, new ConfigDescription("Maximum shared chest-resource range in metres for crafting, building, and operated production structures.", (AcceptableValueBase)(object)new AcceptableValueRange<float>(2f, 100f), Array.Empty<object>()));
 		AllowConcurrentChestUse = config.Bind<bool>("Multiplayer", "AllowConcurrentChestUse", true, "Allow players running the same BestAutoSort version to use one stationary chest concurrently. Mutations are serialized by the authoritative chest manager (ZDO owner) as idempotent transactions; ownership is never ping-ponged.");
+		ChestAuthorityMode = config.Bind<ServerAuthorityMode>("Multiplayer", "ChestAuthorityMode", ServerAuthorityMode.ServerAuthority, "Wave-1 server authority (experimental): chest ZDO ownership stays on the server/host and never transfers to clients. LegacyDistributed restores pre-0.6 distributed ownership. All peers must use the same mode and mod version; mismatched peers are rejected, and vanilla (mod-less) clients are unsupported for managed chests.");
 		AutoFeedEnabled = config.Bind<bool>("Auto Feed", "Enabled", true, "Automatically feed hungry tameable creatures from eligible nearby chests on the peer that owns the creature.");
 		AutoFeedRange = config.Bind<float>("Auto Feed", "Range", 25f, new ConfigDescription("Maximum distance in metres between a hungry creature and a feed chest.", (AcceptableValueBase)(object)new AcceptableValueRange<float>(2f, 50f), Array.Empty<object>()));
 		AutoFeedInterval = config.Bind<float>("Auto Feed", "ScanInterval", 5f, new ConfigDescription("Minimum seconds between nearby-chest scans for each hungry creature.", (AcceptableValueBase)(object)new AcceptableValueRange<float>(1f, 60f), Array.Empty<object>()));

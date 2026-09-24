@@ -635,8 +635,13 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 		{
 			// Synchronous consumption — manager only (serial, no races).
 			// Foreign chests are prefetched ahead of time (see requirement checks).
-			if (!eligibleContainer.IsOwner())
+			// Wave-2: authority-routed, so a remote viewer of a server-managed
+			// chest never consumes directly (fail closed: waits for prefetch).
+			if (!ChestTxService.IsManager(eligibleContainer))
 				continue;
+		// Manager-side sync consume: drain queued remote ops first so the
+			// take below commits strictly after them (same-thread order).
+			ChestTxService.DrainForLocal(eligibleContainer);
 		int num3 = RemoveFromInventory(eligibleContainer.GetInventory(), name, num2, quality, eligibleContainer);
 		num += num3;
 		num2 -= num3;
@@ -674,7 +679,7 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 						continue;
 					}
 					num++;
-					if (!container.IsOwner())
+					if (!ChestTxService.IsManager(container))
 					{
 						num2++;
 						PrefetchBorrow(val, container, val2);
@@ -683,6 +688,8 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 					string name = val2.m_shared.m_name;
 					if (container.GetInventory().ContainsItem(val2) && ChestReserveStore.Available(container, val2) > 0)
 					{
+						// Manager-side sync loan: drain queued remote ops first.
+						ChestTxService.DrainForLocal(container);
 						int quality = val2.m_quality;
 						int playerCountBefore = inventory.CountItems(name, quality, true);
 						if (TryLoanOneItem(container.GetInventory(), inventory, val2, playerCountBefore, out ItemData loanedItem) && loanedItem != null)
@@ -726,13 +733,15 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 							continue;
 						}
 						num++;
-						if (!container.IsOwner())
+						if (!ChestTxService.IsManager(container))
 						{
 							num2++;
 							PrefetchBorrow(val, container, val2);
 						}
 						else if (container.GetInventory().ContainsItem(val2) && ChestReserveStore.Available(container, val2) > 0)
 						{
+							// Manager-side sync loan: drain queued remote ops first.
+							ChestTxService.DrainForLocal(container);
 							int quality = val2.m_quality;
 							int playerCountBefore = inventory.CountItems(preferredName, quality, true);
 							if (TryLoanOneItem(container.GetInventory(), inventory, val2, playerCountBefore, out ItemData loanedItem) && loanedItem != null)
@@ -762,7 +771,7 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 	{
 		if ((Object)(object)player == (Object)null || item == null || item.m_shared == null)
 			return;
-		if (!ChestTxService.IsShared(container) || container.IsOwner())
+		if (!ChestTxService.IsShared(container) || ChestTxService.IsManager(container))
 			return;
 		// Single-insert UX (fuel/food/ore/mead): borrow exactly 1 unit, like the
 		// owned-chest loan path (TryLoanOneItem). Full stacks flooded the inventory
@@ -886,7 +895,9 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 			{
 				// Craft checks count only synchronously consumable stock (own + manager).
 				// Foreign stock arrives via prefetch; display counts everything.
-				if (localOnly && !eligibleContainer.IsOwner())
+				// Wave-2: authority-routed (remote managed stock is never
+				// synchronously consumable).
+				if (localOnly && !ChestTxService.IsManager(eligibleContainer))
 					continue;
 				num += ChestReserveStore.Count(eligibleContainer, name, quality);
 			}
@@ -938,7 +949,7 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 					skippedLease++;
 				continue;
 			}
-			if (container.IsOwner())
+			if (ChestTxService.IsManager(container))
 			{
 				skippedLocal++;
 				continue;
@@ -1035,7 +1046,9 @@ internal static bool HasStagedMatsForPiece(Player player, Piece piece, out strin
 			{
 				// Direct live mutation bypasses the tx queue: persist like the manager
 				// does (rows + Save), otherwise the ZDO keeps the pre-consume stock
-				// and viewers/rejoins resurrect it.
+				// and viewers/rejoins resurrect it. Wave-2: the caller already gated
+				// on IsManager; DrainForLocal runs first at the call site so remote
+				// queue traffic commits before this synchronous consume.
 				TxReflect.UpdateRows(container);
 				TxReflect.SaveContainer(container);
 			}

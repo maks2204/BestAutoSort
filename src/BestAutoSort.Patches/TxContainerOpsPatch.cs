@@ -16,7 +16,9 @@ namespace BestAutoSort.Patches
     {
         internal static bool FeedBusy(Container c)
         {
-            if (!c.IsOwner() && AutoFeedService.IsLocked(c))
+            // Wave-2: authority-routed (a remote viewer of a managed chest is
+            // never the manager, so the lease gate applies to it).
+            if (!ChestTxService.IsManager(c) && AutoFeedService.IsLocked(c))
             {
                 Player player = Player.m_localPlayer;
                 if (player != null)
@@ -33,7 +35,16 @@ namespace BestAutoSort.Patches
         private static bool Prefix(Container __instance, Humanoid character, ref bool __result)
         {
             if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+            {
+                // Eligible but outside the shared path: view-only for non-owners
+                // (no ghost takes against a stale replica); owner keeps vanilla.
+                if (ServerAuthority.DenyIfViewOnly(__instance, "takeall"))
+                {
+                    __result = false;
+                    return false;
+                }
                 return true;
+            }
             if (TxOpsGuard.FeedBusy(__instance))
                 return false;
             Player player = Player.m_localPlayer;
@@ -92,7 +103,12 @@ namespace BestAutoSort.Patches
         private static bool Prefix(Container __instance)
         {
             if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(__instance, "stackall"))
+                    return false;
                 return true;
+            }
             if (TxOpsGuard.FeedBusy(__instance))
                 return false;
             Player player = Player.m_localPlayer;
@@ -150,7 +166,10 @@ namespace BestAutoSort.Patches
     {
         private static bool Prefix(Container __instance, long uid, long playerID)
         {
-            if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+            // Eligible chests deny direct stacking regardless of IsShared
+            // (stacking runs only through ChestTX); legacy keeps the gate.
+            if (!ServerAuthority.IsServerManagedContainer(__instance)
+                && (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance)))
                 return true;
             if (TxOpsGuard.FeedBusy(__instance))
                 return false;
@@ -171,7 +190,10 @@ namespace BestAutoSort.Patches
     {
         private static bool Prefix(Container __instance, long uid, long playerID)
         {
-            if (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance))
+            // Eligible chests deny direct take-all regardless of IsShared
+            // (take-all runs only through ChestTX); legacy keeps the gate.
+            if (!ServerAuthority.IsServerManagedContainer(__instance)
+                && (!ModConfig.AllowConcurrentChestUse.Value || !ChestTxService.IsShared(__instance)))
                 return true;
             if (TxOpsGuard.FeedBusy(__instance))
                 return false;

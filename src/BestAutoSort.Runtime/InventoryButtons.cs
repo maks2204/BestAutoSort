@@ -458,7 +458,9 @@ internal static class InventoryButtons
 			Container trashContainer = (val2 != ((Humanoid)Player.m_localPlayer).GetInventory()) ? InventoryAccess.CurrentContainer(_gui) : null;
 			bool trashShared = (Object)(object)trashContainer != (Object)null && (Object)(object)trashContainer.GetInventory() == (Object)(object)val2
 				&& ChestTxService.IsShared(trashContainer);
-			if (trashShared && !trashContainer.IsOwner())
+			// Wave-2: authority-routed. Remote managed chests always Take by tx here;
+			// only the manager destroys directly below.
+			if (trashShared && !ChestTxService.IsManager(trashContainer))
 			{
 				// Trash from a foreign chest: Take by transaction, destroy what arrives (settles nowhere).
 				TxOpItem opItem = ChestTxService.SnapshotItem(val, destroyAmount, -1, -1);
@@ -491,9 +493,12 @@ internal static class InventoryButtons
 				((Character)Player.m_localPlayer).Message((MessageType)2, "The item could not be destroyed safely.", 0, (Sprite)null, false);
 				return;
 			}
-			// Direct destroy from an owned chest (no tx queue): persist like the manager.
-			if ((Object)(object)trashContainer != (Object)null && trashContainer.IsOwner())
+			// Direct destroy from a manager-owned chest (no tx queue): persist like the
+			// manager. Wave-2: IsManager-gated, so remote managed chests never
+			// reach here (they Take by tx above); drain queued remote ops first.
+			if ((Object)(object)trashContainer != (Object)null && ChestTxService.IsManager(trashContainer))
 			{
+				ChestTxService.DrainForLocal(trashContainer);
 				TxReflect.UpdateRows(trashContainer);
 				TxReflect.SaveContainer(trashContainer);
 			}

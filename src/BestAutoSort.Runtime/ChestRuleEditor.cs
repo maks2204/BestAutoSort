@@ -865,7 +865,9 @@ internal static class ChestRuleEditor
 				ChestRuleScope.Items => ChestStorageRule.ForItems(SelectedItems), 
 				_ => ChestStorageRule.Automatic(), 
 			};
-			if (!ChestTxService.IsShared(container) || container.IsOwner())
+			// Wave-2: authority-routed. Only the manager writes locally; remote
+			// managed chests go through the SetRule tx below (never direct).
+			if (!ChestTxService.IsShared(container) || ChestTxService.IsManager(container))
 			{
 				SaveLocal(container, rule);
 				return;

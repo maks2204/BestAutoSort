@@ -76,7 +76,9 @@ internal static class ChestReserveStore
 	{
 		StorageReserves.Decode(encoded);
 		ZNetView component = ((Component)container).GetComponent<ZNetView>();
-		if ((Object)(object)component == (Object)null || !component.IsValid() || !component.IsOwner() || AutoFeedService.IsLocked(container))
+		// Wave-2: authority-routed. Remote managed chests fail closed (never a
+		// direct ZDO write); the manager path is unchanged.
+		if ((Object)(object)component == (Object)null || !component.IsValid() || !BestAutoSort.Tx.ChestTxService.IsManager(container) || AutoFeedService.IsLocked(container))
 		{
 			throw new InvalidOperationException("Open the chest and wait for ownership before changing its reserves.");
 		}

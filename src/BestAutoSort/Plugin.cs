@@ -83,6 +83,10 @@ public sealed class Plugin : BaseUnityPlugin
 			}
 		}
 		Logger.LogInfo((object)$"Applied {num} of {array.Length} BestAutoSort patch classes.");
+		if (ServerReleaseGuard.PatchedSites != ServerReleaseGuard.ExpectedSites)
+			Logger.LogError((object)("ServerReleaseGuard transpiler applied to " + ServerReleaseGuard.PatchedSites + " of " + ServerReleaseGuard.ExpectedSites + " ReleaseNearbyZDOS ownership sites - redistribution exclusion DISABLED, game update likely changed (SetOwner backstop still holds fail-closed)."));
+		else
+			Logger.LogInfo((object)("ServerReleaseGuard rerouted " + ServerReleaseGuard.PatchedSites + " ReleaseNearbyZDOS ownership site(s) through the server-authority guard."));
 		if (TxRenderPatch.ReplacedCount == 0)
 			Logger.LogError((object)"TxRenderPatch transpiler found no Container.IsOwner call in InventoryGui.UpdateContainer — multi-viewer rendering is DISABLED, game update likely changed.");
 		else
@@ -155,8 +159,10 @@ public sealed class Plugin : BaseUnityPlugin
 			}
 			if (!ChestTxService.IsShared(val))
 			{
-				// Non-shared (carts/ships/vanilla): owner only, as before.
-				if (val.IsOwner())
+				// Non-shared (carts/ships/vanilla): manager only, as before.
+				// Wave-2: authority-routed, so remote managed chests fail closed
+				// (never SortLocal against a stale replica).
+				if (ChestTxService.IsManager(val))
 					SortLocal(val);
 				return;
 			}
@@ -192,7 +198,15 @@ public sealed class Plugin : BaseUnityPlugin
 			Container val = InventoryAccess.CurrentContainer(InventoryGui.instance);
 			if ((Object)(object)val == (Object)null)
 				return;
-			if (!ChestTxService.IsShared(val) || val.IsOwner())
+			// Wave-2: repair-first (server-only inside; remote no-op) so a genuine
+			// host upgrade is not mistaken for a remote structural attempt.
+			ServerAuthority.EnsureServerOwnership(val, "upgrade-open");
+			// Wave-2 structural: remote managed chests fail closed with a loud error
+			// (no AcquireForStructural, no claim); the host/server-local path is
+			// unchanged (already authority).
+			if (ServerAuthority.BlockStructuralForRemote(val, "upgrade-open"))
+				return;
+			if (!ChestTxService.IsShared(val) || ChestTxService.IsManager(val))
 			{
 				ChestUpgradeService.UpgradeOpenChest(targetTier);
 				return;

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
+using BestAutoSort.TxCore;
 using UnityEngine;
 
 namespace BestAutoSort.Tx
@@ -55,7 +56,11 @@ namespace BestAutoSort.Tx
                 {
                     if (Plugin.IsActive)
                     {
-                        if (string.Equals(version, Plugin.PluginVersion, StringComparison.Ordinal))
+                        // Wave-1 server authority: Hello carries version + mode
+                        // ("0.5.16;auth=0"); legacy bare-version peers behave as
+                        // LegacyDistributed. Mismatched peers are rejected.
+                        ServerAuthorityMode localMode = ServerAuthority.EffectiveMode();
+                        if (TxAuthorityHello.AreCompatibleWithHello(Plugin.PluginVersion, localMode, version))
                             CompatiblePeers.Add(sender);
                         else
                             CompatiblePeers.Remove(sender);
@@ -66,7 +71,8 @@ namespace BestAutoSort.Tx
             if (_registeredRpc != null && Time.realtimeSinceStartup >= _nextHelloAt)
             {
                 _nextHelloAt = Time.realtimeSinceStartup + 10f;
-                _registeredRpc.InvokeRoutedRPC(0L, HelloRpc, new object[1] { Plugin.PluginVersion });
+                string hello = TxAuthorityHello.BuildHello(Plugin.PluginVersion, ServerAuthority.EffectiveMode());
+                _registeredRpc.InvokeRoutedRPC(0L, HelloRpc, new object[1] { hello });
             }
         }
     }

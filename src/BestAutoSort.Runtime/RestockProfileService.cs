@@ -209,7 +209,11 @@ internal static class RestockProfileService
 				{
 					break;
 				}
-				if (item2.IsOwner())
+				// Wave-2: authority-routed. A remote viewer of a server-managed
+				// chest NEVER drains synchronously (fail closed: the tx chain
+				// below fulfills the need); the manager drains after emptying
+				// the remote queue first (see DrainSyncNeeds).
+				if (ChestTxService.IsManager(item2))
 				{
 					num = DrainSyncNeeds(item2, inventory, item, ref itemAt, num, dictionary);
 					continue;
@@ -266,6 +270,9 @@ internal static class RestockProfileService
 		Inventory inventory2 = container.GetInventory();
 		if (inventory2 == null)
 			return num;
+		// Manager-side sync drain: queued remote ops commit first (same-thread
+			// order with tx traffic).
+		ChestTxService.DrainForLocal(container);
 		bool moved = false;
 		foreach (ItemData item3 in new List<ItemData>(inventory2.GetAllItems()))
 		{

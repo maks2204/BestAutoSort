@@ -31,7 +31,8 @@ internal sealed class ProductionItemLoan
 		{
 			return;
 		}
-		if ((Object)(object)_source != (Object)null && ChestTxService.IsShared(_source) && !_source.IsOwner())
+		// Wave-2: authority-routed. Remote managed chests return loans by tx.
+		if ((Object)(object)_source != (Object)null && ChestTxService.IsShared(_source) && !ChestTxService.IsManager(_source))
 		{
 			// Return the loan remainder to a foreign chest via Add transaction (no ownership).
 			TxOpItem op = ChestTxService.SnapshotAuto(_item, _item.m_stack);
@@ -50,8 +51,11 @@ internal sealed class ProductionItemLoan
 				return;
 			}
 		}
-		if ((Object)(object)_source != (Object)null && _source.IsOwner())
+		// Wave-2: manager-only direct return (remote managed chests use the tx
+		// above); drain queued remote ops first.
+		if ((Object)(object)_source != (Object)null && ChestTxService.IsManager(_source))
 		{
+			ChestTxService.DrainForLocal(_source);
 			_source.GetInventory().MoveItemToThis(inventory, _item, _item.m_stack, -1, -1);
 			// Owned chest mutated directly (no tx queue): persist like the manager.
 			TxReflect.UpdateRows(_source);

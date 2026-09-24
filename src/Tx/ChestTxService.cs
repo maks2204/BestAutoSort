@@ -9,11 +9,19 @@ namespace BestAutoSort.Tx
     /// <summary>
     /// ChestTX: authoritative transactional access to stationary chests.
     ///
-    /// Network model:
+    /// Network model (LegacyDistributed: manager = whoever owns the ZDO;
+    /// ServerAuthority mode: the manager of an eligible chest is ALWAYS the
+    /// server/host — clients never own, never mutate, never take over; see
+    /// docs/server_authority_wave3.md):
     /// - Chest manager = ZDO owner. Never handed over between operations.
+    ///   (In ServerAuthority mode the ZDO owner of an eligible chest is
+    ///   pinned to the server, so "manager = owner" MEANS "manager = server".)
     /// - Client sends BestAutoSort_TxRequest to the chest ZNetView (no target = to owner).
     /// - Manager applies mutations STRICTLY ONE AT A TIME from the chest queue:
     ///   validate → apply → Save() → revision → response to the specific peer.
+    ///   (In ServerAuthority mode this serialization happens AT THE SERVER;
+    ///   ForceSendZDO propagation below is a viewer-only refresh hint, never
+    ///   ownership or mutation.)
     /// - Client touches its own inventory ONLY on response, exactly by accepted.
     /// - Idempotency: txId = peerId&lt;&lt;32 | counter. Retry = cached result.
     ///   Full-result cache in memory + persistent ring in ZDO (handoff).
@@ -21,6 +29,8 @@ namespace BestAutoSort.Tx
     /// - Viewers poll ZDO.DataRevision and reload the open GUI without closing it.
     /// - Presence (chest lid): ViewerOpen/ViewerClose + heartbeat, manager sets s_inUse.
     /// - Handoff: the new owner always Loads from ZDO (committed state) + reads the ring.
+    ///   (LegacyDistributed only. ServerAuthority mode has NO client handoff:
+    ///   Takeover is gated to the server — see TxAuthorityRouting.TakeoverAllowed.)
     ///
     /// Everything runs on the Unity main thread (Valheim RPCs dispatch there too).
     /// </summary>
@@ -108,6 +118,8 @@ namespace BestAutoSort.Tx
                 States[id] = state;
             }
             AutoFeedService.Attach(container);
+            // Wave-1 server authority: attach/discovery repair (server-only inside).
+            ServerAuthority.EnsureOnAwake(container);
         }
 
         /// <summary>
@@ -138,6 +150,18 @@ namespace BestAutoSort.Tx
 
         internal static bool IsManager(Container container)
         {
+            // Wave-2 authority routing: for server-managed chests the manager is
+            // the dedicated/server authority ONLY (remote clients always false,
+            // never falling back to direct vanilla mutation); legacy and
+            // unmanaged chests keep the vanilla IsOwner verdict bit-for-bit.
+            try
+            {
+                if (ServerAuthority.IsAuthorityMode() && ServerAuthority.IsServerManagedContainer(container))
+                    return ServerAuthority.IsAuthorityManager(container);
+            }
+            catch
+            {
+            }
             return container.IsOwner();
         }
 
@@ -377,8 +401,10 @@ namespace BestAutoSort.Tx
         /// </summary>
         internal static void MutateLocal(Container container, TxOpCall call, Action<StoredResult> onDone, long playerId = 0L, Vector3? actorPos = null)
         {
+            // Wave-2: repair before the first authority op (server-only inside).
+            ServerAuthority.EnsureServerOwnership(container, "local-tx");
             ChestState state = GetState(container);
-            if (state == null || !container.IsOwner())
+            if (state == null || !IsManager(container))
             {
                 if (onDone != null)
                 {
@@ -516,7 +542,7 @@ namespace BestAutoSort.Tx
         internal static void DrainForLocal(Container container)
         {
             ChestState state = GetState(container);
-            if (state == null || !container.IsOwner())
+            if (state == null || !IsManager(container))
                 return;
             Drain(state);
         }
@@ -531,7 +557,16 @@ namespace BestAutoSort.Tx
         {
             if (!IsShared(container))
                 return false;
-            if (container.IsOwner())
+            // Wave-2: repair-first (server-only inside; remote no-op) so a genuine
+            // host upgrade is not mistaken for a remote structural attempt.
+            ServerAuthority.EnsureServerOwnership(container, "structural-acquire");
+            // Wave-2 structural: remote structural Upgrade fails closed with a
+            // loud error — no client AcquireForStructural, no replacement
+            // ClaimOwnership. The host/server-local path below is unchanged
+            // (already authority).
+            if (ServerAuthority.BlockStructuralForRemote(container, "acquire"))
+                return false;
+            if (IsManager(container))
                 return true;
             ZNetView netView = TxReflect.GetNetView(container);
             if ((Object)netView == (Object)null || !netView.IsValid())
@@ -996,10 +1031,13 @@ namespace BestAutoSort.Tx
                     TellPlayer("Shared chest is not available.");
                 return;
             }
-            if (container.IsOwner())
+            if (IsManager(container))
             {
                 // Manager: enqueue locally, run right away. Synthesize the same
                 // result body remote managers send (never null: decoders void takes).
+                // Wave-2: host local ops serialize through this same manager queue
+                // (no host-direct-mutation shortcut); single-player keeps this sync
+                // local authority path with the same tx semantics.
                 MutateLocal(container, call, delegate (StoredResult r)
                 {
                     RefreshNow(container);
@@ -1226,13 +1264,16 @@ namespace BestAutoSort.Tx
         private static void OnTxRequest(Container container, long sender, ZPackage request)
         {
             // Stale-route discipline (grant-before-state): this RPC was routed
-            // to the owner at SEND time. If ownership moved in flight we are no
-            // longer the manager: dropping WITHOUT answering is INTENTIONAL —
+            // to the owner at SEND time (owner == authority). If ownership moved
+            // in flight we are no longer the manager: dropping WITHOUT answering
+            // is INTENTIONAL —
             // the sender's Pending pump resends/queries the SAME txId, which
             // routes to the CURRENT owner. A non-manager UnknownTx here could
             // contradict the real outcome (e.g. finalize Indeterminate for a tx
             // the new manager already committed), so only the manager answers.
-            if (!Plugin.IsActive || !IsShared(container) || !container.IsOwner())
+            // Wave-2: the manager verdict is authority-routed (remote never
+            // answers for a managed chest).
+            if (!Plugin.IsActive || !IsShared(container) || !IsManager(container))
                 return;
             long txId;
             ZPackage payload;
@@ -1267,6 +1308,10 @@ namespace BestAutoSort.Tx
             ChestState state = GetState(container);
             if (state == null)
                 return;
+            // Wave-1 server authority: repair ownership before the first
+            // authority op (server-only inside; no-op for legacy/remote).
+            if (ServerAuthority.IsServerManagedContainer(container))
+                ServerAuthority.EnsureServerOwnership(container, "tx-request");
             // Takeover-before-Drain (grant-before-state): ownership may have
             // arrived after the last slow pump (poll-based detection). Draining
             // on un-reseeded Processed/Floor RAM would execute against stale
@@ -1274,6 +1319,12 @@ namespace BestAutoSort.Tx
             // Takeover via the LastOwner update below. Takeover never throws
             // and fail-closes (quarantine) when s_items is unavailable, in
             // which case Drain below refuses fresh jobs as Indeterminate.
+            // Wave-3: in ServerAuthority mode this leg runs server-side ONLY —
+            // a remote peer never reaches here for a managed chest (the
+            // IsManager early return above drops stale routes without
+            // answering, and the pump Takeover gate refuses remote adoption),
+            // so there is no client handoff on this path. LegacyDistributed
+            // keeps the distributed handoff unchanged.
             if (state.LastOwner != ZNet.GetUID())
             {
                 Takeover(state);
@@ -1722,8 +1773,14 @@ namespace BestAutoSort.Tx
         {
             if (state == null || state.Draining)
                 return;
-            if ((Object)state.Container == (Object)null || !state.Container.IsOwner())
+            if ((Object)state.Container == (Object)null || !IsManager(state.Container))
             {
+                // Wave-3: in ServerAuthority mode this leg is inert for managed
+                // chests — the server is always the manager (so it never fires
+                // there), and remotes never enqueue (MutateLocal/DrainForLocal
+                // require IsManager), so the drop is a no-op for them. No client
+                // handoff exists to service. Kept for the LegacyDistributed
+                // ownership-loss path.
                 DropTransientFor(state);
                 return;
             }
@@ -1942,7 +1999,7 @@ namespace BestAutoSort.Tx
             // new high-water even if the mutation later fails. Best-effort only
             // (never an ACK/barrier, never correctness).
             RequestPropagation(state, job.Sender);
-            if (!job.Container.IsOwner())
+            if (!IsManager(job.Container))
             {
                 // Ownership lost after the fence (ZDO.Set is owner-gated, so the fence
                 // write above may itself have no-op'd): no mutation may follow. The floor
@@ -1950,6 +2007,10 @@ namespace BestAutoSort.Tx
                 // Transient RAM for this chest is dropped (handoff discards RAM —
                 // the flagged retry reconciles on the clean manager through the
                 // authoritative flagged branch, see OnTxRequest).
+                // Wave-3: unreachable in ServerAuthority mode for managed chests
+                // (ownership never moves: the SetOwner backstop + claim guards
+                // pin it to the server), so no gate needed — kept for the
+                // LegacyDistributed ownership-loss path.
                 DropTransientFor(state);
                 TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " lost ownership after fence (indeterminate)");
                 StoredResult ownerLost = new StoredResult();
@@ -3032,16 +3093,30 @@ namespace BestAutoSort.Tx
         /// the quarantine. Only ever called on the quarantined null path
         /// behind TxNullEscape.ShouldEscape / ShouldEscapeLiveQuiescent.
         /// Returns true only on a fully verified heal. Never throws.
+        ///
+        /// Wave-3 gate: inert in ServerAuthority mode for managed chests (the
+        /// timer-based assume-empty heal is LegacyDistributed-only — see
+        /// TxNullEscape.EscapeAllowed). The escape legs in
+        /// TryReloadAuthoritative already refuse before calling; this is the
+        /// defense-in-depth backstop so no future caller can heal a managed
+        /// chest by timer. The verified-init materialization (EnsureOnAwake)
+        /// does NOT go through here and stays.
         /// </summary>
         private static bool TryHealNullSItems(ChestState state, ZNetView netView, long oldOwner, double elapsedSeconds, bool liveQuiescence = false)
         {
             try
             {
+                if (ServerAuthority.IsServerManagedContainer(state != null ? state.Container : null))
+                {
+                    TxLog.Warn("container=" + (state != null ? TxLog.Zid(state.ZdoId) : "?")
+                        + " null-heal refused: timer heal is legacy-only in ServerAuthority mode (quarantine persists)");
+                    return false;
+                }
                 if (state == null || (UnityEngine.Object)state.Container == (UnityEngine.Object)null)
                     return false;
                 if ((UnityEngine.Object)netView == (UnityEngine.Object)null || !netView.IsValid())
                     return false;
-                if (!state.Container.IsOwner())
+                if (!IsManager(state.Container))
                     return false;
                 Inventory inv;
                 try { inv = state.Container.GetInventory(); }
@@ -3133,7 +3208,9 @@ namespace BestAutoSort.Tx
                     // stays fail-closed (quarantine kept, never presumed empty).
                     // Counted for the runtime-verification checklist.
                     NoteSItemsNull("reload");
-                    // Null escape (v0.5.x empty-chest fix): the ONLY
+                    // Null escape (v0.5.x empty-chest fix, LegacyDistributed ONLY —
+                    // inert in ServerAuthority mode for managed chests: see the
+                    // Wave-3 gate below): the ONLY
                     // time-based exits, behind TxNullEscape.ShouldEscape
                     // (dead source: quarantined + still null + old owner
                     // provably gone + bounded wait elapsed) and
@@ -3167,6 +3244,26 @@ namespace BestAutoSort.Tx
                     // caller's Warn cadence via QuarantineWarns (see pump retry).
                     if (elapsedSeconds >= TxNullEscape.GraceSeconds && oldOwnerLive && TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns))
                         TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " null-escape blocked: oldOwner=" + state.QuarantineOldOwner + " liveWhy=" + liveWhy + " elapsed=" + elapsedSeconds.ToString("F1") + "s");
+                    // Wave-3 gate: the timer-based assume-empty heal is
+                    // LegacyDistributed-only (TxNullEscape.EscapeAllowed, pinned
+                    // by AUTHORITY_EscapeDisabledInAuthorityMode). In
+                    // ServerAuthority mode a server-owned chest with null
+                    // s_items stays fail-closed quarantined with a loud
+                    // diagnose — no timer exit on either leg (there is no dead
+                    // source to wait out: the server IS the authority). The
+                    // verified-init materialization (EnsureOnAwake) is the
+                    // single exception and lives outside this path. Legacy
+                    // chests fall through to the legs unchanged (bit-for-bit).
+                    if (!TxNullEscape.EscapeAllowed(ServerAuthority.IsAuthorityMode(),
+                        ServerAuthority.IsServerManagedContainer(state.Container)))
+                    {
+                        bool showAuthorityWarn = false;
+                        try { showAuthorityWarn = TxNullEscape.ShouldWarnQuarantine(state.QuarantineWarns); }
+                        catch { showAuthorityWarn = true; }
+                        if (showAuthorityWarn)
+                            TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " server-authority: null s_items fail-closed (NO timer escape): oldOwner=" + state.QuarantineOldOwner + " liveWhy=" + liveWhy + " elapsed=" + elapsedSeconds.ToString("F1") + "s — quarantine persists until an authoritative reload or verified init; manually reconcile if items are missing");
+                        return false;
+                    }
                     if (TxNullEscape.ShouldEscape(state.TxQuarantined, true, oldOwnerLive, elapsedSeconds))
                     {
                         if (TryHealNullSItems(state, netView, state.QuarantineOldOwner, elapsedSeconds))
@@ -3390,6 +3487,10 @@ namespace BestAutoSort.Tx
         /// where valid, deduped. Viewers-only was INSUFFICIENT (a requester whose
         /// presence never registered, and the world-save authority, would miss
         /// the push), so the collector — not Viewers alone — is the contract.
+        /// Wave-3: ForceSend is viewer-ONLY (a refresh hint so viewers poll the
+        /// new revision sooner). It never transfers ownership, never carries
+        /// mutation, and never hands a chest to a client — in ServerAuthority
+        /// mode the manager stays the server before AND after every push.
         /// Never throws; TxVerbose-gated logging only (TxLog.Info).
         /// </summary>
         private static void RequestPropagation(ChestState state)
@@ -3653,6 +3754,11 @@ namespace BestAutoSort.Tx
             // The transient-refusal RAM map is dropped (restart/handoff discards
             // RAM — the flagged retry reconciles on the clean manager through
             // the authoritative flagged branch, see OnTxRequest).
+            // Wave-3: in ServerAuthority mode SeedFromRing runs server-side ONLY
+            // (Takeover is gated to the server; structural acquire refuses
+            // remotes via BlockStructuralForRemote) — never as a client
+            // handoff. The drop stays correct there (adoption reseed starts
+            // with no transient entries). LegacyDistributed handoff unchanged.
             DropTransientFor(state);
             state.Processed.Clear();
             state.ProcOrder.Clear();

@@ -50,6 +50,12 @@ namespace BestAutoSort.TxCore
     /// self-heal save by re-reading + validated-loading the fresh blob before
     /// clearing the quarantine. ShouldWarnQuarantine dampens the stuck-pump
     /// Warn to first + every WarnEveryNth retry (12 x 0.5 s = ~6 s cadence).
+    ///
+    /// Wave-3: BOTH legs are LegacyDistributed-only (see EscapeAllowed). Under
+    /// ServerAuthority a managed chest never consults either leg: null s_items
+    /// on a server-owned chest stays quarantined with a loud diagnose. The
+    /// verified-init materialization (InitMaterializeAllowed) is the single
+    /// exception and stays.
     /// </summary>
     public static class TxNullEscape
     {
@@ -115,6 +121,51 @@ namespace BestAutoSort.TxCore
             if (double.IsNaN(elapsedSeconds) || double.IsInfinity(elapsedSeconds))
                 return false;
             return elapsedSeconds >= QuiescenceSeconds;
+        }
+
+        /// <summary>
+        /// Wave-3 mode gate for BOTH timer legs (dead-source ShouldEscape +
+        /// live-quiescence ShouldEscapeLiveQuiescent). The timer-based
+        /// assume-empty heal is LegacyDistributed-only: under ServerAuthority
+        /// a server-owned chest with null s_items stays fail-closed
+        /// quarantined (loud diagnose, no timer exit) — the server IS the
+        /// authority, so there is no dead source to wait out and no live
+        /// source to converge with; healing empty would risk cementing empty
+        /// over unreplicated state. False = caller must keep the quarantine
+        /// and diagnose loudly instead of consulting either leg. True =
+        /// legacy path, consult the legs unchanged (bit-for-bit preserved).
+        /// The verified-init empty-blob materialization (EnsureOnAwake, via
+        /// InitMaterializeAllowed below) is NOT behind this gate and stays.
+        /// Never throws.
+        /// </summary>
+        public static bool EscapeAllowed(bool authorityMode, bool managed)
+        {
+            return !(authorityMode && managed);
+        }
+
+        /// <summary>
+        /// Wave-3 verified-init materialization rule (the single exception to
+        /// the authority-mode no-heal rule). True ONLY when the chest is a
+        /// server-managed chest under ServerAuthority AND the awake/init
+        /// context is fully verified: self-owned at awake (the server itself
+        /// created it) + s_items absent (never replicated, not merely
+        /// invalid) + live RAM provably empty (never cement empty over real
+        /// contents). ServerAuthority.EnsureOnAwake consults THIS predicate
+        /// (pinned by AUTHORITY_VerifiedInitStillMaterializes); timer-based
+        /// paths must NEVER consult it (fail closed there). Never throws.
+        /// </summary>
+        public static bool InitMaterializeAllowed(bool authorityMode, bool managed,
+            bool selfOwnedAtAwake, bool sItemsAbsent, bool ramEmpty)
+        {
+            if (!authorityMode)
+                return false;
+            if (!managed)
+                return false;
+            if (!selfOwnedAtAwake)
+                return false;
+            if (!sItemsAbsent)
+                return false;
+            return ramEmpty;
         }
 
         /// <summary>

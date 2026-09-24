@@ -108,6 +108,10 @@ internal static class AutoFeedService
 		ZNetView animalView = (ZNetView)((value is ZNetView) ? value : null);
 		object value2 = MonsterAiField.GetValue(tameable);
 		MonsterAI val = (MonsterAI)((value2 is MonsterAI) ? value2 : null);
+		// Wave-2: the scheduler stays animal-owner-side (this IsOwner gate is on the
+		// ANIMAL, not a chest, and is intentionally unchanged): the server never
+		// initiates feeding for non-owned animals. Chest Takes below go through
+		// the server ChestTX manager queue (RequestTakeCustom, authority-routed).
 		if (!((Object)(object)animalView == (Object)null) && animalView.IsValid() && animalView.IsOwner() && !((Object)(object)val == (Object)null) && !((BaseAI)val).IsAlerted() && tameable.IsHungry())
 		{
 			float realtimeSinceStartup = Time.realtimeSinceStartup;

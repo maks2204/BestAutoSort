@@ -18,7 +18,12 @@ namespace BestAutoSort.Patches
         {
             Container container = InventoryAccess.CurrentContainer(__instance);
             if ((Object)container == (Object)null || !ChestTxService.IsShared(container))
+            {
+                // Eligible but outside the shared path: view-only for non-owners.
+                if (ServerAuthority.DenyIfViewOnly(container, "gui-dropoutside"))
+                    return false;
                 return true;
+            }
             ItemData dragItem = TxGui.GetDragItem(__instance);
             Inventory dragInv = TxGui.GetDragInventory(__instance);
             int dragAmount = TxGui.GetDragAmount(__instance);
@@ -28,7 +33,8 @@ namespace BestAutoSort.Patches
                 return true;
             if (dragItem.m_shared != null && dragItem.m_shared.m_questItem)
                 return true;
-            if (container.IsOwner())
+            // Wave-2: authority-routed (manager-only vanilla, remote via tx).
+            if (ChestTxService.IsManager(container))
             {
                 ChestTxService.DrainForLocal(container);
                 return true;

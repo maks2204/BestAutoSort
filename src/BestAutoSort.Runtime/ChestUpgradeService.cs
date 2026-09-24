@@ -113,7 +113,9 @@ internal static class ChestUpgradeService
 			return false;
 		}
 		ZNetView component = ((Component)val).GetComponent<ZNetView>();
-		if ((Object)(object)component == (Object)null || !component.IsOwner())
+		// Wave-2: authority-routed. Remote managed chests are never migrated here
+		// (fail closed: no claim); the host/server-local path is unchanged.
+		if ((Object)(object)component == (Object)null || !BestAutoSort.Tx.ChestTxService.IsManager(val))
 		{
 			return false;
 		}
@@ -165,8 +167,16 @@ internal static class ChestUpgradeService
 			ShowMessage("This chest cannot persist an upgrade.");
 			return;
 		}
+		// Wave-2: repair-first (server-only inside; remote no-op) so a genuine host
+		// upgrade is not mistaken for a remote structural attempt.
+		ServerAuthority.EnsureServerOwnership(val, "upgrade");
 		if (!component.IsOwner())
 		{
+			// Wave-2 structural: a remote viewer of a server-managed chest fails
+			// closed with a loud error - no ownership wait, no claim. Legacy and
+			// unmanaged chests keep the legacy wait-and-retry message.
+			if (ServerAuthority.BlockStructuralForRemote(val, "upgrade"))
+				return;
 			ShowMessage("Waiting for chest ownership. Try Upgrade again.");
 			return;
 		}
@@ -326,6 +336,14 @@ internal static class ChestUpgradeService
 		Piece component2 = ((Component)source).GetComponent<Piece>();
 		if ((Object)(object)component == (Object)null || component.GetZDO() == null || !component.IsOwner() || (Object)(object)component2 == (Object)null)
 		{
+			// Wave-2: remote managed chests never reach the replacement claim below
+			// (fail closed here with a loud error instead of attempting a claim
+			// the guards would block anyway).
+			if (ServerAuthority.BlockStructuralForRemote(source, "replace"))
+			{
+				error = "this server-managed chest cannot be upgraded from a remote peer.";
+				return false;
+			}
 			error = "the original chest is not locally owned.";
 			return false;
 		}
@@ -364,6 +382,14 @@ internal static class ChestUpgradeService
 			}
 			if (!component3.IsOwner())
 			{
+				// Wave-2: no client-side replacement ClaimOwnership for managed
+				// chests (fail closed loud); the host/server-local path still claims.
+				if (ServerAuthority.IsServerManagedContainer(replacement))
+				{
+					error = "the replacement chest could not be claimed (server-managed, non-manager).";
+					Plugin.LogInstance.LogWarning((object)"[ChestTX] server-authority: structural replacement claim refused for non-manager (fail closed, no ClaimOwnership attempted)");
+					return false;
+				}
 				component3.ClaimOwnership();
 			}
 			if (!component3.IsOwner())

@@ -36,6 +36,7 @@ namespace ChestTx.Tests
             TxCascadeNoProgressTests.RunAll();
             TxMustFixTests.RunAll();
             TxPropagationTests.RunAll();
+            TxAuthorityPolicyTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

@@ -163,8 +163,11 @@ internal sealed class QuickStackService
 			// Единый путь для владельца и остальных: SubmitCall сам ведёт
 			// владельца локально в очередь (тот же кадр, серийно), остальных — по сети.
 			// Коммит всегда идёт через менеджер: броадкаст полётов срабатывает для всех.
+			// Wave-2 authority routing: the manager verdict (not raw ownership)
+			// decides. A remote viewer of a server-managed chest is never the
+			// manager: non-shared there means view-only, never a direct mutation.
 			string sharedWhy;
-			if (!chest.IsOwner() && !ChestTxService.IsSharedVerbose(chest, out sharedWhy))
+			if (!ChestTxService.IsManager(chest) && !ChestTxService.IsSharedVerbose(chest, out sharedWhy))
 			{
 				Plugin.LogInstance.LogInfo((object)("[ChestTX] quickstack chest skipped: " + sharedWhy));
 				continue;
@@ -288,7 +291,7 @@ internal sealed class QuickStackService
 					Container target = rest[r];
 					if ((Object)(object)target == (Object)null)
 						continue;
-					if (!target.IsOwner())
+					if (!ChestTxService.IsManager(target))
 					{
 						string why;
 						if (!ChestTxService.IsSharedVerbose(target, out why))
@@ -359,8 +362,14 @@ internal sealed class QuickStackService
 		}
 		if (!ChestTxService.IsShared(openContainer))
 		{
-			if (!openContainer.IsOwner())
+			// Wave-2: manager verdict, not raw ownership. Remote managed chests
+			// never reach the direct vanilla mutation below (fail closed: the
+			// open chest stays listed as handled, nothing is mutated).
+			if (!ChestTxService.IsManager(openContainer))
 				return true;
+			// Manager-side direct mutation runs single-threaded after draining
+			// the remote queue first, so it stays serialized with tx traffic.
+			ChestTxService.DrainForLocal(openContainer);
 			List<TransferRecord> records = new List<TransferRecord>();
 			QuickStackTransfer.MoveMatching(openContainer, ((Humanoid)player).GetInventory(), records);
 			// Owned chest mutated directly (no tx queue): persist like the manager.

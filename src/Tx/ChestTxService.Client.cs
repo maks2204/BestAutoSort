@@ -818,9 +818,11 @@ namespace BestAutoSort.Tx
             call.Op = TxOp.TakeBatch;
             call.Items.AddRange(items);
             call.RespectReserves = respectReserves;
-            if (container.IsOwner())
+            if (IsManager(container))
             {
-                // Owner fast path: map the StoredResult directly. The Submit path hands
+                // Manager fast path (wave-2 authority-routed: host/server-local
+                // queues here; remote managed chests NEVER take this branch and
+                // always go over RPC below): map the StoredResult directly. The Submit path hands
                 // a null package for local commits, which the body decoder cannot read
                 // (taken items would be voided).
                 MutateLocal(container, call, delegate (StoredResult r)
@@ -925,7 +927,7 @@ namespace BestAutoSort.Tx
                 }
                 return;
             }
-            if (container.IsOwner())
+            if (IsManager(container))
             {
                 MutateLocal(container, call, delegate (StoredResult r)
                 {
@@ -1238,7 +1240,7 @@ namespace BestAutoSort.Tx
                     _nextPresenceAt = Time.realtimeSinceStartup + PresenceHeartbeat;
                 }
             }
-            if ((Object)open == (Object)null || open.IsOwner())
+            if ((Object)open == (Object)null || IsManager(open))
                 return;
             if (!IsShared(open))
                 return;
@@ -1341,7 +1343,7 @@ namespace BestAutoSort.Tx
 
         private static void SendPresence(Container container, TxOp op)
         {
-            if (!IsShared(container) || container.IsOwner())
+            if (!IsShared(container) || IsManager(container))
                 return;
             ZNetView netView = TxReflect.GetNetView(container);
             if ((Object)netView == (Object)null || !netView.IsValid())
@@ -1400,11 +1402,30 @@ namespace BestAutoSort.Tx
                 ZNetView netView = TxReflect.GetNetView(state.Container);
                 if ((Object)netView == (Object)null || !netView.IsValid())
                     continue;
+                // Wave-1 server authority: discovery repair BEFORE the Takeover
+                // check (server-only inside), so a fresh repair flows through the
+                // existing Takeover reseed below before any mutation.
+                bool managedChest = ServerAuthority.IsServerManagedContainer(state.Container);
+                if (managedChest)
+                    ServerAuthority.EnsureServerOwnership(state.Container, "pump");
                 long owner = netView.GetZDO().GetOwner();
                 if (owner == ZNet.GetUID() && state.LastOwner != owner)
                 {
                     // Takeover: I became the manager — load the latest committed state.
-                    Takeover(state);
+                    // (LegacyDistributed handoff. Wave-3 gate: in ServerAuthority
+                    // mode a managed chest is server-owned at all times, so only
+                    // the server may Takeover here — the initial adoption reseed
+                    // after EnsureServerOwnership. A remote peer never takes over
+                    // a managed chest: there is no client handoff. The skip is
+                    // fail-closed — quarantine untouched — and LastOwner still
+                    // advances below so the tripwire does not spin.)
+                    bool localIsServer = false;
+                    try { localIsServer = (UnityEngine.Object)ZNet.instance != (UnityEngine.Object)null && ZNet.instance.IsServer(); }
+                    catch { localIsServer = false; }
+                    if (TxAuthorityRouting.TakeoverAllowed(ServerAuthority.IsAuthorityMode(), managedChest, localIsServer))
+                        Takeover(state);
+                    else
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " server-authority: remote Takeover refused (no client handoff; manager stays the server)");
                 }
                 state.LastOwner = owner;
                 if (owner != ZNet.GetUID())

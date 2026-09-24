@@ -281,7 +281,9 @@ internal static class StorageCommands
 	private static Container OpenChest(Player player)
 	{
 		Container val = InventoryAccess.CurrentContainer(InventoryGui.instance);
-		if ((Object)(object)val == (Object)null || AutoFeedService.IsLocked(val) || !val.IsOwner() || !TxReflect.HasAccess(val, player.GetPlayerID()) || !ChestAuthority.WardAccess(val, player.GetPlayerID()))
+		// Wave-2: authority-routed. Remote managed chests fail closed (the manager
+		// verdict, not raw ownership, gates console mutation).
+		if ((Object)(object)val == (Object)null || AutoFeedService.IsLocked(val) || !BestAutoSort.Tx.ChestTxService.IsManager(val) || !TxReflect.HasAccess(val, player.GetPlayerID()) || !ChestAuthority.WardAccess(val, player.GetPlayerID()))
 		{
 			throw new InvalidOperationException("Open an accessible chest and wait for ownership first.");
 		}

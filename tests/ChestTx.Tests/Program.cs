@@ -25,6 +25,7 @@ namespace ChestTx.Tests
             TxRingCascadeTests.RunAll();
             TxIdentityFloorTests.RunAll();
             TxRingV2Tests.RunAll();
+            TxFenceCrashTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

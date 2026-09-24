@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace BestAutoSort.TxCore
@@ -47,8 +47,11 @@ namespace BestAutoSort.TxCore
     ///   UNBOUNDED, never evicted, never refusing) makes an absent txId at or
     ///   below its sender's high-water indeterminate (UnknownTx): it must NEVER execute.
     ///   This intentionally includes a delayed first-time out-of-order request.
-    /// - The high-water fence is written BEFORE the mutation commits, so a crash
-    ///   in between leaves the request Indeterminate, never double-applied.
+    /// - The durable pre-execution fence (RAM high-water + persisted floor copy,
+    ///   shared order with production via the TxDurability seam) is written BEFORE
+    ///   any mutation, so a crash in any later window leaves the request
+    ///   Indeterminate, never double-applied. The floor is seen-high-water and
+    ///   never rolls back.
     /// - Authenticated replay identity is checked before anything else on the
     ///   replay path with canonical keys (TxIdGen.MatchesPeer): a sender/txId
     ///   mismatch is Rejected without exposing another sender's cached payload.
@@ -68,6 +71,15 @@ namespace BestAutoSort.TxCore
         private bool _floorCorrupt;
 
         public uint Revision { get; private set; }
+
+        /// <summary>
+        /// Optional persistence seam. Null (default) = legacy RAM-only behavior.
+        /// Set = durable pre-execution fence order shared with production:
+        /// fence (floor write) -&gt; ownership recheck -&gt; execute -&gt; items save -&gt;
+        /// cache -&gt; ring write -&gt; floor write, with Indeterminate answers and
+        /// crash-point injection (see TxDurability). Replays never fence.
+        /// </summary>
+        public TxDurability Durability { get; set; }
 
         public int ProcessedCount
         {
@@ -127,7 +139,7 @@ namespace BestAutoSort.TxCore
                 long peer = TxIdGen.PeerOf(request.TxId);
                 uint ctr = TxIdGen.CounterOf(request.TxId);
                 if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
-                    return CacheSpoofReject(request, peer, ctr);
+                    return SpoofReject(request, peer);
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
                 {
@@ -140,12 +152,56 @@ namespace BestAutoSort.TxCore
                 // The floor map is UNBOUNDED (never evicted, never refusing):
                 // FloorCap is only a warn threshold for operators. A fixed cap
                 // would brick liveness in long-lived worlds.
-                // Write-ahead fence: the high-water is recorded BEFORE the
-                // mutation, so a crash between fence and commit can only leave
-                // the request Indeterminate (at/below floor, never executes)
-                // — it can never double-apply.
+                // Durable pre-execution fence: the RAM high-water is recorded AND the
+                // floor copy is durably persisted BEFORE any mutation, so a crash in
+                // any later window leaves this txId Indeterminate, never double-applied.
+                // The floor is seen-high-water and NEVER rolls back — not even when the
+                // fence write itself fails (then nothing mutated, so a later FRESH txId
+                // is still exactly-once while this txId stays blocked in-session).
+                // With Durability unset this degrades to the legacy RAM-only fence.
                 AdvanceFloor(peer, ctr);
-                TxResult result = Execute(chest, request);
+                if (Durability != null)
+                {
+                    if (!PersistFloorHook())
+                    {
+                        // Fence write failed: zero side effects beyond the seen floor
+                        // (no mutation, no cache entry, nothing persisted). Loud
+                        // Indeterminate, no auto-retry: the client retries as a NEW txId.
+                        return UnknownResult();
+                    }
+                    FireCrash(TxDurabilityPoint.AfterFence);
+                    if (!IsOwnerHook())
+                    {
+                        // Ownership lost after the fence (production ZDO.Set is
+                        // owner-gated, so the fence write may itself have no-op'd):
+                        // no mutation may follow. The fence stays — never rolls back.
+                        return UnknownResult();
+                    }
+                }
+                TxResult result;
+                try
+                {
+                    result = Execute(chest, request);
+                }
+                catch
+                {
+                    // Post-fence Execute throw (production: ExecuteCall or
+                    // Container.Save): commitment unknowable, the fence stays, the
+                    // same txId is Indeterminate and never re-executes.
+                    return UnknownResult();
+                }
+                if (Durability != null)
+                {
+                    FireCrash(TxDurabilityPoint.AfterExecute);
+                    if (!SaveItemsHook(chest))
+                    {
+                        // Items-save failed (production SaveContainer): RAM may be
+                        // mutated but nothing further persisted — Indeterminate,
+                        // fence stays, never re-executes.
+                        return UnknownResult();
+                    }
+                    FireCrash(TxDurabilityPoint.AfterItemsSave);
+                }
                 result.Op = request.Op;
                 result.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
                 result.Revision = Revision;
@@ -159,8 +215,31 @@ namespace BestAutoSort.TxCore
                     _takeBlobs.Remove(oldest);
                 }
                 AdvanceFloor(peer, ctr);
-                _ring.Clear();
-                _ring.AddRange(TxRing.Snapshot(CollectSlots()));
+                RebuildRing();
+                if (Durability != null)
+                {
+                    if (result.Status == TxStatus.Rejected)
+                    {
+                        // Deterministic Rejected: the entry AND the floor copy must
+                        // persist, otherwise the answer is Indeterminate (a RAM-only
+                        // Rejected would flip after a restart). The fresh seed is
+                        // evicted on failure so a retry re-attempts persistence.
+                        if (!PersistRingHook() || !PersistFloorHook())
+                        {
+                            Evict(request.TxId);
+                            return UnknownResult();
+                        }
+                    }
+                    else
+                    {
+                        // Accepted/Partial: the pre-execution fence is already durable,
+                        // so a retry stays Indeterminate (never double-applies) and the
+                        // next successful commit heals the ring. Best-effort here.
+                        PersistRingHook();
+                        FireCrash(TxDurabilityPoint.AfterRing);
+                        PersistFloorHook();
+                    }
+                }
                 if (!_floorCorrupt)
                     _corrupt = false; // degraded-mode recovery: the ring was just rebuilt from the live cache.
                 return result;
@@ -613,6 +692,7 @@ namespace BestAutoSort.TxCore
         /// Cached as Rejected under the PEER (so the exact counter stays blocked
         /// with a stable answer) WITHOUT advancing the floor — pushing the true
         /// owner's high-water would amplify the spoof into a wider denial.
+        /// Legacy RAM-only path (Durability unset): seed + rebuild, answer Rejected.
         /// </summary>
         private TxResult CacheSpoofReject(TxRequest request, long peer, uint ctr)
         {
@@ -635,6 +715,119 @@ namespace BestAutoSort.TxCore
             _ring.Clear();
             _ring.AddRange(TxRing.Snapshot(CollectSlots()));
             return result;
+        }
+
+        /// <summary>
+        /// Spoof entry point: the durable variant seeds the Rejected entry and persists
+        /// the ring copy, but NEVER advances any floor (the true owner's high-water is
+        /// untouched). If the ring write fails the seed is evicted and the answer is
+        /// Indeterminate — a RAM-only spoof Rejected would flip after a restart.
+        /// </summary>
+        private TxResult SpoofReject(TxRequest request, long peer)
+        {
+            if (Durability == null)
+            {
+                uint ctr = TxIdGen.CounterOf(request.TxId);
+                return CacheSpoofReject(request, peer, ctr);
+            }
+            TxResult result = new TxResult
+            {
+                Status = TxStatus.Rejected,
+                Revision = Revision,
+                Op = request.Op,
+                Sender = peer
+            };
+            _processed[request.TxId] = result.Clone();
+            _order.AddLast(request.TxId);
+            while (_order.Count > TxLimits.ProcessedCacheCap)
+            {
+                long oldest = _order.First.Value;
+                _order.RemoveFirst();
+                _processed.Remove(oldest);
+                _takeBlobs.Remove(oldest);
+            }
+            RebuildRing();
+            if (!PersistRingHook())
+            {
+                Evict(request.TxId);
+                return UnknownResult();
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Best-effort removal of a just-seeded (never committed) entry whose
+        /// persistence failed, so the same txId retries persistence instead of
+        /// replaying a non-durable answer. The floor advance is intentionally KEPT
+        /// (seen-high-water, never rolls back): an in-session retry is stale-gated
+        /// to Indeterminate, and nothing ever executed, so a post-restart fresh
+        /// attempt stays exactly-once.
+        /// </summary>
+        private void Evict(long txId)
+        {
+            _processed.Remove(txId);
+            _order.Remove(txId);
+            _takeBlobs.Remove(txId);
+            RebuildRing();
+        }
+
+        private void RebuildRing()
+        {
+            _ring.Clear();
+            _ring.AddRange(TxRing.Snapshot(CollectSlots()));
+        }
+
+        /// <summary>
+        /// Floor-copy write through the seam. Null seam/hook = success (legacy).
+        /// False (or encode failure) = nothing persisted. A TxCrashException from
+        /// the hook models a crash DURING the write and always propagates.
+        /// </summary>
+        private bool PersistFloorHook()
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.WriteFloor == null)
+                return true;
+            byte[] bytes = EncodeFloor(_floor);
+            if (bytes == null)
+                return false;
+            return seam.WriteFloor(bytes);
+        }
+
+        /// <summary>Ring-copy write through the seam (same contract as PersistFloorHook).</summary>
+        private bool PersistRingHook()
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.WriteRing == null)
+                return true;
+            byte[] bytes = EncodeRingV3(_ring, _floor);
+            if (bytes == null)
+                return false;
+            return seam.WriteRing(bytes);
+        }
+
+        /// <summary>Items-save through the seam (production Container.Save analog).</summary>
+        private bool SaveItemsHook(ModelChest chest)
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.SaveItems == null)
+                return true;
+            return seam.SaveItems(chest);
+        }
+
+        /// <summary>Post-fence ownership recheck through the seam (null = owner).</summary>
+        private bool IsOwnerHook()
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.IsOwner == null)
+                return true;
+            return seam.IsOwner();
+        }
+
+        private void FireCrash(TxDurabilityPoint point)
+        {
+            TxDurability seam = Durability;
+            if (seam != null && seam.Crash != null)
+                seam.Crash(point);
         }
 
         /// <summary>Write-ahead fence + commit marker: UNBOUNDED, never evicting. FloorCap is a warn threshold only.</summary>

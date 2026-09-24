@@ -524,10 +524,30 @@ namespace BestAutoSort.Tx
                     state.Processed.Clear();
                     state.ProcOrder.Clear();
                     SeedFromRing(state, ReadRing(container), ReadFloor(container));
+                    // Queued-but-unapplied jobs must keep a stable outcome: seed
+                    // them as Rejected in the FRESH cache (nothing was applied, so
+                    // the sender retries as a NEW tx) instead of letting the same
+                    // txId execute later and flip to Accepted. Rejected is answered
+                    // only when durably persisted (ring + floor); otherwise each job
+                    // keeps Indeterminate. On eviction-after-failure the floor advance
+                    // is kept (never rolls back), so an in-session retry stays stale.
+                    TxStatus droppedStatus = TxStatus.Rejected;
+                    if (dropped.Count > 0)
+                    {
+                        System.Collections.Generic.List<long> seeded = new System.Collections.Generic.List<long>();
+                        foreach (TxJob dj in dropped)
+                            if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
+                                seeded.Add(dj.TxId);
+                        if (!WriteRing(state) || !WriteFloor(state))
+                        {
+                            TxLog.Warn("structural acquire drops not persisted (indeterminate)");
+                            foreach (long txId in seeded)
+                                EvictSeededReject(state, txId);
+                            droppedStatus = TxStatus.UnknownTx;
+                        }
+                    }
                     foreach (TxJob dj in dropped)
-                        SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true);
-                    foreach (TxJob dj in dropped)
-                        AnswerReject(state, dj);
+                        AnswerReject(state, dj, droppedStatus);
                     state.LastOwner = ZNet.GetUID();
                 }
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " structural acquire by " + ZNet.GetUID());
@@ -918,8 +938,12 @@ namespace BestAutoSort.Tx
                 // Deterministic version mismatch: persist the definitive Rejected
                 // so the same txId can never execute later (not even after handoff).
                 TxLog.Warn("tx=" + txId + " REJECT incompatible peer " + sender);
-                SeedReject(state, txId, call.Op, sender, true);
-                WriteRing(state);
+                if (!TryPersistReject(state, txId, call.Op, sender, true))
+                {
+                    TxLog.Warn("tx=" + txId + " REJECT not persisted (indeterminate)");
+                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                    return;
+                }
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
@@ -948,8 +972,12 @@ namespace BestAutoSort.Tx
                 // advancing the floor: the exact counter is blocked, lower/upper
                 // counters of the true owner are unaffected.
                 TxLog.Warn("tx=" + txId + " REJECT sender/txId mismatch sender=" + sender);
-                SeedReject(state, txId, call.Op, TxIdGen.PeerOf(txId), false);
-                WriteRing(state);
+                if (!TryPersistReject(state, txId, call.Op, TxIdGen.PeerOf(txId), false))
+                {
+                    TxLog.Warn("tx=" + txId + " spoof REJECT not persisted (indeterminate)");
+                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                    return;
+                }
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
@@ -1003,8 +1031,12 @@ namespace BestAutoSort.Tx
             {
                 // Persist the definitive Rejected: same txId, same answer forever.
                 LogAccessReject(container, txId, sender, playerId, call.Op, accessWhy);
-                SeedReject(state, txId, call.Op, sender, true);
-                WriteRing(state);
+                if (!TryPersistReject(state, txId, call.Op, sender, true))
+                {
+                    TxLog.Warn("tx=" + txId + " REJECT not persisted (indeterminate)");
+                    Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                    return;
+                }
                 Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
@@ -1204,11 +1236,15 @@ namespace BestAutoSort.Tx
                     }
                     catch (Exception ex)
                     {
-                        // The op may have mutated before throwing (inventory and
-                        // ring writes are not atomic): commitment is unknowable, so
-                        // answer INDETERMINATE — never a definitive Rejected that a
-                        // later retry could contradict by executing. The floor still
-                        // advances so the same txId can never execute later.
+                        // Backstop: ApplyJob answers its own fence/execute failures, so this
+                        // fires only for post-fence throws (SaveContainer inside CommitResult
+                        // or an unexpected fault). The op may have mutated before throwing, and
+                        // inventory/ring/floor writes are not atomic: commitment is unknowable,
+                        // so answer INDETERMINATE — never a definitive Rejected that a later
+                        // retry could contradict by executing. The durable pre-execution fence
+                        // already recorded this txId before any mutation; the floor is
+                        // seen-high-water and NEVER rolls back, so the same txId can never
+                        // execute later. Re-persist the fence copies best-effort (SameBytes skip).
                         TxLog.Error("tx=" + job.TxId + " apply failed: " + ex.Message);
                         result = new StoredResult();
                         result.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
@@ -1216,6 +1252,7 @@ namespace BestAutoSort.Tx
                         result.Revision = CurrentRevision(state.Container);
                         AdvanceFloor(state, job.TxId);
                         WriteRing(state);
+                        WriteFloor(state);
                     }
                     try
                     {
@@ -1288,20 +1325,82 @@ namespace BestAutoSort.Tx
             Inventory inv = job.Container.GetInventory();
             if (inv == null)
             {
-                // Persist the rejection like any other terminal outcome so the
-                // same txId keeps its answer (CommitResult caches everything).
+                // Deterministic rejection: the Rejected outcome is answered only when it
+                // is durably persisted (ring entry AND floor copy). Otherwise the same
+                // txId must stay Indeterminate — a forgotten Rejected re-executed later
+                // could flip to Accepted. CommitResult caches everything and writes
+                // ring+floor; the re-write below is an idempotent retry (SameBytes skip)
+                // that only fires when the first write failed.
                 StoredResult result = new StoredResult();
                 result.Op = job.Call.Op;
                 result.Status = TxStatus.Rejected;
                 CommitResult(state, job, result);
+                if (!WriteRing(state) || !WriteFloor(state))
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REJECT not persisted (indeterminate)");
+                    EvictSeededReject(state, job.TxId);
+                    StoredResult unpersisted = new StoredResult();
+                    unpersisted.Op = job.Call.Op;
+                    unpersisted.Status = TxStatus.UnknownTx;
+                    unpersisted.Revision = CurrentRevision(job.Container);
+                    return unpersisted;
+                }
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " REJECT op=" + job.Call.Op);
                 return result;
             }
-            // Write-ahead fence: record the high-water BEFORE executing, so a crash
-            // between fence and commit leaves this txId Indeterminate, never double-applied.
-            AdvanceFloor(state, job.TxId);
-            StoredResult applied = ExecuteCall(state, job, inv);
+            // Durable pre-execution fence: AFTER every gate (replay/stale/spoof/access/
+            // both-corrupt rechecks above), BEFORE every fresh Execute* — the single
+            // choke point for ALL callers (GUI, Sort, SetRule, Upgrade, automation).
+            // Replays never reach here (answered from cache above, never re-fenced).
+            // RAM high-water + FloorKey write. False => ZERO side effects: nothing
+            // executed, nothing cached, answer UnknownTx (Indeterminate) loudly, with
+            // no auto-retry and no new-tx synthesis — the client retries as a NEW txId.
+            // The floor is seen-high-water and NEVER rolls back (not even on fence-write
+            // failure: nothing mutated, so a later FRESH txId is still exactly-once
+            // while this txId stays blocked in-session).
+            if (!TryPersistExecutionFence(state, job.TxId))
+            {
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " fence not persisted (indeterminate, never executes)");
+                StoredResult fenceFail = new StoredResult();
+                fenceFail.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                fenceFail.Status = TxStatus.UnknownTx;
+                fenceFail.Revision = CurrentRevision(job.Container);
+                return fenceFail;
+            }
+            if (!job.Container.IsOwner())
+            {
+                // Ownership lost after the fence (ZDO.Set is owner-gated, so the fence
+                // write above may itself have no-op'd): no mutation may follow. The floor
+                // stays advanced — never rolls back — and the answer is Indeterminate.
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " lost ownership after fence (indeterminate)");
+                StoredResult ownerLost = new StoredResult();
+                ownerLost.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                ownerLost.Status = TxStatus.UnknownTx;
+                ownerLost.Revision = CurrentRevision(job.Container);
+                return ownerLost;
+            }
+            StoredResult applied;
+            try
+            {
+                applied = ExecuteCall(state, job, inv);
+            }
+            catch (Exception ex)
+            {
+                // Post-fence Execute throw: the op may have partially mutated RAM
+                // inventory (never persisted on this path) — commitment unknowable.
+                // The fence stays: the same txId is Indeterminate, never re-executes.
+                TxLog.Error("tx=" + job.TxId + " execute failed: " + ex.Message);
+                StoredResult execFail = new StoredResult();
+                execFail.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                execFail.Status = TxStatus.UnknownTx;
+                execFail.Revision = CurrentRevision(job.Container);
+                return execFail;
+            }
             CommitResult(state, job, applied);
+            // CommitResult persists items, then ring+floor best-effort. A failed commit
+            // write does NOT change the answer: the pre-execution fence is already
+            // durable, so a retry stays Indeterminate (never double-applies) and the
+            // next successful commit heals the ring.
             uint baseRev = job.BaseRev;
             uint now = CurrentRevision(job.Container);
             if (baseRev != 0u && baseRev != now && baseRev != applied.Revision)
@@ -1600,7 +1699,14 @@ namespace BestAutoSort.Tx
             return result;
         }
 
-        private static void CommitResult(ChestState state, TxJob job, StoredResult result)
+        /// <summary>
+        /// Persists a terminal outcome (EVERY status incl. Rejected): items save, then
+        /// RAM cache + fence + ring + floor. Returns true only when BOTH the ring and
+        /// the floor copies were (re)written — callers answering a FINAL Rejected must
+        /// treat false as Indeterminate (see ApplyJob inv==null). Accepted/Partial
+        /// callers keep the outcome on false: the pre-execution fence is already durable.
+        /// </summary>
+        private static bool CommitResult(ChestState state, TxJob job, StoredResult result)
         {
             bool mutated = result.Status == TxStatus.Accepted || result.Status == TxStatus.Partial;
             if (mutated)
@@ -1608,6 +1714,10 @@ namespace BestAutoSort.Tx
                 // Chest height must track content (otherwise viewers see rows
                 // the manager lacks, and drops there get rejected).
                 TxReflect.UpdateRows(state.Container);
+                // A SaveContainer throw propagates to the Drain backstop (UnknownTx):
+                // RAM inventory may be mutated while ZDO items stay unsaved/torn, but
+                // the pre-execution fence is durable — the same txId stays Indeterminate
+                // forever, never re-executes. The floor NEVER rolls back.
                 TxReflect.SaveContainer(state.Container);
             }
             // Post-inventory-save commit checkpoint: captured BEFORE the ring
@@ -1644,6 +1754,7 @@ namespace BestAutoSort.Tx
                 state.RingCorrupt = false;
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                 + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
+            return ringOk && floorOk;
         }
 
         private static StoredResult RejectNew()
@@ -1750,11 +1861,13 @@ namespace BestAutoSort.Tx
         /// Never overwrites a committed outcome: pre-replay callers answer from
         /// cache first (TryRespondCached), and this guard keeps the seeding
         /// itself idempotent (no outcome flip, no duplicate ProcOrder entry).
+        /// Returns true when the entry was freshly seeded (callers use it to evict
+        /// a seed whose persistence failed — see TryPersistReject).
         /// </summary>
-        private static void SeedReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
+        private static bool SeedReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
         {
             if (state.Processed.ContainsKey(txId))
-                return;
+                return false;
             StoredResult r = new StoredResult();
             r.Op = op;
             r.Status = TxStatus.Rejected;
@@ -1780,6 +1893,65 @@ namespace BestAutoSort.Tx
             }
             if (advanceFloor)
                 AdvanceFloor(state, txId);
+            return true;
+        }
+
+        /// <summary>
+        /// Durable pre-execution fence shared by ApplyJob (the single choke point before
+        /// EVERY fresh Execute*): RAM high-water first (seen-high-water, never rolled
+        /// back), then the FloorKey write. True only when the fence is durable.
+        /// A SameBytes skip counts as durable: LastFloorBytes holds ONLY bytes from a
+        /// successful ZDO.Set by THIS peer and is cleared to null on every SeedFromRing
+        /// reset, so a skip can never bypass the first persistence after a handoff.
+        /// </summary>
+        private static bool TryPersistExecutionFence(ChestState state, long txId)
+        {
+            AdvanceFloor(state, txId);
+            return WriteFloor(state);
+        }
+
+        /// <summary>
+        /// Deterministic pre-queue Rejected (incompatible peer, spoof, access denial):
+        /// seed the RAM entry, then persist it. The Rejected answer may be sent ONLY when
+        /// the outcome is durable — the ring entry, plus the floor copy when the floor
+        /// advances. Otherwise the caller must answer UnknownTx (Indeterminate): a
+        /// RAM-only Rejected would flip after a restart/handoff. On failure a freshly
+        /// seeded entry is evicted so a retry re-attempts persistence instead of
+        /// replaying a non-durable answer (the floor advance is KEPT: seen-high-water,
+        /// never rolls back, so an in-session retry is stale-gated to Indeterminate).
+        /// Spoof entries never advance any floor (advanceFloor=false), so a spoof can
+        /// never fence the true owner's high-water. Returns true when Rejected may be sent.
+        /// </summary>
+        private static bool TryPersistReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
+        {
+            bool seeded = SeedReject(state, txId, op, storedSender, advanceFloor);
+            bool ringOk = WriteRing(state);
+            bool floorOk = true;
+            if (advanceFloor)
+                floorOk = WriteFloor(state);
+            if (ringOk && floorOk)
+                return true;
+            if (seeded)
+                EvictSeededReject(state, txId);
+            return false;
+        }
+
+        /// <summary>
+        /// Best-effort removal of a just-seeded (never committed) Rejected entry whose
+        /// persistence failed, so the same txId retries persistence instead of replaying
+        /// a non-durable answer. Never touches committed outcomes: callers only evict
+        /// txIds they just seeded (and only when the seed was fresh — see SeedReject).
+        /// </summary>
+        private static void EvictSeededReject(ChestState state, long txId)
+        {
+            state.Processed.Remove(txId);
+            try
+            {
+                state.ProcOrder.Remove(txId);
+            }
+            catch
+            {
+            }
         }
 
         /// <summary>Drop the whole queue without answering (caller seeds then answers).</summary>
@@ -1791,14 +1963,18 @@ namespace BestAutoSort.Tx
             return dropped;
         }
 
-        /// <summary>Answer one dropped queued-but-unapplied job as Rejected (nothing applied).</summary>
-        private static void AnswerReject(ChestState state, TxJob job)
+        /// <summary>
+        /// Answer one dropped queued-but-unapplied job (nothing applied). The caller passes
+        /// Rejected only when the seeded outcome was durably persisted (ring + floor);
+        /// otherwise UnknownTx (Indeterminate) so the txId can never execute later.
+        /// </summary>
+        private static void AnswerReject(ChestState state, TxJob job, TxStatus status)
         {
             try
             {
                 StoredResult r = new StoredResult();
                 r.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                r.Status = TxStatus.Rejected;
+                r.Status = status;
                 try
                 {
                     ZNetView nv = TxReflect.GetNetView(state.Container);
@@ -1825,6 +2001,10 @@ namespace BestAutoSort.Tx
         /// nothing was written (encode failure persists NOTHING — never a valid
         /// empty ring — or the ZDO write threw). Callers use the result to decide
         /// whether a degraded corrupt-ring flag may heal.
+        /// A SameBytes skip returns success only against LastRingBytes, which holds
+        /// solely bytes from a successful ZDO.Set by THIS peer and is cleared to null
+        /// on every SeedFromRing reset — the first persistence after a handoff can
+        /// never be skipped. LastRingBytes is assigned ONLY after ZDO.Set returns.
         /// </summary>
         private static bool WriteRing(ChestState state)
         {
@@ -1893,6 +2073,10 @@ namespace BestAutoSort.Tx
         /// a corrupt ring with NO trustworthy floor fails fully closed.
         /// Warns past the FloorCap threshold (unbounded map, liveness preserved).
         /// Returns false when nothing was written. Never throws.
+        /// A SameBytes skip returns success only against LastFloorBytes, which holds
+        /// solely bytes from a successful ZDO.Set by THIS peer and is cleared to null
+        /// on every SeedFromRing reset — the first persistence after a handoff can
+        /// never be skipped. LastFloorBytes is assigned ONLY after ZDO.Set returns.
         /// </summary>
         private static bool WriteFloor(ChestState state)
         {

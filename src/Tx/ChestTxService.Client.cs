@@ -1241,10 +1241,26 @@ namespace BestAutoSort.Tx
                 // Queued-but-unapplied jobs keep a stable outcome: seed them as
                 // Rejected in the FRESH cache (nothing was applied — the sender
                 // retries as a NEW tx) so the same txId can never execute later.
+                // Rejected is answered only when durably persisted (ring + floor);
+                // otherwise each job keeps Indeterminate (floor advance kept, never
+                // rolls back, so an in-session retry stays stale-gated).
+                TxStatus droppedStatus = TxStatus.Rejected;
+                if (dropped.Count > 0)
+                {
+                    System.Collections.Generic.List<long> seeded = new System.Collections.Generic.List<long>();
+                    foreach (TxJob dj in dropped)
+                        if (SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true))
+                            seeded.Add(dj.TxId);
+                    if (!WriteRing(state) || !WriteFloor(state))
+                    {
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover drops not persisted (indeterminate)");
+                        foreach (long txId in seeded)
+                            EvictSeededReject(state, txId);
+                        droppedStatus = TxStatus.UnknownTx;
+                    }
+                }
                 foreach (TxJob dj in dropped)
-                    SeedReject(state, dj.TxId, dj.Call != null ? dj.Call.Op : TxOp.Query, dj.Sender, true);
-                foreach (TxJob dj in dropped)
-                    AnswerReject(state, dj);
+                    AnswerReject(state, dj, droppedStatus);
                 state.Viewers.Clear();
                 state.SeenRev = 0u;
                 state.SeenOnce = false;
@@ -1270,7 +1286,7 @@ namespace BestAutoSort.Tx
             if (state == null)
                 return;
             foreach (TxJob job in DequeueAll(state))
-                AnswerReject(state, job);
+                AnswerReject(state, job, TxStatus.Rejected);
         }
 
         private static void PruneViewers(ChestState state)

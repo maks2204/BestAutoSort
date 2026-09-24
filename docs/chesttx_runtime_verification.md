@@ -98,6 +98,7 @@ write set and failure modes. None of the correctness arguments depend on them.
 | C11 | Out-of-order first-timer at/below floor is Indeterminate, never executes | V2_OutOfOrderDelayed, TxTests floor case |
 | C12 | Cross-op replay guard: cached.Op != incoming mutation op answers Indeterminate with no payload, never executes, cache untouched; Query-by-txId exempt by design (the lost-response path); sender-0 mismatched-op refused too | REPLAY_MismatchedOpNeverReturnsOldPayload, REPLAY_OpCollisionSameTxIdFailsClosed |
 | C13 | Propagation-request order: fence → AfterFence → execute/save → ring/floor → AfterCommit; quarantine fences + propagates AfterFence with no execute; throwing hook swallowed, outcomes unchanged (recipient collector is production-only, observed via O1) | PROPAGATION_FenceBeforeExecuteOrder, PROPAGATION_QuarantineFencePropagatesWithoutExecute, PROPAGATION_ThrowingHookNeverAffectsOutcome |
+| C14 | s_items Load-gate helper predicates pinned (null/length/version pre-check, clone discipline, viewer strictly-newer rule); production call-site wiring (viewer skip, takeover, structural, reload paths) is assumed — Unity-coupled, no revert-sensitive test in this harness | MUST2_NullIsNotEmpty, MUST3_BlobValidationFallback, MUST4_CopyDisciplineViaSharedHelper, MUST5_HandoffOrderRace (seam pins; wiring assumed, see test-file header) |
 
 ### Observed (live session; logs/diagnostics)
 
@@ -105,7 +106,7 @@ write set and failure modes. None of the correctness arguments depend on them.
 |---|-------|----------------|
 | O1 | Propagation-requests push without errors | `[ChestTX] propagation-request pushed=N/M` (TxVerbose); no `force-send` warnings (never throws by construction) |
 | O2 | Viewers observe newer revisions after commits | `viewer refresh rev=` lines following commit lines for the same container |
-| O3 | Null s_items stays fail-closed (never presumed empty) | `without authoritative reload (null s_items), staying quarantined` + `SItemsNullDenials` growth; quarantine cleared only by `authoritative reload ok` |
+| O3 | Null s_items stays fail-closed (never presumed empty); invalid blobs refused without tearing RAM; viewer keeps last-good | `without authoritative reload (null s_items), staying quarantined` + `SItemsNullDenials` growth; quarantine cleared only by `authoritative reload ok`; `viewer null s_items at rev=... (keeping last-good` / `viewer refresh refused invalid s_items` / `authoritative reload refused invalid s_items` |
 | O4 | Counter reservation persists across restarts; corrupt file falls back loudly; untrustworthy-with-evidence refuses issuance | `tx counter primary corrupt, resumed from backup` / `evidence archived aside, REFUSING new transactions` + `counter exhausted` refusal lines; `.corrupt-*` sidecars in the config dir |
 | O5 | No-FIFO safety in practice | reordered-duplicate `REPLAY` lines; stale first-timers answer Indeterminate, never double-apply |
 
@@ -117,6 +118,7 @@ write set and failure modes. None of the correctness arguments depend on them.
 | A2 | `ZDO.Set` from a non-owner is a no-op (owner-gated) | Post-fence ownership recheck exists precisely because of this; a silent cross-owner write would break single-manager order |
 | A3 | `DataRevision` grows on every ZDO write | Viewer staleness guard (`rev <= SeenRev` skip) could miss updates; byte-compare is the second guard |
 | A4 | `File.Replace` is atomic on one filesystem; the delete+move fallback is NOT (Delete-to-Move window) | Crash-resistant (not crash-atomic) by design: a torn primary fails checksum and restores from the backup copy, so a non-atomic fallback degrades to a loud restore, never corruption |
+| A5 | `ZPackage(byte[])` / `ZDO.GetByteArray` / `ZDO.Set(byte[])` copy semantics are engine-defined and unattested (ZPackage is MemoryStream-backed; Get may hand out the live stored array) | Neutralized by construction, not by assumption: every retained array goes through `TxSItemsGuard.CloneBytes` (clone at Get-capture, owned clone into Load, post-Set baseline clone), so aliasing vs copying no longer matters |
 
 ### Unknown (runtime-required)
 

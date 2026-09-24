@@ -541,12 +541,24 @@ namespace BestAutoSort.Tx
                 netView.ClaimOwnership();
                 if (!container.IsOwner())
                     return false;
+                // Fence order (grant-before-state): ClaimOwnership ran FIRST
+                // (above), this read runs AFTER. ZDO writes are owner-gated, so
+                // once the claim holds no other peer can commit between our read
+                // and our reseed below: the bytes include every pre-claim commit
+                // and no post-claim commit can exist. The defensive clone breaks
+                // any aliasing with the ZDO layer (GetByteArray may hand out the
+                // live stored reference). A lost claim (owner recheck) abandons
+                // the op instead of adopting possibly-stale bytes.
+                byte[] bytes = TxSItemsGuard.CloneBytes(netView.GetZDO().GetByteArray(ZDOVars.s_items));
+                if (!container.IsOwner())
+                    return false;
                 // Load the latest committed state before the structural operation.
-                byte[] bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                // Decoded-bytes proof first (length/version pre-check + RAM
+                // snapshot fallback inside): null is unavailable, never empty.
                 bool reloaded = false;
-                if (bytes != null)
+                string loadReason = null;
+                if (TxSItemsLoad.TryLoad(container, bytes, out loadReason))
                 {
-                    container.GetInventory().Load(new ZPackage(bytes));
                     TxReflect.SetLastRevision(container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(container);
                     reloaded = true;
@@ -597,8 +609,13 @@ namespace BestAutoSort.Tx
                     else
                     {
                         state.TxQuarantined = true;
-                        NoteSItemsNull("structural-acquire");
-                        TxLog.Warn("structural acquire without authoritative reload (null s_items), staying quarantined");
+                        if (bytes == null)
+                        {
+                            NoteSItemsNull("structural-acquire");
+                            TxLog.Warn("structural acquire without authoritative reload (null s_items), staying quarantined");
+                        }
+                        else
+                            TxLog.Warn("structural acquire without authoritative reload (invalid s_items: " + loadReason + "), staying quarantined");
                     }
                 }
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " structural acquire by " + ZNet.GetUID());
@@ -1174,6 +1191,13 @@ namespace BestAutoSort.Tx
 
         private static void OnTxRequest(Container container, long sender, ZPackage request)
         {
+            // Stale-route discipline (grant-before-state): this RPC was routed
+            // to the owner at SEND time. If ownership moved in flight we are no
+            // longer the manager: dropping WITHOUT answering is INTENTIONAL —
+            // the sender's Pending pump resends/queries the SAME txId, which
+            // routes to the CURRENT owner. A non-manager UnknownTx here could
+            // contradict the real outcome (e.g. finalize Indeterminate for a tx
+            // the new manager already committed), so only the manager answers.
             if (!Plugin.IsActive || !IsShared(container) || !container.IsOwner())
                 return;
             long txId;
@@ -1209,6 +1233,18 @@ namespace BestAutoSort.Tx
             ChestState state = GetState(container);
             if (state == null)
                 return;
+            // Takeover-before-Drain (grant-before-state): ownership may have
+            // arrived after the last slow pump (poll-based detection). Draining
+            // on un-reseeded Processed/Floor RAM would execute against stale
+            // state, so reseed synchronously here; the pump skips its own
+            // Takeover via the LastOwner update below. Takeover never throws
+            // and fail-closes (quarantine) when s_items is unavailable, in
+            // which case Drain below refuses fresh jobs as Indeterminate.
+            if (state.LastOwner != ZNet.GetUID())
+            {
+                Takeover(state);
+                state.LastOwner = ZNet.GetUID();
+            }
             if (!TxNet.IsCompatiblePeer(sender) && sender != ZNet.GetUID())
             {
                 // Cache first (READ-ONLY): a committed txId keeps its ORIGINAL outcome
@@ -1930,7 +1966,10 @@ namespace BestAutoSort.Tx
                 ZNetView snapView = TxReflect.GetNetView(job.Container);
                 if ((Object)snapView != (Object)null && snapView.IsValid())
                 {
-                    preTxItems = snapView.GetZDO().GetByteArray(ZDOVars.s_items);
+                    // Defensive copy at capture: the ZDO layer may hand out the
+                    // live stored reference; the fence-time fallback must be an
+                    // immutable snapshot (consumed via a second clone at use).
+                    preTxItems = TxSItemsGuard.CloneBytes(snapView.GetZDO().GetByteArray(ZDOVars.s_items));
                     preTxRead = true;
                 }
             }
@@ -2759,9 +2798,19 @@ namespace BestAutoSort.Tx
                 return true;
             if (!saveMayHaveRun && preTxRead && preTxItems != null)
             {
+                // Fence-time snapshot fallback (save provably never ran):
+                // routed through TxSItemsLoad.TryLoad — decoded-bytes proof
+                // first, live RAM snapshotted before Load and restored on a
+                // mid-Load throw, so a torn Load can never leave torn RAM
+                // live behind the quarantine. Never throws.
+                string snapReason;
+                if (!TxSItemsLoad.TryLoad(state.Container, preTxItems, out snapReason))
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " fence-time snapshot invalid (" + snapReason + "), staying quarantined");
+                    return false;
+                }
                 try
                 {
-                    state.Container.GetInventory().Load(new ZPackage((byte[])preTxItems.Clone()));
                     ZNetView nv = TxReflect.GetNetView(state.Container);
                     TxReflect.SetLastRevision(state.Container, nv.GetZDO().DataRevision);
                     TxReflect.UpdateRows(state.Container);
@@ -2816,7 +2865,10 @@ namespace BestAutoSort.Tx
                 byte[] bytes;
                 try
                 {
-                    bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                    // Defensive copy at capture: never retain the ZDO layer's
+                    // live stored reference (aliasing would corrupt later
+                    // comparisons and the quarantine baseline together).
+                    bytes = TxSItemsGuard.CloneBytes(netView.GetZDO().GetByteArray(ZDOVars.s_items));
                 }
                 catch
                 {
@@ -2830,7 +2882,15 @@ namespace BestAutoSort.Tx
                     NoteSItemsNull("reload");
                     return false;
                 }
-                state.Container.GetInventory().Load(new ZPackage(bytes));
+                // Decoded-bytes proof + RAM snapshot fallback: corrupt-but-
+                // non-null bytes return false (quarantine kept) WITHOUT leaving
+                // torn RAM live. Never throws.
+                string loadReason;
+                if (!TxSItemsLoad.TryLoad(state.Container, bytes, out loadReason))
+                {
+                    TxLog.Warn("authoritative reload refused invalid s_items (" + loadReason + "), staying quarantined");
+                    return false;
+                }
                 TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                 TxReflect.UpdateRows(state.Container);
                 state.SeenRev = 0u;
@@ -2943,7 +3003,12 @@ namespace BestAutoSort.Tx
                 if (SameBytes(bytes, state.LastRingBytes))
                     return true;
                 netView.GetZDO().Set(RingKey, bytes);
-                state.LastRingBytes = bytes;
+                // Byte discipline: the ZDO layer may retain the Set array by
+                // reference, so the SameBytes baseline MUST be an independent
+                // copy — otherwise a later in-place mutation corrupts channel
+                // and baseline together and defeats the skip guard. Assigned
+                // ONLY after ZDO.Set returns.
+                state.LastRingBytes = TxSItemsGuard.CloneBytes(bytes);
                 return true;
             }
             catch (Exception ex)
@@ -2990,7 +3055,9 @@ namespace BestAutoSort.Tx
                 if (SameBytes(bytes, state.LastFloorBytes))
                     return true;
                 netView.GetZDO().Set(FloorKey, bytes);
-                state.LastFloorBytes = bytes;
+                // Same byte-discipline note as WriteRing: independent baseline
+                // copy, assigned ONLY after ZDO.Set returns.
+                state.LastFloorBytes = TxSItemsGuard.CloneBytes(bytes);
                 return true;
             }
             catch (Exception ex)

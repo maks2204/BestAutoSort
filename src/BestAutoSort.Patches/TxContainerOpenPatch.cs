@@ -51,8 +51,14 @@ namespace BestAutoSort.Patches
                     denyView.InvokeRPC(uid, "RPC_OpenResponse", new object[1] { false });
                 return false;
             }
-            // Grant without SetOwner: push the current state to the opener.
-            // (granted even when another viewer is inside — that is the point)
+            // Grant WITHOUT SetOwner (deliberate: concurrent viewing keeps the
+            // manager where it is; vanilla ownership transfer never runs).
+            // The push below is a propagation-request (hint-only, best-effort,
+            // never an ACK/barrier, never proof the opener observed anything):
+            // the opener renders ONLY what its DataRevision/s_items poll
+            // (PumpViewerRefresh, strictly-newer-revision gated) actually
+            // observes, and reconciles before any commit. Grant is access
+            // permission, not state proof — stale-grant bytes never apply.
             ZNetView view = TxReflect.GetNetView(__instance);
             if (view != null && view.IsValid())
             {

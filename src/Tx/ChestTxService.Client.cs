@@ -1254,7 +1254,10 @@ namespace BestAutoSort.Tx
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return;
             uint rev = netView.GetZDO().DataRevision;
-            if (state.SeenOnce && rev <= state.SeenRev)
+            // Grant-before-state: a grant/push is never state proof. Apply only
+            // provably-newer revisions (shared seam TxHandoffGuard); equal/older
+            // (reorder, duplicate push, pre-push render) keeps the last-good view.
+            if (!TxHandoffGuard.ShouldApplyViewerRefresh(state.SeenOnce, state.SeenRev, rev))
             {
                 // Same or stale ZDO revision (network reorder): never roll the
                 // open GUI backwards. First poll always applies.
@@ -1265,15 +1268,34 @@ namespace BestAutoSort.Tx
             byte[] bytes;
             try
             {
-                bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                // Defensive copy at capture: never retain the ZDO layer's live
+                // stored reference (a pooled/aliased buffer would corrupt the
+                // SameBytes baseline below into self-comparison).
+                bytes = TxSItemsGuard.CloneBytes(netView.GetZDO().GetByteArray(ZDOVars.s_items));
             }
             catch (Exception)
             {
                 return;
             }
+            if (bytes == null)
+            {
+                // Null is UNAVAILABLE, never empty: a transiently-absent s_items
+                // key must keep the last-good view, never wipe it with a
+                // synthesized empty. Skip without touching SeenRev/SeenBytes.
+                TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer null s_items at rev=" + rev + " (keeping last-good, never presumed empty)");
+                return;
+            }
             if (SameBytes(bytes, state.SeenBytes))
             {
                 state.SeenRev = rev;
+                return;
+            }
+            // Decoded-bytes proof before touching the open GUI: corrupt bytes
+            // keep the last-good view instead of tearing it.
+            string viewerReason;
+            if (!TxSItemsGuard.TryValidate(bytes, out viewerReason))
+            {
+                TxLog.Warn("viewer refresh refused invalid s_items (" + viewerReason + "), keeping last-good");
                 return;
             }
             // Content changed: reload the local copy, do NOT close the GUI.
@@ -1282,29 +1304,28 @@ namespace BestAutoSort.Tx
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer dims before=" + open.GetInventory().GetWidth() + "x" + open.GetInventory().GetHeight());
             try
             {
-                ZPackage pkg = bytes != null ? new ZPackage(bytes) : EmptyInventoryPackage(open);
-                open.GetInventory().Load(pkg);
+                // Owned clone: ZPackage(byte[]) wraps without copying.
+                open.GetInventory().Load(new ZPackage(TxSItemsGuard.CloneBytes(bytes)));
                 TxReflect.SetLastRevision(open, rev);
                 TxReflect.UpdateRows(open);
             }
             catch (Exception ex)
             {
+                // Load throw on a foreign (read-only) view: keep the OLD
+                // SeenBytes so the next newer revision retries cleanly instead
+                // of cementing torn bytes as the baseline.
                 TxLog.Warn("viewer refresh failed: " + ex.Message);
                 return;
             }
             state.SeenRev = rev;
             state.SeenOnce = true;
-            state.SeenBytes = bytes;
+            state.SeenBytes = TxSItemsGuard.CloneBytes(bytes);
             TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " viewer refresh rev=" + rev);
         }
 
-        private static ZPackage EmptyInventoryPackage(Container container)
-        {
-            ZPackage pkg = new ZPackage();
-            pkg.Write(109);
-            pkg.Write((ushort)0);
-            return pkg;
-        }
+        // NOTE: no empty-inventory synthesizer exists on purpose. A null s_items
+        // read is UNAVAILABLE (never empty) and skips the refresh above, so no
+        // path can wipe the viewer's last-good view with a fabricated empty.
 
         private static bool SameBytes(byte[] a, byte[] b)
         {
@@ -1419,13 +1440,21 @@ namespace BestAutoSort.Tx
             try
             {
                 ZNetView netView = TxReflect.GetNetView(state.Container);
-                byte[] bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                // Defensive copy at capture: never retain the ZDO layer's live
+                // stored reference. Decoded-bytes proof + RAM snapshot fallback
+                // inside TryLoad: null is unavailable (never empty), corrupt
+                // bytes keep the quarantine WITHOUT tearing live RAM.
+                byte[] bytes = TxSItemsGuard.CloneBytes(netView.GetZDO().GetByteArray(ZDOVars.s_items));
                 bool reloaded = false;
-                if (bytes != null)
+                string takeoverReason = null;
+                // Drag-cancel runs even when the reload below fails: a drag sourced
+                // from this chest would otherwise drop torn/speculative items into
+                // player inventory. Widening is safe — CancelDragFrom only clears a
+                // drag sourced from this chest (no-op otherwise).
+                if (InventoryGui.instance != null)
+                    TxReflect.CancelDragFrom(InventoryGui.instance, state.Container.GetInventory());
+                if (TxSItemsLoad.TryLoad(state.Container, bytes, out takeoverReason))
                 {
-                    if (InventoryGui.instance != null)
-                        TxReflect.CancelDragFrom(InventoryGui.instance, state.Container.GetInventory());
-                    state.Container.GetInventory().Load(new ZPackage(bytes));
                     TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(state.Container);
                     reloaded = true;
@@ -1476,8 +1505,13 @@ namespace BestAutoSort.Tx
                 else
                 {
                     state.TxQuarantined = true;
-                    NoteSItemsNull("takeover");
-                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover without authoritative reload (null s_items), staying quarantined");
+                    if (bytes == null)
+                    {
+                        NoteSItemsNull("takeover");
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover without authoritative reload (null s_items), staying quarantined");
+                    }
+                    else
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover without authoritative reload (invalid s_items: " + takeoverReason + "), staying quarantined");
                 }
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " manager changed old=" + state.LastOwner
                     + " new=" + ZNet.GetUID() + " revision=" + netView.GetZDO().DataRevision);

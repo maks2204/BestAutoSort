@@ -19,6 +19,20 @@ namespace BestAutoSort.TxCore
         AfterRing
     }
 
+    /// <summary>
+    /// Propagation-request points inside the durable Apply order, in firing order:
+    /// AfterFence (fence durable, before Execute — peers learn the new high-water
+    /// even if the mutation later fails) and AfterCommit (ring + floor rewritten).
+    /// Best-effort, never an ACK/barrier, never proof of observed/world-save/
+    /// reciprocal (production: ZDOMan.ForceSendZDO per recipient). The core fires
+    /// the hook but never depends on it: a throwing hook is swallowed.
+    /// </summary>
+    public enum TxPropagationPoint
+    {
+        AfterFence,
+        AfterCommit
+    }
+
     /// <summary>Simulated process crash at a TxDurabilityPoint. Never swallowed by the core.</summary>
     public sealed class TxCrashException : Exception
     {
@@ -62,6 +76,10 @@ namespace BestAutoSort.TxCore
     ///   false = ownership lost after the fence — no mutation may follow.
     /// - Crash fires at TxDurabilityPoints; throwing TxCrashException simulates
     ///   the crash window. Anything else thrown propagates as-is.
+    /// - PropagationRequest fires at TxPropagationPoints (AfterFence, AfterCommit):
+    ///   best-effort push of the just-written floor/ring copies (production:
+    ///   ForceSendZDO per recipient). Null = no push. A throwing hook is
+    ///   swallowed by the core (propagation never affects the outcome).
     /// </summary>
     public sealed class TxDurability
     {
@@ -72,5 +90,6 @@ namespace BestAutoSort.TxCore
         public Func<TxRequest, bool> FailExecute;
         public Func<bool> IsOwner;
         public Action<TxDurabilityPoint> Crash;
+        public Action<TxPropagationPoint> PropagationRequest;
     }
 }

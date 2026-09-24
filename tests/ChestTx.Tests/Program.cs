@@ -29,6 +29,7 @@ namespace ChestTx.Tests
             TxDirtyRamTests.RunAll();
             TxWave1IsolationTests.RunAll();
             TxHardeningTests.RunAll();
+            TxPropagationTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

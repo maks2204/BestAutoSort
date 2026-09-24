@@ -254,8 +254,10 @@ namespace ChestTx.Tests
 
         /// <summary>
         /// Reload failure quarantines: no fresh mutation executes, queued (subsequent) jobs
-        /// complete as Indeterminate without fencing or mutating, and only a successful
-        /// TryRecover clears the quarantine (elapsed attempts alone never do).
+        /// complete as Indeterminate AFTER durably fencing their txId (never mutating,
+        /// never caching), and only a successful TryRecover clears the quarantine
+        /// (elapsed attempts alone never do). Fenced-then-quarantined txIds stay
+        /// stale-gated after recovery (retry as a NEW txId).
         /// </summary>
         private static void DIRTYRAM_Quarantine_ReloadFailAndQueuedJobs()
         {
@@ -275,12 +277,13 @@ namespace ChestTx.Tests
             Check.That(failed.Status == TxStatus.UnknownTx, "failed tx indeterminate");
             Check.That(core.Quarantined, "reload failure quarantines");
 
-            // Queued job while quarantined: Indeterminate, no mutation, no fence for it.
+            // Queued job while quarantined: Indeterminate, fenced but never mutated/cached.
             TxResult queued = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
             Check.That(queued.Status == TxStatus.UnknownTx && !queued.IsReplay, "queued job indeterminate, got " + queued.Status);
             uint hw;
             bool hasPeer = core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw);
-            Check.That(hasPeer && hw == 2, "quarantined job never fenced (floor stays at failed ctr 2, got " + hw + ")");
+            Check.That(hasPeer && hw == 3, "quarantined job fenced first (floor 11->3, got " + hw + ")");
+            Check.Equal(1, core.ProcessedCount, "quarantined job cached nothing");
             Check.That(core.Quarantined, "elapsed Apply alone never clears quarantine");
 
             // Failed recovery path also never clears.
@@ -296,8 +299,10 @@ namespace ChestTx.Tests
             TxResult after = core.Apply(chest, AddReq(Tx(11, 4), 11, Wood, 7));
             Check.That(after.Status == TxStatus.Accepted, "post-recovery tx commits, got " + after.Status);
             Check.Equal(12, chest.TotalOf(Wood), "5+7 exactly once");
-            // The quarantined-era txId was never fenced: retrying it now executes once.
-            // (Contrast with the FAILED txId 2, which stays fenced-blocked forever.)
+            // The quarantined-era txId was fenced-then-refused: retrying it now stays
+            // stale-gated (never resurrects). (The FAILED txId 2 stays fenced-blocked
+            // forever for the same reason.)
+            Check.That(core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7)).Status == TxStatus.UnknownTx, "quarantined-era txId stays stale-gated after recovery");
             Check.That(core.Apply(chest, AddReq(Tx(11, 2), 11, Wood, 10)).Status == TxStatus.UnknownTx, "failed txId stays blocked after recovery");
         }
 

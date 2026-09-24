@@ -174,6 +174,18 @@ namespace ChestTx.Tests
             QUARANTINE_QueuedLocalRemoteShareTerminal();
             Console.WriteLine("QUARANTINE_HandoffDropPersistenceFailure");
             QUARANTINE_HandoffDropPersistenceFailure();
+            Console.WriteLine("QUARANTINE_FreshAddTerminalNeverExecutesAfterRecovery");
+            QUARANTINE_FreshAddTerminalNeverExecutesAfterRecovery();
+            Console.WriteLine("QUARANTINE_TakeTerminalNeverExecutesAfterRecovery");
+            QUARANTINE_TakeTerminalNeverExecutesAfterRecovery();
+            Console.WriteLine("QUARANTINE_QueuedFreshTxNeverResurrects");
+            QUARANTINE_QueuedFreshTxNeverResurrects();
+            Console.WriteLine("REPLAY_MismatchedOpNeverReturnsOldPayload");
+            REPLAY_MismatchedOpNeverReturnsOldPayload();
+            Console.WriteLine("REPLAY_OpCollisionSameTxIdFailsClosed");
+            REPLAY_OpCollisionSameTxIdFailsClosed();
+            Console.WriteLine("SENDER0_LegacyFreshAndQueryDocumented");
+            SENDER0_LegacyFreshAndQueryDocumented();
             Console.WriteLine("PENDING_DecideMatrix");
             PENDING_DecideMatrix();
             Console.WriteLine("PENDING_MultipleTimeoutsOnePump");
@@ -357,9 +369,11 @@ namespace ChestTx.Tests
 
         /// <summary>
         /// Quarantined Add path: the failed tx stays Indeterminate with its fence
-        /// kept; fresh txIds (even unseen peers) answer Indeterminate WITHOUT
-        /// fencing/mutating/caching; only a successful authoritative TryRecover
-        /// clears the quarantine (elapsed Applys never do); then new txIds commit.
+        /// kept; fresh txIds answer Indeterminate WITHOUT executing/mutating/caching
+        /// but ARE durably fenced first (floor high-water + floor persist) — so the
+        /// same txId stays stale-gated after recovery (retry as a NEW txId, never
+        /// the same one). Only a successful authoritative TryRecover clears the
+        /// quarantine (elapsed Applys never do); then NEW txIds commit.
         /// </summary>
         private static void QUARANTINE_Add()
         {
@@ -387,8 +401,8 @@ namespace ChestTx.Tests
             TxResult fresh = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
             Check.That(fresh.Status == TxDecision.QuarantinedTerminal() && !fresh.IsReplay,
                 "quarantined fresh tx indeterminate, got " + fresh.Status);
-            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 2,
-                "quarantined tx never fenced");
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
+                "quarantined tx IS fenced first (same txId stale-gated after recovery)");
             Check.Equal(1, core.ProcessedCount, "quarantined tx cached nothing");
             Check.That(core.Quarantined, "elapsed Apply alone never clears quarantine");
             Check.That(!core.TryRecover(chest), "TryRecover fails while reload broken");
@@ -398,15 +412,21 @@ namespace ChestTx.Tests
             w.FailReload = false;
             Check.That(core.TryRecover(chest), "authoritative reload recovers");
             Check.That(!core.Quarantined, "quarantine cleared by reload only");
+            TxResult stale = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
+            Check.That(stale.Status == TxStatus.UnknownTx && !stale.IsReplay,
+                "fenced-then-quarantined txId stays stale-gated after recovery (retry as NEW txId), got " + stale.Status);
+            Check.Equal(5, chest.TotalOf(Wood), "stale retry executes nothing");
             TxResult after = core.Apply(chest, AddReq(Tx(11, 4), 11, Wood, 7));
-            Check.That(after.Status == TxStatus.Accepted, "post-recovery tx commits, got " + after.Status);
+            Check.That(after.Status == TxStatus.Accepted, "post-recovery NEW tx commits, got " + after.Status);
             Check.Equal(12, chest.TotalOf(Wood), "5 persisted + 7 exactly once");
         }
 
         /// <summary>
-        /// Take delayed-duplicate across recovery: the quarantined attempt's fence
-        /// is kept, so the SAME txId retried after TryRecover stays Indeterminate
-        /// (never executes); only a NEW txId commits. Conservation holds.
+        /// Take delayed-duplicate across recovery: the failed take's fence is kept,
+        /// and the quarantined-era duplicate IS fenced too (same-counter re-fence is
+        /// idempotent), so the SAME txId retried after TryRecover stays Indeterminate
+        /// (never executes) — including a transport-duplicated copy delivered twice.
+        /// Only a NEW txId commits. Conservation holds.
         /// </summary>
         private static void QUARANTINE_TakeDelayedDuplicateAfterRecovery()
         {
@@ -428,6 +448,10 @@ namespace ChestTx.Tests
             TxResult dup = core.Apply(chest, TakeReq(Tx(11, 2), 11, Wood, 4));
             Check.That(dup.Status == TxStatus.UnknownTx && !dup.IsReplay,
                 "delayed duplicate while quarantined never executes, got " + dup.Status);
+            uint hw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 2,
+                "quarantine re-fence of the same counter is idempotent (floor stays 2)");
+            Check.Equal(10, chest.TotalOf(Wood), "quarantined duplicate debits nothing further (live holds only the failed-tx dirt)");
 
             w.FailSave = false;
             w.FailReload = false;
@@ -438,6 +462,12 @@ namespace ChestTx.Tests
             Check.That(stale.Status == TxStatus.UnknownTx && !stale.IsReplay,
                 "same txId stays stale-gated after recovery (fence kept), got " + stale.Status);
             Check.Equal(14, chest.TotalOf(Wood), "stale retry debits nothing");
+            // Transport-duplicated copy of the same stale txId: still Indeterminate,
+            // still no debit — the fence makes redelivery safe, not executable.
+            TxResult staleCopy = core.Apply(chest, TakeReq(Tx(11, 2), 11, Wood, 4));
+            Check.That(staleCopy.Status == TxStatus.UnknownTx && !staleCopy.IsReplay,
+                "transport-duplicated stale copy stays indeterminate, got " + staleCopy.Status);
+            Check.Equal(14, chest.TotalOf(Wood), "transport duplicate debits nothing");
 
             TxResult fresh = core.Apply(chest, TakeReq(Tx(11, 3), 11, Wood, 4));
             Check.That(fresh.Status == TxStatus.Accepted, "new txId commits, got " + fresh.Status);
@@ -446,12 +476,14 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Queued + local + remote quarantine terminals share ONE seam value:
-        /// remote (OnTxRequest quarantine refusal), local (MutateLocal refusal and
-        /// the ApplyJob quarantine recheck) and queued (Drain fail-closed branch)
-        /// all answer Indeterminate through TxDecision.QuarantinedTerminal.
-        /// Core-level proof: even an UNSEEN peer's fresh txId is refused WITHOUT
-        /// fencing while quarantined — and stays retryable after recovery.
+        /// Queued + local + remote quarantine terminals share ONE seam value AND one
+        /// fence-first rule: remote (OnTxRequest quarantine refusal), local
+        /// (MutateLocal refusal and the ApplyJob quarantine recheck) and queued
+        /// (Drain fail-closed branch) all answer Indeterminate through
+        /// TxDecision.QuarantinedTerminal AFTER durably fencing the txId.
+        /// Core-level proof: even an UNSEEN peer's fresh txId is refused AND fenced
+        /// while quarantined — and stays stale-gated after recovery (retry as a
+        /// NEW txId, never the same one).
         /// </summary>
         private static void QUARANTINE_QueuedLocalRemoteShareTerminal()
         {
@@ -468,19 +500,25 @@ namespace ChestTx.Tests
             Check.That(core.Apply(chest, AddReq(Tx(11, 2), 11, Wood, 5)).Status == TxStatus.UnknownTx, "failed tx indeterminate");
             Check.That(core.Quarantined, "quarantined");
 
-            // Unseen peer, never fenced: still refused, and NOT fenced (retryable).
+            // Unseen peer: refused AND fenced (same-txId retry stays stale-gated).
             TxResult alien = core.Apply(chest, AddReq(Tx(99, 1), 99, Wood, 5));
             Check.That(alien.Status == TxDecision.QuarantinedTerminal() && !alien.IsReplay,
-                "unseen-peer tx refused without fencing, got " + alien.Status);
-            Check.That(!core.DumpFloor().ContainsKey(TxIdGen.PeerKey(99)), "quarantine fences nothing, even unseen peers");
+                "unseen-peer tx refused, got " + alien.Status);
+            uint alienHw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(99), out alienHw) && alienHw == 1,
+                "quarantine fences even unseen peers (floor 99->1)");
             Check.Equal(1, core.ProcessedCount, "quarantine caches nothing");
 
             w.FailSave = false;
             w.FailReload = false;
             Check.That(core.TryRecover(chest), "recovery succeeds");
             TxResult retry = core.Apply(chest, AddReq(Tx(99, 1), 99, Wood, 5));
-            Check.That(retry.Status == TxStatus.Accepted && !retry.IsReplay,
-                "unfenced txId commits after recovery, got " + retry.Status);
+            Check.That(retry.Status == TxStatus.UnknownTx && !retry.IsReplay,
+                "fenced-then-quarantined txId stays stale-gated after recovery, got " + retry.Status);
+            Check.Equal(5, chest.TotalOf(Wood), "stale retry executes nothing");
+            TxResult fresh = core.Apply(chest, AddReq(Tx(99, 2), 99, Wood, 5));
+            Check.That(fresh.Status == TxStatus.Accepted && !fresh.IsReplay,
+                "NEW txId commits after recovery, got " + fresh.Status);
             Check.Equal(10, chest.TotalOf(Wood), "5 seed + 5 exactly once");
         }
 
@@ -490,7 +528,8 @@ namespace ChestTx.Tests
         /// persisted); any persistence failure stays fail-closed Indeterminate
         /// WITHOUT claiming a stable terminal. Production call sites: Takeover and
         /// AcquireForStructural (seed + WriteRing/WriteFloor, evict the unpersisted
-        /// seed, keep the floor advance so an in-session retry stays stale-gated).
+        /// seed, keep the floor advance so an in-session retry stays stale-gated
+        /// and the sender retries as a NEW tx).
         /// </summary>
         private static void QUARANTINE_HandoffDropPersistenceFailure()
         {
@@ -521,6 +560,232 @@ namespace ChestTx.Tests
             TxResult r = core.Apply(chest, TakeReq(Tx(11, 1), 11, Stone, 1));
             Check.That(r.Status == TxStatus.UnknownTx, "unpersisted reject is indeterminate, got " + r.Status);
             Check.Equal(0, core.ProcessedCount, "unpersisted seed evicted");
+        }
+
+        /// <summary>
+        /// Fresh-Add quarantine terminal (unseen peer): refused Indeterminate AND
+        /// fenced while quarantined; the same txId NEVER executes after recovery
+        /// (stale-gated); only a NEW txId commits. Pins the fence-first rule for
+        /// the remote/local/queued production paths at the seam level.
+        /// </summary>
+        private static void QUARANTINE_FreshAddTerminalNeverExecutesAfterRecovery()
+        {
+            IsoWorld w = new IsoWorld();
+            TxCore core = new TxCore();
+            core.Durability = w.Hooks();
+            ModelChest chest = new ModelChest(6, 4);
+
+            Check.That(core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 5)).Status == TxStatus.Accepted, "seed commits");
+            w.FailSave = true;
+            w.FailReload = true;
+            Check.That(core.Apply(chest, AddReq(Tx(11, 2), 11, Wood, 5)).Status == TxStatus.UnknownTx, "failed tx indeterminate");
+            Check.That(core.Quarantined, "quarantined");
+
+            TxResult fresh = core.Apply(chest, AddReq(Tx(77, 1), 77, Wood, 5));
+            Check.That(fresh.Status == TxDecision.QuarantinedTerminal() && !fresh.IsReplay,
+                "fresh add refused indeterminate, got " + fresh.Status);
+            Check.Equal(0, fresh.AcceptedTotal(), "quarantined terminal carries no payload");
+            uint hw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(77), out hw) && hw == 1,
+                "fresh add fenced (floor 77->1)");
+            Check.Equal(1, core.ProcessedCount, "quarantined add cached nothing");
+            Check.Equal(10, chest.TotalOf(Wood), "quarantined add executes nothing (live holds only the failed-tx dirt: 5 seed + 5 speculative)");
+
+            w.FailSave = false;
+            w.FailReload = false;
+            Check.That(core.TryRecover(chest), "recovery succeeds");
+            TxResult retry = core.Apply(chest, AddReq(Tx(77, 1), 77, Wood, 5));
+            Check.That(retry.Status == TxStatus.UnknownTx && !retry.IsReplay,
+                "same txId never executes after recovery, got " + retry.Status);
+            Check.Equal(5, chest.TotalOf(Wood), "post-recovery retry of the fenced txId executes nothing");
+            TxResult next = core.Apply(chest, AddReq(Tx(77, 2), 77, Wood, 5));
+            Check.That(next.Status == TxStatus.Accepted && !next.IsReplay,
+                "new txId commits, got " + next.Status);
+            Check.Equal(10, chest.TotalOf(Wood), "5 seed + 5 exactly once");
+        }
+
+        /// <summary>
+        /// Fresh-Take quarantine terminal: refused Indeterminate AND fenced while
+        /// quarantined (no debit); the same txId NEVER debits after recovery;
+        /// only a NEW txId debits exactly once. Take-side twin of the Add terminal.
+        /// </summary>
+        private static void QUARANTINE_TakeTerminalNeverExecutesAfterRecovery()
+        {
+            IsoWorld w = new IsoWorld();
+            TxCore core = new TxCore();
+            core.Durability = w.Hooks();
+            ModelChest chest = new ModelChest(6, 4);
+            chest.AddItem(Wood, 20, 50);
+
+            Check.That(core.Apply(chest, TakeReq(Tx(11, 1), 11, Wood, 6)).Status == TxStatus.Accepted, "seed take commits");
+            Check.Equal(14, chest.TotalOf(Wood), "seed debited");
+            w.FailSave = true;
+            w.FailReload = true;
+            Check.That(core.Apply(chest, TakeReq(Tx(11, 2), 11, Wood, 4)).Status == TxStatus.UnknownTx, "failed take indeterminate");
+            Check.That(core.Quarantined, "quarantined");
+
+            TxResult fresh = core.Apply(chest, TakeReq(Tx(11, 3), 11, Wood, 4));
+            Check.That(fresh.Status == TxDecision.QuarantinedTerminal() && !fresh.IsReplay,
+                "fresh take refused indeterminate, got " + fresh.Status);
+            Check.Equal(0, fresh.Accepted.Count, "quarantined terminal carries no take payload");
+            uint hw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
+                "fresh take fenced (floor 11->3)");
+            Check.Equal(10, chest.TotalOf(Wood), "quarantined take debits nothing further (live holds only the failed-tx dirt)");
+
+            w.FailSave = false;
+            w.FailReload = false;
+            Check.That(core.TryRecover(chest), "recovery succeeds");
+            TxResult retry = core.Apply(chest, TakeReq(Tx(11, 3), 11, Wood, 4));
+            Check.That(retry.Status == TxStatus.UnknownTx && !retry.IsReplay,
+                "same take txId never executes after recovery, got " + retry.Status);
+            Check.Equal(14, chest.TotalOf(Wood), "post-recovery retry debits nothing");
+            TxResult next = core.Apply(chest, TakeReq(Tx(11, 4), 11, Wood, 4));
+            Check.That(next.Status == TxStatus.Accepted && !next.IsReplay,
+                "new take txId commits, got " + next.Status);
+            Check.Equal(10, chest.TotalOf(Wood), "exactly one new debit");
+        }
+
+        /// <summary>
+        /// Queued fresh txIds never resurrect: every txId submitted while
+        /// quarantined is fenced-then-refused, and NONE executes after recovery —
+        /// even when the recovery succeeds on the very next call. Production twin:
+        /// the Drain fail-closed branch + the ApplyJob quarantine recheck.
+        /// </summary>
+        private static void QUARANTINE_QueuedFreshTxNeverResurrects()
+        {
+            IsoWorld w = new IsoWorld();
+            TxCore core = new TxCore();
+            core.Durability = w.Hooks();
+            ModelChest chest = new ModelChest(6, 4);
+
+            Check.That(core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 5)).Status == TxStatus.Accepted, "seed commits");
+            w.FailSave = true;
+            w.FailReload = true;
+            Check.That(core.Apply(chest, AddReq(Tx(11, 2), 11, Wood, 5)).Status == TxStatus.UnknownTx, "failed tx indeterminate");
+            Check.That(core.Quarantined, "quarantined");
+
+            // Two queued fresh txIds (the Drain queue behind the failed tx).
+            Check.That(core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 1)).Status == TxStatus.UnknownTx, "queued 3 indeterminate");
+            Check.That(core.Apply(chest, AddReq(Tx(11, 4), 11, Wood, 2)).Status == TxStatus.UnknownTx, "queued 4 indeterminate");
+            uint hw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 4,
+                "every queued txId fenced (floor 11->4)");
+            Check.Equal(1, core.ProcessedCount, "queued txIds cached nothing");
+            Check.Equal(10, chest.TotalOf(Wood), "queued txIds executed nothing (live holds only the failed-tx dirt)");
+
+            w.FailSave = false;
+            w.FailReload = false;
+            Check.That(core.TryRecover(chest), "recovery succeeds");
+            Check.That(core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 1)).Status == TxStatus.UnknownTx,
+                "queued txId 3 never resurrects");
+            Check.That(core.Apply(chest, AddReq(Tx(11, 4), 11, Wood, 2)).Status == TxStatus.UnknownTx,
+                "queued txId 4 never resurrects");
+            Check.Equal(5, chest.TotalOf(Wood), "resurrected retries execute nothing");
+            Check.That(core.Apply(chest, AddReq(Tx(11, 5), 11, Wood, 3)).Status == TxStatus.Accepted,
+                "new txId commits");
+            Check.Equal(8, chest.TotalOf(Wood), "5 seed + 3 exactly once");
+        }
+
+        /// <summary>
+        /// Cross-op replay guard (shared seam TxDecision.IsOpMismatch): a txId that
+        /// committed as Add, re-requested as Take, answers Indeterminate with NO
+        /// payload (never the Add body), never executes, and leaves the cache
+        /// untouched — the original Add still replays afterwards.
+        /// </summary>
+        private static void REPLAY_MismatchedOpNeverReturnsOldPayload()
+        {
+            Check.That(TxDecision.IsOpMismatch(TxOp.Add, TxOp.Take), "add/take mismatch detected by the seam");
+            Check.That(!TxDecision.IsOpMismatch(TxOp.Add, TxOp.Add), "same op is not a mismatch");
+            Check.That(!TxDecision.IsOpMismatch(TxOp.Add, TxOp.Query), "query lookup is exempt by design");
+            TxCore core = new TxCore();
+            ModelChest chest = new ModelChest(6, 4);
+
+            Check.That(core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 5)).Status == TxStatus.Accepted, "add commits");
+            Check.Equal(5, chest.TotalOf(Wood), "add applied");
+
+            TxResult cross = core.Apply(chest, TakeReq(Tx(11, 1), 11, Wood, 5));
+            Check.That(cross.Status == TxStatus.UnknownTx && !cross.IsReplay,
+                "cross-op take refused indeterminate, got " + cross.Status);
+            Check.Equal(0, cross.Accepted.Count, "cross-op refusal carries no payload");
+            Check.Equal(5, chest.TotalOf(Wood), "cross-op request executes nothing");
+            Check.Equal(1, core.ProcessedCount, "cross-op request overwrites nothing");
+
+            TxResult orig = core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 5));
+            Check.That(orig.Status == TxStatus.Accepted && orig.IsReplay,
+                "original op still replays, got " + orig.Status);
+            Check.Equal(5, orig.AcceptedTotal(), "original body intact");
+            Check.Equal(5, chest.TotalOf(Wood), "replay applies nothing");
+            TxResult query = core.Query(Tx(11, 1), 11);
+            Check.That(query.Status == TxStatus.Accepted && query.IsReplay,
+                "query by txId still returns the original outcome");
+        }
+
+        /// <summary>
+        /// Op-collision twin (reverse direction + legacy sender): a txId that
+        /// committed as Take, re-requested as Add (counter collision after a reset
+        /// or a stale sender grid), answers Indeterminate — never executes, never
+        /// leaks the Take body. The gate holds for sender tag 0 too (legacy resends
+        /// with a mismatched op are refused; matching-op sender-0 resends still
+        /// replay — see SENDER0_LegacyFreshAndQueryDocumented).
+        /// </summary>
+        private static void REPLAY_OpCollisionSameTxIdFailsClosed()
+        {
+            TxCore core = new TxCore();
+            ModelChest chest = new ModelChest(6, 4);
+            chest.AddItem(Wood, 20, 50);
+
+            Check.That(core.Apply(chest, TakeReq(Tx(11, 1), 11, Wood, 6)).Status == TxStatus.Accepted, "take commits");
+            Check.Equal(14, chest.TotalOf(Wood), "take debited");
+
+            TxResult collision = core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 6));
+            Check.That(collision.Status == TxStatus.UnknownTx && !collision.IsReplay,
+                "colliding add refused indeterminate, got " + collision.Status);
+            Check.Equal(0, collision.Accepted.Count, "collision carries no take payload");
+            Check.Equal(14, chest.TotalOf(Wood), "collision executes nothing");
+
+            TxResult skewCollision = core.Apply(chest, AddReq(Tx(11, 1), 0, Wood, 6));
+            Check.That(skewCollision.Status == TxStatus.UnknownTx && !skewCollision.IsReplay,
+                "sender-0 mismatched op refused too, got " + skewCollision.Status);
+            Check.Equal(14, chest.TotalOf(Wood), "skew collision executes nothing");
+
+            TxResult orig = core.Apply(chest, TakeReq(Tx(11, 1), 11, Wood, 6));
+            Check.That(orig.Status == TxStatus.Accepted && orig.IsReplay,
+                "original take still replays, got " + orig.Status);
+            Check.Equal(6, orig.AcceptedTotal(), "original take body intact");
+            Check.Equal(14, chest.TotalOf(Wood), "replay debits nothing");
+        }
+
+        /// <summary>
+        /// Sender-0 legacy audit (documents, not changes, production behavior):
+        /// sender tag 0 is never a spoof (TxDecision.ClassifySenderBinding). A fresh
+        /// sender-0 mutation commits on the normal path; a matching-op sender-0
+        /// resend replays the original outcome INCLUDING its body (accepted legacy:
+        /// version-skew resends must recover); a sender-0 Query by txId returns the
+        /// original outcome. Only NONZERO sender mismatches get payload-stripped
+        /// Rejected (see SPOOF_CachedResultNotLeaked). Cross-op sender-0 requests
+        /// are still refused by the op-mismatch gate.
+        /// </summary>
+        private static void SENDER0_LegacyFreshAndQueryDocumented()
+        {
+            TxCore core = new TxCore();
+            ModelChest chest = new ModelChest(6, 4);
+
+            Check.That(core.Apply(chest, AddReq(Tx(11, 1), 11, Wood, 5)).Status == TxStatus.Accepted, "seed commits");
+            TxResult skewReplay = core.Apply(chest, AddReq(Tx(11, 1), 0, Wood, 5));
+            Check.That(skewReplay.Status == TxStatus.Accepted && skewReplay.IsReplay,
+                "sender-0 matching-op resend replays the original, got " + skewReplay.Status);
+            Check.Equal(5, skewReplay.AcceptedTotal(), "legacy resend keeps the body (documented, not leaked: same txId family)");
+            Check.Equal(5, chest.TotalOf(Wood), "legacy resend applies nothing");
+
+            TxResult skewQuery = core.Query(Tx(11, 1), 0);
+            Check.That(skewQuery.Status == TxStatus.Accepted && skewQuery.IsReplay,
+                "sender-0 query returns the original outcome");
+
+            TxResult freshZero = core.Apply(chest, AddReq(Tx(11, 9), 0, Wood, 3));
+            Check.That(freshZero.Status == TxStatus.Accepted && !freshZero.IsReplay,
+                "fresh sender-0 mutation commits on the normal path (legacy, not a spoof), got " + freshZero.Status);
+            Check.Equal(8, chest.TotalOf(Wood), "fresh sender-0 add applied once");
         }
 
         /// <summary>

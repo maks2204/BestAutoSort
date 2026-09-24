@@ -141,9 +141,10 @@ namespace BestAutoSort.Tx
         /// <summary>
         /// Post-fence recovery quarantine: live RAM may hold speculative inventory
         /// from a failed Execute/save whose persistence outcome was ambiguous.
-        /// While set, fresh mutations never execute (Drain answers queued jobs as
-        /// UnknownTx without fencing/mutating; MutateLocal/OnTxRequest refuse fresh
-        /// txIds as UnknownTx). Replays/queries still answer. Cleared only by a
+        /// While set, fresh mutations never execute or cache (Drain answers queued
+        /// jobs as UnknownTx after durably fencing each txId; MutateLocal/OnTxRequest
+        /// fence-then-refuse fresh txIds as UnknownTx), so every quarantined txId
+        /// stays stale-gated after recovery (retry as a NEW txId). Replays/queries still answer. Cleared only by a
         /// successful authoritative s_items reload (pump/takeover/reacquire path),
         /// never by elapsed time. The failed tx keeps its fence (never rolls back).
         /// </summary>

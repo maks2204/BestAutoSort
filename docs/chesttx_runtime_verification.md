@@ -59,13 +59,21 @@ Proven by static inspection (repo code only — no game assemblies shipped here)
 - `ZDOMan.instance.ForceSendZDO(uid, view.GetZDO().m_uid)` — the ONLY
   attested signature shape: first arg a peer uid (long), second the ZDO uid.
   Attested call site: `TxContainerOpenPatch` (open-grant push to the opener).
-  `TryForceSendZdo` reuses EXACTLY this shape, batched over the presence
-  `Viewers` set (same uid domain: presence keys are the sender uids the RPC
-  layer reports). No overloads invented.
-- No `ForceSendZDO` (or any flush/propagate call) exists on the pre-change tx
-  write path: post-commit propagation relied on periodic ZDO sync. The new
-  `RequestPropagation` calls (CommitResult, fence re-persist, takeover and
-  structural reseeds) are propagation-requests only.
+  `TryForceSendZdo` reuses EXACTLY this shape. No overloads invented.
+- Recipients are collected per call (`CollectPropagationRecipients`): the
+  requesting sender + the presence `Viewers` set (same uid domain: presence
+  keys are the sender uids the RPC layer reports) + the server peer where valid,
+  deduped, skipping 0 tags and self. Viewers-only was INSUFFICIENT (a requester
+  whose presence never registered, and the world-save authority, would miss the
+  push) — the collector, not Viewers alone, is the contract.
+- Firing order (shared with the offline core via the `TxDurability`
+  `PropagationRequest` seam, pinned by the PROPAGATION_* tests): fence floor
+  write → propagation-request AfterFence → Execute/save → ring + floor rewrite
+  → propagation-request AfterCommit. Quarantined txIds fence + propagate
+  AfterFence with no execute. `RequestPropagation` calls exist at CommitResult
+  (with the committer), the ApplyJob pre-execute fence, the fence re-persist,
+  the quarantine fence points, and takeover/structural reseeds — all are
+  propagation-requests only (best-effort, never an ACK/barrier).
 
 Runtime-required (unknown): ForceSendZDO delivery timing, whether it survives
 ownership transfer races, server-side batching/throttling, exact `Save`
@@ -77,17 +85,19 @@ write set and failure modes. None of the correctness arguments depend on them.
 
 | # | Claim | Pinned by |
 |---|-------|-----------|
-| C1 | Trust gate (sender/txId binding) runs before any fence/cache/ring mutation; spoof is ephemeral, victim txId never burned, no payload leak | SPOOF_VictimTxIdNotBurned, SPOOF_IncompatiblePeerCannotRaiseVictimFloor, SPOOF_CachedResultNotLeaked, SPOOF_SenderBindingSeam, FENCE_SpoofNeverFences |
-| C2 | Quarantine terminal is Indeterminate on remote/local/queued paths; same txId retryable after recovery; fence kept | QUARANTINE_Add, QUARANTINE_TakeDelayedDuplicateAfterRecovery, QUARANTINE_QueuedLocalRemoteShareTerminal, QUARANTINE_HandoffDropPersistenceFailure |
+| C1 | Trust gate (sender/txId binding) runs before any fence/cache/ring mutation; spoof is ephemeral, victim txId never burned, no payload leak; sender-0 legacy documented (fresh commits, matching-op resends/queries replay, cross-op still refused) | SPOOF_VictimTxIdNotBurned, SPOOF_IncompatiblePeerCannotRaiseVictimFloor, SPOOF_CachedResultNotLeaked, SPOOF_SenderBindingSeam, FENCE_SpoofNeverFences, SENDER0_LegacyFreshAndQueryDocumented |
+| C2 | Quarantine terminal is Indeterminate on remote/local/queued paths; every quarantined txId is durably FENCED first (never executed/cached) and stays stale-gated after recovery — retry as a NEW txId, never the same one; queued fresh txIds never resurrect; transport-duplicated stale copies stay Indeterminate | QUARANTINE_Add, QUARANTINE_TakeDelayedDuplicateAfterRecovery, QUARANTINE_QueuedLocalRemoteShareTerminal, QUARANTINE_HandoffDropPersistenceFailure, QUARANTINE_FreshAddTerminalNeverExecutesAfterRecovery, QUARANTINE_TakeTerminalNeverExecutesAfterRecovery, QUARANTINE_QueuedFreshTxNeverResurrects |
 | C3 | Pending drain never mutates the map while enumerating; one callback attempt per terminal; destroyed-container finalizes loudly | PENDING_DecideMatrix, PENDING_MultipleTimeoutsOnePump, PENDING_TerminalCallbackAndClaimsExactlyOnce |
 | C4 | Claim lease: duplicates pruned, pre-ownership failures release, terminal releases before its callback | CLAIM_DuplicatePruned, CLAIM_PrePendingFailuresRelease, CLAIM_TerminalReleaseExactlyOnce |
 | C5 | Drag remainder restored only on known-safe dispositions with seam arithmetic | DRAG_Rejected, DRAG_Partial, DRAG_Indeterminate |
 | C6 | Fence-first order + crash windows (A/B/C/ring/floor), rejected-persist fail, ownership loss, degraded corrupt-ring | TxFenceCrashTests group |
 | C7 | Dirty-RAM reload/quarantine discipline; committed-but-Indeterminate stated residual | TxDirtyRamTests group |
-| C8 | Counter file: legacy parse, v1 round-trip, checksum/torn rejection, backup-aware resolve, atomic write + restore, uint-boundary fail-closed | HARDENING_Counter* (6 tests) |
+| C8 | Counter file: legacy parse, v1 round-trip, checksum/torn rejection, backup-aware resolve, crash-resistant write + restore, uint-boundary fail-closed; explicit loader states (Fresh/ResumedPrimary/ResumedBackup/FailClosed); missing primary still consults backup; evidence-with-nothing-trustworthy refuses issuance (never restarts at 1) | HARDENING_Counter* (7 tests, incl. HARDENING_CounterLoadStatesFailClosed) |
 | C9 | Take on an empty chest is stable persisted Rejected (known-not-committed), never Indeterminate/debit | HARDENING_EmptyChestTakeRejected |
 | C10 | Null persisted authority keeps quarantine; nothing presumed empty; reload-only clearing | HARDENING_SItemsNullNeverPresumedEmpty |
 | C11 | Out-of-order first-timer at/below floor is Indeterminate, never executes | V2_OutOfOrderDelayed, TxTests floor case |
+| C12 | Cross-op replay guard: cached.Op != incoming mutation op answers Indeterminate with no payload, never executes, cache untouched; Query-by-txId exempt by design (the lost-response path); sender-0 mismatched-op refused too | REPLAY_MismatchedOpNeverReturnsOldPayload, REPLAY_OpCollisionSameTxIdFailsClosed |
+| C13 | Propagation-request order: fence → AfterFence → execute/save → ring/floor → AfterCommit; quarantine fences + propagates AfterFence with no execute; throwing hook swallowed, outcomes unchanged (recipient collector is production-only, observed via O1) | PROPAGATION_FenceBeforeExecuteOrder, PROPAGATION_QuarantineFencePropagatesWithoutExecute, PROPAGATION_ThrowingHookNeverAffectsOutcome |
 
 ### Observed (live session; logs/diagnostics)
 
@@ -96,7 +106,7 @@ write set and failure modes. None of the correctness arguments depend on them.
 | O1 | Propagation-requests push without errors | `[ChestTX] propagation-request pushed=N/M` (TxVerbose); no `force-send` warnings (never throws by construction) |
 | O2 | Viewers observe newer revisions after commits | `viewer refresh rev=` lines following commit lines for the same container |
 | O3 | Null s_items stays fail-closed (never presumed empty) | `without authoritative reload (null s_items), staying quarantined` + `SItemsNullDenials` growth; quarantine cleared only by `authoritative reload ok` |
-| O4 | Counter reservation persists across restarts; corrupt file falls back loudly | `tx counter primary corrupt, resumed from backup` / `corrupt ... evidence archived aside, starting at 1`; `.corrupt-*` sidecars in the config dir |
+| O4 | Counter reservation persists across restarts; corrupt file falls back loudly; untrustworthy-with-evidence refuses issuance | `tx counter primary corrupt, resumed from backup` / `evidence archived aside, REFUSING new transactions` + `counter exhausted` refusal lines; `.corrupt-*` sidecars in the config dir |
 | O5 | No-FIFO safety in practice | reordered-duplicate `REPLAY` lines; stale first-timers answer Indeterminate, never double-apply |
 
 ### Assumed
@@ -106,7 +116,7 @@ write set and failure modes. None of the correctness arguments depend on them.
 | A1 | ZNet UIDs are ephemeral per process (fresh UID per relaunch) | Counter reservation could collide with a live peer's floor; mitigated by the floor stale-gate |
 | A2 | `ZDO.Set` from a non-owner is a no-op (owner-gated) | Post-fence ownership recheck exists precisely because of this; a silent cross-owner write would break single-manager order |
 | A3 | `DataRevision` grows on every ZDO write | Viewer staleness guard (`rev <= SeenRev` skip) could miss updates; byte-compare is the second guard |
-| A4 | Same-directory file move is atomic on one filesystem | Torn primary falls back to backup by checksum, so a non-atomic move degrades to a loud restore, not corruption |
+| A4 | `File.Replace` is atomic on one filesystem; the delete+move fallback is NOT (Delete-to-Move window) | Crash-resistant (not crash-atomic) by design: a torn primary fails checksum and restores from the backup copy, so a non-atomic fallback degrades to a loud restore, never corruption |
 
 ### Unknown (runtime-required)
 
@@ -124,5 +134,11 @@ write set and failure modes. None of the correctness arguments depend on them.
   it only while the manager holds the cache.
 - Restart-safe drag escrow is future work (phase 2); withholding is loud, never
   a drop.
+- Counter fail-closed lockout: both-copies-corrupt refuses ALL new txIds until
+  restart after inspecting the `.corrupt-*` sidecars (by design — a same-UID
+  reset counter must never collide below the persisted floor).
+- Propagation recipients (sender + viewers + server) are a best-effort push set:
+  an unknown peer with no presence and no in-flight tx still relies on periodic
+  ZDO sync (visibility only, never correctness).
 - Guarantee wording everywhere is at-most-once submit / exactly-once callback
   attempt — never end-to-end exactly-once.

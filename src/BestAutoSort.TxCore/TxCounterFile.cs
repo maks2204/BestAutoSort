@@ -24,8 +24,10 @@ namespace BestAutoSort.TxCore
     /// ASCII "BestAutoSortTxCounter:" + ceil. Legacy plain-integer files
     /// ("4096") still parse. Anything else (garbage, truncation/torn write,
     /// checksum mismatch, zero) does NOT parse: the caller falls back to the
-    /// backup copy, and only when BOTH copies are untrustworthy archives the
-    /// evidence aside and resumes at 1 LOUDLY (warned, never silent). Ceil
+    /// backup copy, and only when BOTH copies are untrustworthy WITH evidence
+    /// archives the failure aside and refuses issuance fail-closed (loud log,
+    /// IssueTxId 0 — never a restart at 1, never an invented high counter).
+    /// Fresh (neither file exists) may initialise at 1. Ceil
     /// values 0/1 are parsed but never usable (resume needs ceil &gt; 1).
     ///
     /// Reservation rule (TryReserve): mirrors the production block reservation.
@@ -75,6 +77,55 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// Explicit loader states for the production counter load (see ClassifyLoad).
+        /// Fresh = no file evidence at all (neither primary nor backup exists):
+        /// the caller may initialise at 1. ResumedPrimary/ResumedBackup = a
+        /// trustworthy ceil to resume above. FailClosed = file evidence EXISTS
+        /// but NEITHER copy is trustworthy: the caller must refuse new txIds
+        /// (fail closed, loud log), never restart at 1 — a same-UID reset
+        /// counter would otherwise collide with the pre-restart high-water
+        /// below the persisted execution floor.
+        /// </summary>
+        public enum CounterLoadState
+        {
+            Fresh = 0,
+            ResumedPrimary = 1,
+            ResumedBackup = 2,
+            FailClosed = 3
+        }
+
+        /// <summary>
+        /// File-evidence-aware load decision (pure, testable; production
+        /// LoadReservedCounter resolves through HERE, never raw ResolveLoad).
+        /// Reads are keyed on existence: a missing primary must still consult
+        /// the backup (the old loader returned early on a missing primary and
+        /// never looked at the backup). True resume needs ceil &gt; 1.
+        /// Returns Fresh only when NEITHER file exists; FailClosed when evidence
+        /// exists but nothing parses (caller archives + refuses issuance).
+        /// </summary>
+        public static CounterLoadState ClassifyLoad(bool primaryExists, string primaryText, bool backupExists, string backupText, out uint ceil, out bool restoreBackup)
+        {
+            ceil = 0;
+            restoreBackup = false;
+            uint p;
+            if (primaryExists && TryParse(primaryText, out p) && p > 1)
+            {
+                ceil = p;
+                return CounterLoadState.ResumedPrimary;
+            }
+            uint b;
+            if (backupExists && TryParse(backupText, out b) && b > 1)
+            {
+                ceil = b;
+                restoreBackup = true;
+                return CounterLoadState.ResumedBackup;
+            }
+            if (!primaryExists && !backupExists)
+                return CounterLoadState.Fresh;
+            return CounterLoadState.FailClosed;
+        }
+
+        /// <summary>
         /// Pure block-reservation rule. True = the caller may use `current` and
         /// persist newCeil as the new reservation ceil (newCeil == reservedCeil
         /// when still covered). False = refuse new txIds (fail closed): counter
@@ -102,8 +153,10 @@ namespace BestAutoSort.TxCore
         /// testable). True + ceil (&gt; 1) = resume there; restoreBackup tells
         /// the caller to rewrite the primary from the backup. False = NEITHER
         /// copy is trustworthy: the caller must archive the evidence aside and
-        /// resume at 1 loudly (warned, never silent) — never invent a high
-        /// counter (that could skip fencing) and never roll back silently.
+        /// REFUSE issuance fail-closed (loud log, never a restart at 1 — see
+        /// ClassifyLoad Fresh vs FailClosed) — never invent a high counter
+        /// (that could skip fencing) and never roll back silently.
+        /// Kept for compatibility; new code resolves through ClassifyLoad.
         /// </summary>
         public static bool ResolveLoad(string primaryText, string backupText, out uint ceil, out bool restoreBackup)
         {
@@ -132,12 +185,17 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
-        /// Crash-atomic persist: temp file in the SAME directory + OS flush +
+        /// Crash-resistant persist: temp file in the SAME directory + OS flush +
         /// Replace (backup copy kept), with a delete+move fallback where
         /// Replace is unavailable. Never throws; false = persist NOTHING (the
-        /// caller must refuse new txIds fail-closed). A torn write can only
-        /// leave a truncated temp file (never a half primary): the next load
+        /// caller must refuse new txIds fail-closed). Terminology is deliberate:
+        /// crash-RESISTANT, not crash-atomic — the Replace path is atomic, but
+        /// the delete+move fallback has a crash window between Delete and Move
+        /// where the primary is absent (the backup copy covers it: the next load
+        /// restores from backup). A torn temp file never parses, so the next load
         /// fails checksum and falls back to the backup.
+        /// The backup copy is fsync-flushed best-effort where the platform allows
+        /// (failures ignored: the primary flush is the durability point).
         /// </summary>
         public static bool WriteAtomically(string path, uint ceil)
         {
@@ -160,13 +218,14 @@ namespace BestAutoSort.TxCore
                         File.Replace(tmp, path, bak);
                     else
                         File.Move(tmp, path);
+                    FsyncBackupBestEffort(bak);
                     return true;
                 }
                 catch
                 {
                     // Replace unavailable (some Unix/Mono stacks): keep a manual
-                    // backup, then delete+move. Same-directory move is atomic
-                    // on one filesystem; the backup covers the gap.
+                    // backup, then delete+move. The delete+move fallback is NOT
+                    // atomic (Delete-to-Move window); the backup copy covers it.
                     try
                     {
                         if (File.Exists(path))
@@ -185,12 +244,36 @@ namespace BestAutoSort.TxCore
                         return false;
                     }
                     File.Move(tmp, path);
+                    FsyncBackupBestEffort(bak);
                     return true;
                 }
             }
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Best-effort backup fsync (durability assist only, never correctness):
+        /// opens the backup copy and flushes OS buffers where the platform
+        /// supports it. All failures ignored — the primary temp flush inside
+        /// WriteAtomically is the durability point; this only narrows the
+        /// window where a crash leaves a torn backup too.
+        /// </summary>
+        private static void FsyncBackupBestEffort(string backupPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(backupPath) || !File.Exists(backupPath))
+                    return;
+                using (FileStream fs = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    fs.Flush(true);
+                }
+            }
+            catch
+            {
             }
         }
 

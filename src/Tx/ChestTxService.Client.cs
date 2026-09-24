@@ -101,6 +101,9 @@ namespace BestAutoSort.Tx
                 // Original outcome (never coerced to Duplicate): the same txId
                 // keeps its answer forever. A stranger gets Rejected with no
                 // payload — never another sender's Take bytes. Canonical identity.
+                // No op-mismatch gate here BY DESIGN (see TxDecision.IsOpMismatch):
+                // a Query carries no mutation op — it is a lookup by txId, and the
+                // original outcome IS the lost-response path for the true sender.
                 if (cached.Sender != 0L && TxIdGen.PeerKey(cached.Sender) != TxIdGen.PeerKey(sender))
                 {
                     TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + txId + " QUERY sender mismatch");

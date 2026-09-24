@@ -16,8 +16,12 @@ namespace BestAutoSort.TxCore
     ///   TxIdGen.MatchesPeer). A non-owner sender is a stranger: the reply is an
     ///   EPHEMERAL Rejected that persists, fences and caches NOTHING
     ///   (no victim floor/ring/cache change), so the victim's txId is never burned.
-    /// - Quarantined fresh tx: Indeterminate (UnknownTx), never fenced/cached/
-    ///   executed — the same txId stays retryable after TryRecover clears it.
+    /// - Quarantined fresh tx: Indeterminate (UnknownTx), durably FENCED first
+    ///   (floor high-water + persisted floor copy, same choke point as every
+    ///   fresh mutation) but never cached/executed — the same txId stays
+    ///   stale-gated after TryRecover clears the quarantine (retry as a NEW
+    ///   txId, never the same one). A fence-write failure stays fail-closed
+    ///   Indeterminate without claiming anything further.
     /// - Handoff-drop (queued-but-unapplied at takeover/structural acquire):
     ///   stable Rejected ONLY when the seeded record is durable (ring AND floor
     ///   persisted); any persistence failure stays fail-closed Indeterminate
@@ -79,13 +83,40 @@ namespace BestAutoSort.TxCore
         /// <summary>
         /// Quarantined fresh-tx terminal: Indeterminate (UnknownTx). Live RAM may
         /// hold speculative inventory from a post-fence failure, so fresh
-        /// mutations never execute, fence or cache while quarantined. Shared by
-        /// the remote (request), local (MutateLocal/ApplyJob) and queued (Drain)
-        /// paths — the same txId stays retryable after authoritative recovery.
+        /// mutations never execute or cache while quarantined — but the txId IS
+        /// durably fenced first (floor high-water + floor persist, same as every
+        /// fresh mutation), so the same txId stays stale-gated after
+        /// authoritative recovery and the sender must retry as a NEW txId.
+        /// Shared by the remote (request), local (MutateLocal/ApplyJob) and
+        /// queued (Drain) paths. A fence-write failure answers the same
+        /// Indeterminate fail-closed (nothing claimed, nothing cached).
         /// </summary>
         public static TxStatus QuarantinedTerminal()
         {
             return TxStatus.UnknownTx;
+        }
+
+        /// <summary>
+        /// Replay op-mismatch gate (fail-closed, no payload): a cached txId may be
+        /// replayed ONLY for the same op that committed it. A mutation request
+        /// whose op differs from the cached op (stale sender grid, counter
+        /// collision after a reset, cross-op retry) answers Indeterminate
+        /// (UnknownTx) — never the cached payload (a Take replay for an Add
+        /// txId would credit uncommitted items) and never re-executed (the txId
+        /// is fenced, so executing would double-apply). The cache entry is left
+        /// untouched: the original op still replays afterwards. Query lookups
+        /// (TxOp.Query) are NOT mutations and are exempt: a Query by txId
+        /// returns the original outcome (that IS the lost-response path).
+        /// Sender-0 legacy note: the gate applies regardless of sender — a
+        /// version-skew resend (sender 0) with a mismatched op is refused the
+        /// same way; sender-0 resends with the MATCHING op still replay through
+        /// the normal path (see SenderBinding.UnauthenticatedLegacy).
+        /// </summary>
+        public static bool IsOpMismatch(TxOp cachedOp, TxOp incomingOp)
+        {
+            if (incomingOp == TxOp.Query)
+                return false;
+            return cachedOp != incomingOp;
         }
 
         /// <summary>

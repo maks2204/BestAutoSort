@@ -118,9 +118,11 @@ namespace BestAutoSort.TxCore
         /// <summary>
         /// Post-fence recovery quarantine: live RAM may hold speculative inventory
         /// left by a failed Execute/save whose persistence outcome was ambiguous.
-        /// While set, fresh mutations never execute (Apply answers UnknownTx without
-        /// fencing, mutating, or caching); replays/queries still answer. Cleared only
-        /// by a successful authoritative reload (TryRecover), never by elapsed time.
+        /// While set, fresh mutations never execute or cache (Apply answers
+        /// UnknownTx) but ARE durably fenced (floor high-water + floor persist),
+        /// so the same txId stays stale-gated after recovery (retry as a NEW
+        /// txId); replays/queries still answer. Cleared only by a successful
+        /// authoritative reload (TryRecover), never by elapsed time.
         /// The fence of the failed tx is kept (never rolls back).
         /// </summary>
         public bool Quarantined
@@ -172,6 +174,15 @@ namespace BestAutoSort.TxCore
                     if (request.Sender != 0 && cached.Sender != 0
                         && TxIdGen.PeerKey(request.Sender) != TxIdGen.PeerKey(cached.Sender))
                         return SenderMismatch(cached, request.Sender);
+                    if (TxDecision.IsOpMismatch(cached.Op, request.Op))
+                    {
+                        // Cross-op replay (shared seam TxDecision.IsOpMismatch): the
+                        // txId committed for a DIFFERENT op. Never replay the cached
+                        // payload (a Take body for an Add txId would credit
+                        // uncommitted items), never execute, never overwrite the
+                        // cache: Indeterminate, and the original op still replays.
+                        return OpMismatchResult(request);
+                    }
                     TxResult dup = cached.Clone();
                     dup.IsReplay = true;
                     return dup;
@@ -188,9 +199,23 @@ namespace BestAutoSort.TxCore
                 {
                     // Fail-closed quarantine: speculative RAM may be dirty. Safe
                     // replay/query responses still work (handled above/below), but
-                    // fresh mutations never execute, fence, or cache here — the same
-                    // txId stays retryable after TryRecover clears the quarantine.
-                    // (The failed tx that caused the quarantine keeps its fence.)
+                    // fresh mutations never execute or cache here. The txId IS
+                    // durably fenced first (same choke point as every fresh
+                    // mutation: RAM high-water + persisted floor copy), so the
+                    // same txId stays stale-gated after TryRecover clears the
+                    // quarantine — the sender retries as a NEW txId, never the
+                    // same one. (The failed tx that caused the quarantine keeps
+                    // its fence.) A fence-write failure stays fail-closed
+                    // Indeterminate with nothing cached and nothing claimed.
+                    // Propagation-request included: peers learn the high-water
+                    // even though nothing executes (best-effort, never an ACK).
+                    AdvanceFloor(peer, ctr);
+                    if (Durability != null)
+                    {
+                        if (!PersistFloorHook())
+                            return UnknownResult();
+                        FirePropagation(TxPropagationPoint.AfterFence);
+                    }
                     return QuarantinedResult();
                 }
                 uint hw;
@@ -224,6 +249,10 @@ namespace BestAutoSort.TxCore
                         return UnknownResult();
                     }
                     FireCrash(TxDurabilityPoint.AfterFence);
+                    // Propagation-request BEFORE Execute (after WriteFloor): peers
+                    // learn the new high-water even if the mutation later fails.
+                    // Best-effort only (never an ACK, never correctness).
+                    FirePropagation(TxPropagationPoint.AfterFence);
                     if (!IsOwnerHook())
                     {
                         // Ownership lost after the fence (production ZDO.Set is
@@ -326,6 +355,9 @@ namespace BestAutoSort.TxCore
                         FireCrash(TxDurabilityPoint.AfterRing);
                         PersistFloorHook();
                     }
+                    // Propagation-request AFTER the save/ring/commit point (ring +
+                    // floor rewritten): best-effort push, never an ACK/barrier.
+                    FirePropagation(TxPropagationPoint.AfterCommit);
                 }
                 if (!_floorCorrupt)
                     _corrupt = false; // degraded-mode recovery: the ring was just rebuilt from the live cache.
@@ -374,6 +406,11 @@ namespace BestAutoSort.TxCore
         /// Query a cached result (lost response).
         /// Returns the original outcome (IsReplay), a totals-only legacy
         /// Duplicate from the ring, or UnknownTx.
+        /// No op-mismatch gate here BY DESIGN (see TxDecision.IsOpMismatch): a
+        /// Query carries no mutation op — it is a lookup by txId, and returning
+        /// the original outcome IS the lost-response path. Cross-op protection
+        /// lives on the Apply replay path; Query payloads are additionally gated
+        /// by the sender-identity check below (strangers get Rejected, no body).
         /// </summary>
         public TxResult Query(long txId)
         {
@@ -732,8 +769,9 @@ namespace BestAutoSort.TxCore
 
         /// <summary>
         /// Quarantined fresh-tx terminal through the shared seam (TxDecision):
-        /// Indeterminate, never fenced/cached/executed. The same txId stays
-        /// retryable after TryRecover clears the quarantine.
+        /// Indeterminate, durably fenced first but never cached/executed. The same
+        /// txId stays stale-gated after TryRecover clears the quarantine (retry as
+        /// a NEW txId). A fence-write failure stays fail-closed Indeterminate.
         /// </summary>
         private TxResult QuarantinedResult()
         {
@@ -761,6 +799,26 @@ namespace BestAutoSort.TxCore
                 Op = cached.Op,
                 Sender = TxIdGen.PeerKey(sender),
                 IsReplay = true
+            };
+        }
+
+        /// <summary>
+        /// Cross-op replay refusal (shared seam TxDecision.IsOpMismatch): the txId
+        /// committed for a different op. Indeterminate with NO payload (never
+        /// another op's Take bytes), nothing executed, cache untouched — the
+        /// original op still replays afterwards. Not a replay (IsReplay=false).
+        /// </summary>
+        private TxResult OpMismatchResult(TxRequest request)
+        {
+            return new TxResult
+            {
+                Status = TxStatus.UnknownTx,
+                Revision = Revision,
+                Accepted = new List<int>(),
+                TotalsOnly = false,
+                Op = request.Op,
+                Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : TxIdGen.PeerOf(request.TxId),
+                IsReplay = false
             };
         }
 
@@ -965,6 +1023,23 @@ namespace BestAutoSort.TxCore
             TxDurability seam = Durability;
             if (seam != null && seam.Crash != null)
                 seam.Crash(point);
+        }
+
+        /// <summary>
+        /// Propagation-request through the seam (best-effort, never correctness):
+        /// a throwing hook is swallowed — propagation never affects the outcome.
+        /// </summary>
+        private void FirePropagation(TxPropagationPoint point)
+        {
+            try
+            {
+                TxDurability seam = Durability;
+                if (seam != null && seam.PropagationRequest != null)
+                    seam.PropagationRequest(point);
+            }
+            catch
+            {
+            }
         }
 
         /// <summary>Write-ahead fence + commit marker: UNBOUNDED, never evicting. FloorCap is a warn threshold only.</summary>

@@ -125,6 +125,8 @@ namespace ChestTx.Tests
             HARDENING_CounterWrapFailClosed();
             Console.WriteLine("HARDENING_CounterAtomicWrite");
             HARDENING_CounterAtomicWrite();
+            Console.WriteLine("HARDENING_CounterLoadStatesFailClosed");
+            HARDENING_CounterLoadStatesFailClosed();
             Console.WriteLine("HARDENING_EmptyChestTakeRejected");
             HARDENING_EmptyChestTakeRejected();
             Console.WriteLine("HARDENING_SItemsNullNeverPresumedEmpty");
@@ -190,8 +192,9 @@ namespace ChestTx.Tests
         /// Backup-aware load: corrupt primary + good backup resumes from the
         /// backup (flagging a primary restore); good primary wins untouched;
         /// both untrustworthy resolves to false (caller archives evidence and
-        /// resumes at 1 LOUDLY — never a silent rollback, never an invented
-        /// high counter).
+        /// REFUSES issuance fail-closed — see ClassifyLoad/Fresh vs FailClosed
+        /// and HARDENING_CounterLoadStatesFailClosed; never a restart at 1,
+        /// never an invented high counter, never a silent rollback).
         /// </summary>
         private static void HARDENING_CounterCorruptPrimaryBackupAware()
         {
@@ -210,7 +213,7 @@ namespace ChestTx.Tests
             Check.That(TxCounterFile.ResolveLoad("1", backup, out resolved, out restore)
                 && resolved == 4096u && restore, "unusable primary (ceil 1) falls back to backup");
             Check.That(!TxCounterFile.ResolveLoad("garbage", "also-garbage", out resolved, out restore),
-                "both corrupt resolves false (archive + loud resume at 1)");
+                "both corrupt resolves false (archive + fail-closed issuance refusal)");
             Check.That(!TxCounterFile.ResolveLoad(null, null, out resolved, out restore),
                 "both missing resolves false");
             Check.That(!TxCounterFile.ResolveLoad("0", "1", out resolved, out restore),
@@ -249,7 +252,7 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Crash-atomic persist against a real temp directory: primary parses
+        /// Crash-resistant persist against a real temp directory: primary parses
         /// after write, the second write keeps a parseable backup, and a
         /// simulated torn primary resolves to the backup.
         /// </summary>
@@ -292,6 +295,48 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
+        /// Explicit counter loader states (shared seam TxCounterFile.ClassifyLoad,
+        /// production LoadReservedCounter resolves through HERE): Fresh ONLY when
+        /// NEITHER file exists (may initialise at 1); a missing primary still
+        /// consults the backup (the old loader returned early and never looked);
+        /// evidence-with-nothing-trustworthy is FailClosed — the caller archives
+        /// the sidecars and REFUSES issuance (IssueTxId 0), never restarts at 1
+        /// where a reused UID could collide below the persisted execution floor.
+        /// Fail-closed proof: every FailClosed shape below is evidence the
+        /// production latch (CounterIssuanceBlocked) must refuse on.
+        /// </summary>
+        private static void HARDENING_CounterLoadStatesFailClosed()
+        {
+            uint ceil;
+            bool restore;
+            string goodPrimary = TxCounterFile.Format(8192u);
+            string goodBackup = TxCounterFile.Format(4096u);
+            Check.That(TxCounterFile.ClassifyLoad(false, null, false, null, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.Fresh, "neither file exists => Fresh (may init at 1)");
+            Check.That(TxCounterFile.ClassifyLoad(true, goodPrimary, true, goodBackup, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.ResumedPrimary && ceil == 8192u && !restore,
+                "good primary resumes, no restore");
+            Check.That(TxCounterFile.ClassifyLoad(true, "v1:8192:deadbeef", true, goodBackup, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.ResumedBackup && ceil == 4096u && restore,
+                "corrupt primary falls back to backup with restore flag");
+            Check.That(TxCounterFile.ClassifyLoad(false, null, true, goodBackup, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.ResumedBackup && ceil == 4096u && restore,
+                "missing primary still consults the backup (primary-missing bug fix)");
+            Check.That(TxCounterFile.ClassifyLoad(true, "garbage", true, "also-garbage", out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "both corrupt => FailClosed (refuse issuance, never restart at 1)");
+            Check.That(TxCounterFile.ClassifyLoad(true, null, false, null, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "unreadable primary with no backup => FailClosed");
+            Check.That(TxCounterFile.ClassifyLoad(false, null, true, "torn-write", out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "backup evidence corrupt with no primary => FailClosed (not Fresh)");
+            Check.That(TxCounterFile.ClassifyLoad(true, "1", true, "0", out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "unusable ceils (0/1) with evidence => FailClosed");
+        }
+
+        /// <summary>
         /// Empty-chest observation (no behavior change — pins it): Take on an
         /// empty chest is a STABLE persisted Rejected (known-not-committed),
         /// never Indeterminate and never a debit; the retry is a replay of the
@@ -327,8 +372,9 @@ namespace ChestTx.Tests
         /// persisted authority is unavailable (null, modelling null s_items
         /// bytes at the production reload/takeover/structural sites), recovery
         /// FAILS, the quarantine stays, fresh txIds answer the shared
-        /// quarantine terminal WITHOUT mutating, and NOTHING is presumed empty.
-        /// Only a successful authoritative reload clears it.
+        /// quarantine terminal WITHOUT mutating/caching (but ARE fenced, so the
+        /// same txId stays stale-gated after recovery), and NOTHING is presumed
+        /// empty. Only a successful authoritative reload clears it.
         /// </summary>
         private static void HARDENING_SItemsNullNeverPresumedEmpty()
         {
@@ -355,6 +401,9 @@ namespace ChestTx.Tests
             Check.That(fresh.Status == TxDecision.QuarantinedTerminal() && !fresh.IsReplay,
                 "quarantined fresh tx indeterminate, got " + fresh.Status);
             Check.Equal(before, chest.TotalOf(Wood), "quarantined tx mutates nothing (nothing presumed empty)");
+            uint hw;
+            Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
+                "quarantined fresh tx fenced (floor 11->3), so the same txId stays stale-gated");
 
             w.FailSave = false;
             w.NullAuthority = false;

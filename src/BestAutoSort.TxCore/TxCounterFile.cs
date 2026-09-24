@@ -30,6 +30,25 @@ namespace BestAutoSort.TxCore
     /// Fresh (neither file exists) may initialise at 1. Ceil
     /// values 0/1 are parsed but never usable (resume needs ceil &gt; 1).
     ///
+    /// Persistent fail-closed marker (.blocked sidecar): archiving the corrupt
+    /// copies REMOVES the file evidence, so a restart would otherwise see
+    /// "neither file exists" and go Fresh (start at 1) — a same-UID reset
+    /// counter colliding below the persisted execution floor. The marker is
+    /// written BEFORE the corrupt copies are moved aside and is checked BEFORE
+    /// the Fresh classification (see ClassifyLoad): as long as it exists every
+    /// load is FailClosed, across restarts, until a human repairs. Archiving is
+    /// diagnostics only and never erases safety state.
+    ///
+    /// Manual repair procedure (also stamped inside the marker file itself):
+    /// 1. Inspect the .corrupt-* sidecars (what ceil was reserved, what broke).
+    /// 2. Restore ONE trustworthy counter file (a .corrupt-* copy whose checksum
+    ///    verifies, or a backup) to the canonical counter path.
+    /// 3. Delete the .blocked marker file.
+    /// 4. Restart: the loader resumes above the restored ceil (ResumedPrimary).
+    /// Skipping step 2 (delete marker, restart with no files) goes Fresh at 1 —
+    /// safe ONLY when no same-UID peer can still be below the floor; when in
+    /// doubt, restore a ceil instead of restarting empty.
+    ///
     /// Reservation rule (TryReserve): mirrors the production block reservation.
     /// Refuses fail-closed at 0/uint.MaxValue and when the next block would
     /// reach MaxValue, so the counter can never wrap silently (TxIdGen.TryNext
@@ -41,6 +60,7 @@ namespace BestAutoSort.TxCore
         private const string CheckScope = "BestAutoSortTxCounter:";
         private const string BackupSuffix = ".bak";
         private const string TmpSuffix = ".tmp";
+        private const string BlockedSuffix = ".blocked";
 
         /// <summary>Formats a reservation ceil in the versioned format.</summary>
         public static string Format(uint ceil)
@@ -102,11 +122,29 @@ namespace BestAutoSort.TxCore
         /// never looked at the backup). True resume needs ceil &gt; 1.
         /// Returns Fresh only when NEITHER file exists; FailClosed when evidence
         /// exists but nothing parses (caller archives + refuses issuance).
+        /// Kept for compatibility; blocked-marker-aware code resolves through
+        /// the ClassifyLoad overload taking blockedMarkerPresent.
         /// </summary>
         public static CounterLoadState ClassifyLoad(bool primaryExists, string primaryText, bool backupExists, string backupText, out uint ceil, out bool restoreBackup)
         {
+            return ClassifyLoad(primaryExists, primaryText, backupExists, backupText, false, out ceil, out restoreBackup);
+        }
+
+        /// <summary>
+        /// Blocked-marker-aware load decision (pure, testable): identical to the
+        /// file-evidence overload, except a present .blocked marker forces
+        /// FailClosed BEFORE the Fresh classification — the marker is the safety
+        /// state that survives archiving (the corrupt copies are gone, so without
+        /// it a restart would see "neither file exists" and go Fresh at 1).
+        /// The caller must refuse new txIds while FailClosed and must NOT delete
+        /// the marker itself: only the documented manual repair removes it.
+        /// </summary>
+        public static CounterLoadState ClassifyLoad(bool primaryExists, string primaryText, bool backupExists, string backupText, bool blockedMarkerPresent, out uint ceil, out bool restoreBackup)
+        {
             ceil = 0;
             restoreBackup = false;
+            if (blockedMarkerPresent)
+                return CounterLoadState.FailClosed;
             uint p;
             if (primaryExists && TryParse(primaryText, out p) && p > 1)
             {
@@ -182,6 +220,69 @@ namespace BestAutoSort.TxCore
         public static string BackupPathFor(string path)
         {
             return path + BackupSuffix;
+        }
+
+        /// <summary>Persistent fail-closed marker path for a counter file path (same directory).</summary>
+        public static string BlockedPathFor(string path)
+        {
+            return path + BlockedSuffix;
+        }
+
+        /// <summary>
+        /// Marker body: UTC timestamp + reason + the manual repair procedure.
+        /// Content is diagnostic (presence is the signal); the loader never
+        /// parses it, so older/newer bodies stay compatible.
+        /// </summary>
+        public static string FormatBlockedMarker(string reason)
+        {
+            string stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            return "BestAutoSort txId-counter issuance BLOCKED (fail-closed) since " + stamp + "\n"
+                + "Reason: " + (reason ?? "counter copies untrustworthy") + "\n"
+                + "Repair: 1) inspect the .corrupt-* sidecars; "
+                + "2) restore ONE trustworthy counter file to the canonical path; "
+                + "3) delete this .blocked file; 4) restart. "
+                + "Deleting this file with no counter file restarts issuance at 1.\n";
+        }
+
+        /// <summary>
+        /// Creates (or refreshes) the persistent fail-closed marker. Never throws;
+        /// false = marker NOT created (the caller must stay fail-closed in RAM
+        /// and log loudly — issuance refusal must never depend on this write).
+        /// Called BEFORE corrupt copies are archived aside, so a crash between
+        /// the marker write and the archive still leaves FailClosed evidence.
+        /// </summary>
+        public static bool WriteBlockedMarker(string counterPath, string reason)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(counterPath))
+                    return false;
+                File.WriteAllText(BlockedPathFor(counterPath), FormatBlockedMarker(reason));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// True when the persistent fail-closed marker exists. Never throws
+        /// (an unreadable directory answers false; the loader's own catch-all
+        /// still fails closed on IO errors).
+        /// </summary>
+        public static bool BlockedMarkerPresent(string counterPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(counterPath))
+                    return false;
+                return File.Exists(BlockedPathFor(counterPath));
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>

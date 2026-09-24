@@ -118,11 +118,15 @@ namespace BestAutoSort.TxCore
         /// <summary>
         /// Post-fence recovery quarantine: live RAM may hold speculative inventory
         /// left by a failed Execute/save whose persistence outcome was ambiguous.
-        /// While set, fresh mutations never execute or cache (Apply answers
-        /// UnknownTx) but ARE durably fenced (floor high-water + floor persist),
-        /// so the same txId stays stale-gated after recovery (retry as a NEW
-        /// txId); replays/queries still answer. Cleared only by a successful
-        /// authoritative reload (TryRecover), never by elapsed time.
+        /// While set, fresh mutations never execute (Apply refuses through the
+        /// durable-terminal matrix: Rejected only when the seeded record is
+        /// durable — ring entry AND floor copy — else Indeterminate with the
+        /// unpersisted seed evicted), so a refused txId never executes after
+        /// recovery whenever ANY copy persisted (stable Rejected replay when the
+        /// ring copy survived, stale-gated UnknownTx when only the floor copy
+        /// did — either way retry as a NEW txId); replays/
+        /// queries still answer. Cleared only by a successful authoritative
+        /// reload (TryRecover), never by elapsed time.
         /// The fence of the failed tx is kept (never rolls back).
         /// </summary>
         public bool Quarantined
@@ -185,6 +189,15 @@ namespace BestAutoSort.TxCore
                     }
                     TxResult dup = cached.Clone();
                     dup.IsReplay = true;
+                    // Same-txId + same-op: the ORIGINAL outcome replays, never
+                    // re-applied (idempotent by construction — a transport duplicate
+                    // or a same-tx Query retry can never double-apply). A DIFFERENT
+                    // request reusing a committed txId with the SAME op would ALSO
+                    // replay the original (false hit): that collision is prevented
+                    // by unique issuance (durable counter reservation above the
+                    // persisted execution floor), NOT by this gate — the cross-op
+                    // case above is guarded, the same-op case relies on txIds never
+                    // being reused across requests (see SAMEOP regression test).
                     return dup;
                 }
                 long peer = TxIdGen.PeerOf(request.TxId);
@@ -199,24 +212,65 @@ namespace BestAutoSort.TxCore
                 {
                     // Fail-closed quarantine: speculative RAM may be dirty. Safe
                     // replay/query responses still work (handled above/below), but
-                    // fresh mutations never execute or cache here. The txId IS
-                    // durably fenced first (same choke point as every fresh
-                    // mutation: RAM high-water + persisted floor copy), so the
-                    // same txId stays stale-gated after TryRecover clears the
-                    // quarantine — the sender retries as a NEW txId, never the
-                    // same one. (The failed tx that caused the quarantine keeps
-                    // its fence.) A fence-write failure stays fail-closed
-                    // Indeterminate with nothing cached and nothing claimed.
-                    // Propagation-request included: peers learn the high-water
+                    // fresh mutations never execute here. The refusal is a DURABLE
+                    // terminal through the shared matrix
+                    // (TxDecision.HandoffDropTerminal, the same rule as
+                    // queued-but-unapplied handoff drops): the txId is seeded as
+                    // Rejected (known-not-committed — nothing executed, so the
+                    // sender retries as a NEW txId, never the same one) and
+                    // answered Rejected ONLY when the record is durable (ring
+                    // entry AND floor copy persisted). Any persistence failure
+                    // answers Indeterminate and the freshly seeded entry is
+                    // evicted (a RAM-only Rejected would flip after a restart —
+                    // same rule as deterministic Rejected below). The floor
+                    // advance is always KEPT (seen-high-water, monotonic), and a
+                    // RAM-only floor is NOT durable protection: only persisted
+                    // copies gate post-restart duplicates. Because quarantine
+                    // precedes the stale gate, a same-tx retry re-attempts
+                    // persistence instead of staling out — transient recovery
+                    // without a restart when the writes come back.
+                    // (The failed tx that caused the quarantine keeps its fence.)
+                    // Propagation-request included when the terminal is stable
+                    // (ring+floor both persisted): peers learn the high-water
                     // even though nothing executes (best-effort, never an ACK).
+                    TxResult refusal = new TxResult();
+                    refusal.Op = request.Op;
+                    refusal.Status = TxStatus.Rejected;
+                    refusal.Revision = Revision;
+                    refusal.Sender = request.Sender != 0 ? TxIdGen.PeerKey(request.Sender) : peer;
+                    bool seeded = false;
+                    if (!_processed.ContainsKey(request.TxId))
+                    {
+                        _processed[request.TxId] = refusal.Clone();
+                        _order.AddLast(request.TxId);
+                        while (_order.Count > TxLimits.ProcessedCacheCap)
+                        {
+                            long oldest = _order.First.Value;
+                            _order.RemoveFirst();
+                            _processed.Remove(oldest);
+                            _takeBlobs.Remove(oldest);
+                        }
+                        seeded = true;
+                    }
                     AdvanceFloor(peer, ctr);
+                    RebuildRing();
+                    bool ringOk = true;
+                    bool floorOk = true;
                     if (Durability != null)
                     {
-                        if (!PersistFloorHook())
-                            return UnknownResult();
-                        FirePropagation(TxPropagationPoint.AfterFence);
+                        ringOk = PersistRingHook();
+                        floorOk = PersistFloorHook();
                     }
-                    return QuarantinedResult();
+                    TxStatus terminal = TxDecision.HandoffDropTerminal(ringOk, floorOk);
+                    if (terminal == TxStatus.Rejected)
+                    {
+                        if (Durability != null)
+                            FirePropagation(TxPropagationPoint.AfterFence);
+                        return refusal;
+                    }
+                    if (seeded)
+                        Evict(request.TxId);
+                    return UnknownResult();
                 }
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
@@ -765,17 +819,6 @@ namespace BestAutoSort.TxCore
             {
                 return new Dictionary<long, uint>(_floor);
             }
-        }
-
-        /// <summary>
-        /// Quarantined fresh-tx terminal through the shared seam (TxDecision):
-        /// Indeterminate, durably fenced first but never cached/executed. The same
-        /// txId stays stale-gated after TryRecover clears the quarantine (retry as
-        /// a NEW txId). A fence-write failure stays fail-closed Indeterminate.
-        /// </summary>
-        private TxResult QuarantinedResult()
-        {
-            return new TxResult { Status = TxDecision.QuarantinedTerminal(), Revision = Revision };
         }
 
         private TxResult UnknownResult()

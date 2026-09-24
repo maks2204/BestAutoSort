@@ -447,23 +447,24 @@ namespace BestAutoSort.Tx
             if (state.TxQuarantined)
             {
                 // Fail-closed quarantine: live RAM may hold speculative inventory from
-                // a post-fence failure. Fresh mutations never execute or cache until an
-                // authoritative s_items reload succeeds (pump/takeover/reacquire) —
-                // but the txId IS durably fenced first (same choke point as every
-                // fresh mutation), so the same txId stays stale-gated after recovery
-                // and the sender retries as a NEW txId. A fence-write failure stays
-                // fail-closed Indeterminate with nothing cached and nothing claimed.
-                AdvanceFloor(state, job.TxId);
-                if (!WriteFloor(state))
-                    TxLog.Warn("tx=" + job.TxId + " quarantine fence not persisted (indeterminate, never executes)");
-                else
+                // a post-fence failure. Fresh mutations never execute — the refusal is
+                // a durable terminal through the shared matrix (Rejected only when the
+                // seeded record is durable: ring AND floor; else Indeterminate with the
+                // unpersisted seed evicted). The floor advance is kept (monotonic) but
+                // a RAM-only floor is NOT durable protection. Local callers have no
+                // Pending entry: always complete (a both-copies failure is still
+                // UnknownTx here — nothing executed, so a retry as a NEW txId
+                // applies at-most-once).
+                bool anyDurable;
+                TxStatus terminal = PersistQuarantineRefusal(state, job.TxId, call.Op, job.Sender, out anyDurable);
+                if (terminal == TxStatus.Rejected)
                     RequestPropagation(state, job.Sender);
-                TxLog.Warn("tx=" + job.TxId + " local refused: quarantined after post-fence failure (indeterminate)");
+                TxLog.Warn("tx=" + job.TxId + " local refused: quarantined after post-fence failure (status=" + terminal + ", durable=" + anyDurable + ")");
                 if (onDone != null)
                 {
                     StoredResult u = new StoredResult();
                     u.Op = call.Op;
-                    u.Status = TxDecision.QuarantinedTerminal();
+                    u.Status = terminal;
                     u.Revision = CurrentRevision(container);
                     onDone(u);
                 }
@@ -750,16 +751,22 @@ namespace BestAutoSort.Tx
                 // files still read, and a torn/corrupt primary falls back to
                 // the backup copy (restoring it best-effort). A MISSING primary
                 // still consults the backup (a backup-only reservation is evidence
-                // too). Both copies untrustworthy WITH evidence = archive the
-                // evidence aside and REFUSE issuance fail-closed (never restart at
-                // 1: UIDs are ephemeral per process so this normally belongs to a
-                // retired UID, but in the rare UID-reuse case a reset counter would
-                // collide below the persisted floor — safe only via refusal, since
-                // the floor stale-gates same-UID replays to Indeterminate ONLY for
-                // txIds that were actually fenced). Fresh (NEITHER file exists) may
-                // initialise at 1. Never invent a high counter here — that could
-                // skip fencing.
+                // too). The persistent .blocked marker is checked BEFORE the Fresh
+                // classification: archiving the corrupt copies removes the file
+                // evidence, so without the marker a restart would see NEITHER file
+                // and go Fresh (start at 1). Both copies untrustworthy WITH evidence =
+                // write the marker FIRST, archive the evidence aside, then REFUSE
+                // issuance fail-closed (never restart at 1: UIDs are ephemeral per
+                // process so this normally belongs to a retired UID, but in the rare
+                // UID-reuse case a reset counter would collide below the persisted
+                // floor — safe only via refusal, since the floor stale-gates same-UID
+                // replays to Indeterminate ONLY for txIds that were actually fenced).
+                // Fresh (NEITHER file exists AND no marker) may initialise at 1.
+                // Never invent a high counter here — that could skip fencing.
+                // Repair: inspect the .corrupt-* sidecars, restore ONE trustworthy
+                // counter file, delete the .blocked marker, restart (ResumedPrimary).
                 string backupPath = TxCounterFile.BackupPathFor(path);
+                bool blocked = TxCounterFile.BlockedMarkerPresent(path);
                 bool primaryExists = false;
                 bool backupExists = false;
                 try { primaryExists = System.IO.File.Exists(path); }
@@ -778,7 +785,21 @@ namespace BestAutoSort.Tx
                 catch { }
                 uint ceil;
                 bool restoreBackup;
-                CounterLoadState = TxCounterFile.ClassifyLoad(primaryExists, primaryText, backupExists, backupText, out ceil, out restoreBackup);
+                CounterLoadState = TxCounterFile.ClassifyLoad(primaryExists, primaryText, backupExists, backupText, blocked, out ceil, out restoreBackup);
+                if (blocked)
+                {
+                    // Persistent fail-closed marker present: a previous load already
+                    // archived corrupt evidence aside and stamped this marker. Stay
+                    // FailClosed across restarts WITHOUT archiving again — the files
+                    // on disk (if any) may be a human-restored trustworthy copy
+                    // awaiting only the marker deletion, and moving them aside
+                    // would destroy the repair. Only the documented manual repair
+                    // (restore ONE trustworthy counter file, delete the .blocked
+                    // marker, restart) clears this; the loader never deletes it.
+                    _counterFailClosed = true;
+                    TxLog.Warn("tx counter issuance BLOCKED by persistent marker (fail closed: refusing new transactions; repair: restore ONE trustworthy counter file, delete the .blocked marker, restart)");
+                    return;
+                }
                 if (CounterLoadState == TxCounterFile.CounterLoadState.ResumedPrimary)
                 {
                     // Resume above everything reserved before the restart. UIDs are
@@ -818,9 +839,16 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Corrupt-counter evidence preservation (diagnostic only): renames
+        /// Corrupt-counter evidence preservation (diagnostic only): FIRST stamps
+        /// the persistent fail-closed (.blocked) marker, THEN renames
         /// untrustworthy primary/backup copies aside with a timestamp suffix so
-        /// the failure stays inspectable. Never throws. Does NOT invent a
+        /// the failure stays inspectable. Marker-first ordering is safety, not
+        /// tidiness: archiving REMOVES the file evidence, so a crash (or the
+        /// next restart) between the archive and any later marker write would
+        /// otherwise see "neither file exists" and go Fresh (restart issuance
+        /// at 1 — a same-UID reset counter colliding below the persisted
+        /// execution floor). With the marker written first, every later load is
+        /// FailClosed until a human repairs. Never throws. Does NOT invent a
         /// replacement counter — the caller refuses issuance fail-closed
         /// (IssueTxId 0) until restart after inspection.
         /// </summary>
@@ -828,6 +856,13 @@ namespace BestAutoSort.Tx
         {
             try
             {
+                // Marker BEFORE the moves: a crash between marker and archive
+                // still leaves FailClosed evidence either way.
+                bool markerOk = false;
+                try { markerOk = TxCounterFile.WriteBlockedMarker(path, "counter copies untrustworthy (primary AND backup)"); }
+                catch { }
+                if (!markerOk)
+                    TxLog.Warn("tx counter .blocked marker NOT created (staying fail-closed in RAM; restart may lose the evidence — inspect the .corrupt-* sidecars immediately)");
                 string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
                 try
                 {
@@ -1244,19 +1279,26 @@ namespace BestAutoSort.Tx
             if (state.TxQuarantined)
             {
                 // Fail-closed quarantine after a post-fence failure: live RAM may hold
-                // speculative inventory. Fresh txIds never execute or cache until an
-                // authoritative s_items reload succeeds — but each fresh txId IS durably
-                // fenced first (floor high-water + floor persist), so the same txId stays
-                // stale-gated after recovery (retry as a NEW txId). Replays above already
-                // answered from cache. A fence-write failure stays fail-closed
-                // Indeterminate with nothing cached and nothing claimed.
-                AdvanceFloor(state, txId);
-                if (!WriteFloor(state))
-                    TxLog.Warn("tx=" + txId + " quarantine fence not persisted (indeterminate, never executes)");
-                else
+                // speculative inventory. Fresh txIds never execute — the refusal is a
+                // durable terminal through the shared matrix (Rejected only when the
+                // seeded record is durable: ring AND floor; else Indeterminate with the
+                // unpersisted seed evicted). Replays above already answered from cache.
+                // Both copies failed: stay SILENT (no terminal response). The client's
+                // Pending pump keeps the entry and resends/queries the SAME txId (never
+                // a new one); a same-tx retry re-attempts persistence here (quarantine
+                // precedes the stale gate), so transient write faults recover in-session.
+                // Answering UnknownTx terminally would forget a non-durable outcome.
+                bool anyDurable;
+                TxStatus terminal = PersistQuarantineRefusal(state, txId, call.Op, sender, out anyDurable);
+                if (!anyDurable)
+                {
+                    TxLog.Warn("tx=" + txId + " quarantined and refusal not persisted (silent: same-tx retry retained)");
+                    return;
+                }
+                if (terminal == TxStatus.Rejected)
                     RequestPropagation(state, sender);
-                TxLog.Warn("tx=" + txId + " refused: quarantined after post-fence failure (indeterminate, never executes)");
-                Respond(container, sender, txId, TxDecision.QuarantinedTerminal(), CurrentRevision(container), new ZPackage(), true, call.Op);
+                TxLog.Warn("tx=" + txId + " refused: quarantined after post-fence failure (status=" + terminal + ")");
+                Respond(container, sender, txId, terminal, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }
             if (IsFloorStale(state, txId))
@@ -1483,23 +1525,24 @@ namespace BestAutoSort.Tx
                     {
                         // Fail-closed quarantine: live RAM may hold speculative inventory.
                         // Never execute fresh mutations against dirty RAM. Each queued job is
-                        // durably fenced first (floor high-water + floor persist, same as
-                        // every fresh mutation) and then explicitly completed as UnknownTx
-                        // (Indeterminate — never silently dropped, never mutated, never
-                        // cached), so the same txId stays stale-gated after the
-                        // authoritative reload clears the quarantine (retry as a NEW txId).
-                        // (The failed tx that caused the quarantine keeps its fence.)
-                        // A fence-write failure stays fail-closed Indeterminate with
-                        // nothing cached and nothing claimed.
-                        AdvanceFloor(state, job.TxId);
-                        if (!WriteFloor(state))
-                            TxLog.Warn("tx=" + job.TxId + " quarantine fence not persisted (indeterminate, never executes)");
-                        else
+                        // refused through the durable-terminal matrix (Rejected only when the
+                        // seeded record is durable: ring AND floor; else Indeterminate with
+                        // the unpersisted seed evicted — never silently dropped, never
+                        // mutated). A both-copies failure on a REMOTE job stays SILENT (no
+                        // terminal completion: the client's Pending pump resends/queries the
+                        // SAME txId); a local job has no Pending entry and completes
+                        // UnknownTx. (The failed tx that caused the quarantine keeps its fence.)
+                        TxOp qop = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                        bool anyDurable;
+                        TxStatus qterminal = PersistQuarantineRefusal(state, job.TxId, qop, job.Sender, out anyDurable);
+                        if (qterminal == TxStatus.Rejected)
                             RequestPropagation(state, job.Sender);
-                        TxLog.Warn("tx=" + job.TxId + " quarantined: answered indeterminate without executing");
+                        TxLog.Warn("tx=" + job.TxId + " quarantined: answered " + qterminal + " without executing (durable=" + anyDurable + ")");
+                        if (!anyDurable && !job.IsLocal)
+                            continue;
                         StoredResult q = new StoredResult();
-                        q.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                        q.Status = TxDecision.QuarantinedTerminal();
+                        q.Op = qop;
+                        q.Status = qterminal;
                         q.Revision = CurrentRevision(state.Container);
                         try
                         {
@@ -1541,6 +1584,16 @@ namespace BestAutoSort.Tx
                         // The fence re-persist above rewrote ZDO keys: ask the
                         // net layer to push them (propagation-request, §RequestPropagation).
                         RequestPropagation(state, job.Sender);
+                    }
+                    if (result != null && result.SilentDrop && !job.IsLocal)
+                    {
+                        // Both-copies-failed quarantine refusal (ApplyJob recheck): stay
+                        // SILENT — no terminal completion, so the client's Pending pump
+                        // retains and resends/queries the SAME txId (never a new one).
+                        // A same-tx retry re-attempts persistence (quarantine precedes
+                        // the stale gate). Local jobs never set SilentDrop.
+                        TxLog.Warn("tx=" + job.TxId + " quarantined refusal not persisted (silent: same-tx retry retained)");
+                        continue;
                     }
                     try
                     {
@@ -1686,14 +1739,30 @@ namespace BestAutoSort.Tx
             {
                 // Recheck: quarantine engaged while queued (a previous post-fence failure
                 // dirtied RAM). The durable pre-execution fence above already recorded
-                // this txId (floor advanced + floor write), so the same txId stays
-                // stale-gated after recovery (retry as a NEW txId). Never execute
-                // against dirty RAM — Indeterminate, nothing cached.
-                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " quarantined (indeterminate, never executes)");
+                // this txId (floor advanced + floor write), so the refusal goes through
+                // the durable-terminal matrix: Rejected when the seeded record persists
+                // (ring write; the floor copy is already durable from the fence), else
+                // Indeterminate with the seed evicted and the txId stale-gated by the
+                // fence floor (retry as a NEW txId — except a both-copies failure on a
+                // REMOTE job, which stays SILENT via SilentDrop so the same txId is
+                // retained and re-attempts persistence). Never execute against dirty RAM.
+                // Both copies failed on a REMOTE job: SILENT (no terminal completion —
+                // the client's Pending pump resends/queries the SAME txId); a local
+                // job has no Pending entry and completes UnknownTx. Signalled via
+                // SilentDrop so Drain skips the completion instead of terminally
+                // forgetting a non-durable outcome.
+                TxOp rop = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                bool ranyDurable;
+                TxStatus rterminal = PersistQuarantineRefusal(state, job.TxId, rop, job.Sender, out ranyDurable);
+                if (rterminal == TxStatus.Rejected)
+                    RequestPropagation(state, job.Sender);
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " quarantined (status=" + rterminal + ", durable=" + ranyDurable + ", never executes)");
                 StoredResult quarantined = new StoredResult();
-                quarantined.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
-                quarantined.Status = TxDecision.QuarantinedTerminal();
+                quarantined.Op = rop;
+                quarantined.Status = rterminal;
                 quarantined.Revision = CurrentRevision(job.Container);
+                if (!ranyDurable && !job.IsLocal)
+                    quarantined.SilentDrop = true;
                 return quarantined;
             }
             // Pre-mutation snapshot AFTER the durable fence + ownership recheck: the
@@ -2323,6 +2392,36 @@ namespace BestAutoSort.Tx
             if (seeded)
                 EvictSeededReject(state, txId);
             return false;
+        }
+
+        /// <summary>
+        /// Quarantine durable terminal (shared matrix TxDecision.HandoffDropTerminal,
+        /// the same rule as queued-but-unapplied handoff drops): seed the txId as
+        /// Rejected (known-not-committed — a quarantined txId never executes), then
+        /// persist ring + floor. Rejected is answered ONLY when the seeded record is
+        /// durable (ring entry AND floor copy); any persistence failure answers
+        /// UnknownTx (Indeterminate) and a freshly seeded entry is evicted (a RAM-only
+        /// Rejected would flip after a restart — same rule as TryPersistReject). The
+        /// floor advance is always KEPT (seen-high-water, monotonic); a RAM-only floor
+        /// is NOT durable protection, and because quarantine precedes the stale gate a
+        /// same-tx retry re-attempts persistence (transient recovery without a restart).
+        /// anyDurable=false (BOTH copies failed) means nothing is durable: remote
+        /// callers must stay SILENT (no terminal response — the client's Pending pump
+        /// resends/queries the SAME txId, never a new one) instead of terminally
+        /// forgetting a non-durable outcome. Local callers have no Pending entry and
+        /// must still complete: they answer UnknownTx (nothing executed, so a retry as
+        /// a NEW txId applies at-most-once).
+        /// </summary>
+        private static TxStatus PersistQuarantineRefusal(ChestState state, long txId, TxOp op, long sender, out bool anyDurable)
+        {
+            bool seeded = SeedReject(state, txId, op, sender, true);
+            bool ringOk = WriteRing(state);
+            bool floorOk = WriteFloor(state);
+            anyDurable = ringOk || floorOk;
+            TxStatus terminal = TxDecision.HandoffDropTerminal(ringOk, floorOk);
+            if (terminal != TxStatus.Rejected && seeded)
+                EvictSeededReject(state, txId);
+            return terminal;
         }
 
         /// <summary>

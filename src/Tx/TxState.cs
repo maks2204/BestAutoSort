@@ -74,6 +74,15 @@ namespace BestAutoSort.Tx
         public long Sender;
         /// <summary>True when served from cache/ring instead of freshly executed.</summary>
         public bool IsReplay;
+        /// <summary>
+        /// Both-copies-failed quarantine refusal for a REMOTE job: Drain must skip
+        /// completion entirely (no terminal response — the client's Pending pump
+        /// retains and resends/queries the SAME txId, never a new one). Set only
+        /// by the ApplyJob quarantine recheck when the refusal persisted NOTHING
+        /// (ring AND floor writes failed); local jobs never set it (no Pending
+        /// entry — they complete UnknownTx). Never cached, never persisted.
+        /// </summary>
+        public bool SilentDrop;
     }
 
     internal sealed class TakeEntry
@@ -141,12 +150,19 @@ namespace BestAutoSort.Tx
         /// <summary>
         /// Post-fence recovery quarantine: live RAM may hold speculative inventory
         /// from a failed Execute/save whose persistence outcome was ambiguous.
-        /// While set, fresh mutations never execute or cache (Drain answers queued
-        /// jobs as UnknownTx after durably fencing each txId; MutateLocal/OnTxRequest
-        /// fence-then-refuse fresh txIds as UnknownTx), so every quarantined txId
-        /// stays stale-gated after recovery (retry as a NEW txId). Replays/queries still answer. Cleared only by a
-        /// successful authoritative s_items reload (pump/takeover/reacquire path),
-        /// never by elapsed time. The failed tx keeps its fence (never rolls back).
+        /// While set, fresh mutations never execute — the refusal is a durable
+        /// terminal through the shared matrix (TxDecision.HandoffDropTerminal):
+        /// seeded Rejected (known-not-committed — retry as a NEW txId) answered
+        /// Rejected ONLY when the record is durable (ring entry AND floor copy),
+        /// else Indeterminate with the unpersisted seed evicted. The floor advance
+        /// is kept (monotonic) but a RAM-only floor is NOT durable protection;
+        /// a same-tx retry re-attempts persistence (transient recovery without a
+        /// restart). Both copies failed on a remote tx = SILENT (no terminal
+        /// response — the client retains and retries the SAME txId); local txs
+        /// have no Pending entry and complete UnknownTx. Replays/queries still
+        /// answer. Cleared only by a successful authoritative s_items reload
+        /// (pump/takeover/reacquire path), never by elapsed time. The failed tx
+        /// keeps its fence (never rolls back).
         /// </summary>
         public bool TxQuarantined;
         // Viewer (we watch a foreign chest):

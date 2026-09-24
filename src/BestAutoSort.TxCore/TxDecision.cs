@@ -16,12 +16,21 @@ namespace BestAutoSort.TxCore
     ///   TxIdGen.MatchesPeer). A non-owner sender is a stranger: the reply is an
     ///   EPHEMERAL Rejected that persists, fences and caches NOTHING
     ///   (no victim floor/ring/cache change), so the victim's txId is never burned.
-    /// - Quarantined fresh tx: Indeterminate (UnknownTx), durably FENCED first
-    ///   (floor high-water + persisted floor copy, same choke point as every
-    ///   fresh mutation) but never cached/executed — the same txId stays
-    ///   stale-gated after TryRecover clears the quarantine (retry as a NEW
-    ///   txId, never the same one). A fence-write failure stays fail-closed
-    ///   Indeterminate without claiming anything further.
+    /// - Quarantined fresh tx: durable terminal through the shared matrix
+    ///   (HandoffDropTerminal, the same rule as queued-but-unapplied handoff
+    ///   drops): the txId is seeded as Rejected (known-not-committed — nothing
+    ///   executes, so the sender retries as a NEW txId, never the same one)
+    ///   and answered Rejected ONLY when the seeded record is durable (ring
+    ///   entry AND floor copy persisted). Any persistence failure answers
+    ///   Indeterminate (QuarantinedTerminal) with the unpersisted seed evicted
+    ///   (a RAM-only Rejected would flip after a restart); the floor advance
+    ///   is always KEPT (seen-high-water, monotonic) but a RAM-only floor is
+    ///   NOT durable protection. Because quarantine precedes the stale gate, a
+    ///   same-tx retry re-attempts persistence instead of staling out, so
+    ///   transient write faults recover without a restart. Both copies failed
+    ///   = nothing durable: remote callers stay SILENT (no terminal response —
+    ///   the client's Pending pump resends/queries the SAME txId) instead of
+    ///   terminally forgetting a non-durable outcome.
     /// - Handoff-drop (queued-but-unapplied at takeover/structural acquire):
     ///   stable Rejected ONLY when the seeded record is durable (ring AND floor
     ///   persisted); any persistence failure stays fail-closed Indeterminate
@@ -81,15 +90,20 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
-        /// Quarantined fresh-tx terminal: Indeterminate (UnknownTx). Live RAM may
-        /// hold speculative inventory from a post-fence failure, so fresh
-        /// mutations never execute or cache while quarantined — but the txId IS
-        /// durably fenced first (floor high-water + floor persist, same as every
-        /// fresh mutation), so the same txId stays stale-gated after
-        /// authoritative recovery and the sender must retry as a NEW txId.
+        /// Quarantined fresh-tx Indeterminate leg (UnknownTx): answered when the
+        /// quarantine refusal itself could not be persisted (ring and/or floor
+        /// write failed) and the freshly seeded Rejected entry was evicted — a
+        /// RAM-only Rejected would flip after a restart, so only a DURABLE
+        /// record (ring entry AND floor copy, see HandoffDropTerminal) may answer
+        /// Rejected. The floor advance is still kept in RAM (monotonic) but that
+        /// is NOT durable protection: only persisted copies gate post-restart
+        /// duplicates. A same-tx retry re-attempts persistence (quarantine
+        /// precedes the stale gate), so transient write faults recover without
+        /// a restart; a both-copies failure on a remote tx stays SILENT (no
+        /// terminal response at all) so the client retains and retries the SAME
+        /// txId instead of terminally forgetting a non-durable outcome.
         /// Shared by the remote (request), local (MutateLocal/ApplyJob) and
-        /// queued (Drain) paths. A fence-write failure answers the same
-        /// Indeterminate fail-closed (nothing claimed, nothing cached).
+        /// queued (Drain) paths.
         /// </summary>
         public static TxStatus QuarantinedTerminal()
         {

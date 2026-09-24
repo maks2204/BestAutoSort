@@ -23,6 +23,9 @@ namespace ChestTx.Tests
     /// NEW here (all against PRODUCTION code — TxCore/TxCounterFile/TxIdGen):
     /// - counter legacy/atomic/crash/wrap: TxCounterFile format, checksum,
     ///   torn-write fallback, atomic persist, uint-boundary fail-closed.
+    /// - counter persistent fail-closed marker: COUNTER_BlockedMarker* (marker
+    ///   checked before Fresh, restart preserves FailClosed across the archive,
+    ///   marker-first ordering, manual repair procedure, marker never auto-deleted).
     /// - empty-chest observation: Take on an empty chest is a stable persisted
     ///   Rejected (known-not-committed), never Indeterminate, never a debit.
     /// - s_items==null observation: a null persisted authority (model for null
@@ -127,6 +130,16 @@ namespace ChestTx.Tests
             HARDENING_CounterAtomicWrite();
             Console.WriteLine("HARDENING_CounterLoadStatesFailClosed");
             HARDENING_CounterLoadStatesFailClosed();
+            Console.WriteLine("COUNTER_BlockedMarkerForcesFailClosedBeforeFresh");
+            COUNTER_BlockedMarkerForcesFailClosedBeforeFresh();
+            Console.WriteLine("COUNTER_RestartPreservesFailClosedAcrossArchive");
+            COUNTER_RestartPreservesFailClosedAcrossArchive();
+            Console.WriteLine("COUNTER_ArchiveWritesMarkerFirstKeepsSafety");
+            COUNTER_ArchiveWritesMarkerFirstKeepsSafety();
+            Console.WriteLine("COUNTER_ManualRepairProcedureDocumentedAndEffective");
+            COUNTER_ManualRepairProcedureDocumentedAndEffective();
+            Console.WriteLine("COUNTER_BlockedMarkerWinsOverValidFiles");
+            COUNTER_BlockedMarkerWinsOverValidFiles();
             Console.WriteLine("HARDENING_EmptyChestTakeRejected");
             HARDENING_EmptyChestTakeRejected();
             Console.WriteLine("HARDENING_SItemsNullNeverPresumedEmpty");
@@ -337,6 +350,184 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
+        /// COUNTER_BlockedMarkerForcesFailClosedBeforeFresh + COUNTER_RestartPreservesFailClosedAcrossArchive +
+        /// COUNTER_ArchiveWritesMarkerFirstKeepsSafety + COUNTER_ManualRepairProcedureDocumentedAndEffective +
+        /// COUNTER_BlockedMarkerWinsOverValidFiles.
+        /// </summary>
+        private static void COUNTER_BlockedMarkerForcesFailClosedBeforeFresh()
+        {
+            uint ceil;
+            bool restore;
+            Check.That(TxCounterFile.ClassifyLoad(false, null, false, null, false, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.Fresh,
+                "no files, no marker => Fresh (may init at 1)");
+            Check.That(TxCounterFile.ClassifyLoad(false, null, false, null, true, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "no files WITH marker => FailClosed (never Fresh at 1)");
+            string good = TxCounterFile.Format(8192u);
+            Check.That(TxCounterFile.ClassifyLoad(true, good, false, null, true, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.FailClosed,
+                "marker wins even over a trustworthy primary (only manual repair clears)");
+            Check.That(TxCounterFile.ClassifyLoad(true, good, false, null, false, out ceil, out restore)
+                == TxCounterFile.CounterLoadState.ResumedPrimary && ceil == 8192u,
+                "same files without marker resume normally");
+        }
+
+        /// <summary>
+        /// Restart preserves FailClosed across the archive: corrupt copies + marker,
+        /// then the copies archived aside (what production ArchiveCorruptCounter
+        /// does) — a reload with no files but the marker present stays FailClosed.
+        /// Proved against a real temp directory (presence is the signal; the
+        /// loader never parses the marker body).
+        /// </summary>
+        private static void COUNTER_RestartPreservesFailClosedAcrossArchive()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "chesttx_blocked_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string path = Path.Combine(dir, "BestAutoSort_TxCounter.txt");
+                string backup = TxCounterFile.BackupPathFor(path);
+                File.WriteAllText(path, "garbage-primary");
+                File.WriteAllText(backup, "garbage-backup");
+                Check.That(TxCounterFile.WriteBlockedMarker(path, "test: both copies corrupt"), "marker writes");
+                Check.That(TxCounterFile.BlockedMarkerPresent(path), "marker present before archive");
+                // Archive step (production order: marker FIRST, then moves).
+                string stamp = "test-stamp";
+                File.Move(path, path + ".corrupt-" + stamp);
+                File.Move(backup, backup + ".corrupt-" + stamp);
+                Check.That(!File.Exists(path) && !File.Exists(backup), "evidence archived aside");
+                // Restart load: no files, marker present => FailClosed (not Fresh).
+                uint ceil;
+                bool restore;
+                Check.That(TxCounterFile.ClassifyLoad(false, null, false, null, TxCounterFile.BlockedMarkerPresent(path), out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.FailClosed,
+                    "restart after archive stays FailClosed via the marker");
+                Check.That(TxCounterFile.ClassifyLoad(false, null, false, null, false, out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.Fresh,
+                    "control: without the marker the same state would go Fresh (the unsafety the marker closes)");
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Marker-first ordering + body contract: WriteBlockedMarker creates the
+        /// sidecar at BlockedPathFor (same directory), presence is the signal
+        /// (a junk body still blocks — the loader never parses it, so older/newer
+        /// bodies stay compatible), and the body stamps the manual repair
+        /// procedure (inspect .corrupt-* sidecars, restore ONE trustworthy file,
+        /// delete the .blocked file, restart).
+        /// </summary>
+        private static void COUNTER_ArchiveWritesMarkerFirstKeepsSafety()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "chesttx_blocked_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string path = Path.Combine(dir, "BestAutoSort_TxCounter.txt");
+                Check.That(!TxCounterFile.BlockedMarkerPresent(path), "no marker initially");
+                Check.That(TxCounterFile.WriteBlockedMarker(path, "test reason"), "marker writes");
+                Check.That(TxCounterFile.BlockedMarkerPresent(path), "marker present after write");
+                Check.That(TxCounterFile.BlockedPathFor(path) == path + ".blocked", "marker is a same-directory sidecar");
+                string body = File.ReadAllText(TxCounterFile.BlockedPathFor(path));
+                Check.That(body.Contains("test reason"), "marker stamps the reason");
+                Check.That(body.Contains(".corrupt-") && body.Contains(".blocked") && body.Contains("restart"),
+                    "marker body documents the repair procedure");
+                File.WriteAllText(TxCounterFile.BlockedPathFor(path), "junk-body");
+                Check.That(TxCounterFile.BlockedMarkerPresent(path), "presence is the signal: junk body still blocks");
+                Check.That(!TxCounterFile.WriteBlockedMarker(null, "x"), "null path refused (caller stays fail-closed in RAM)");
+                Check.That(!TxCounterFile.BlockedMarkerPresent((string)null), "null path never reads present");
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Manual repair procedure, end to end against a real temp directory:
+        /// 1) inspect the .corrupt-* sidecars, 2) restore ONE trustworthy counter
+        /// file to the canonical path, 4) restart => ResumedPrimary above the
+        /// restored ceil (step 3 is deleting the .blocked marker). Skipping step 2
+        /// (marker deleted with no files) goes Fresh at 1 — safe ONLY when no
+        /// same-UID peer can still be below the floor.
+        /// </summary>
+        private static void COUNTER_ManualRepairProcedureDocumentedAndEffective()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "chesttx_blocked_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string path = Path.Combine(dir, "BestAutoSort_TxCounter.txt");
+                string backup = TxCounterFile.BackupPathFor(path);
+                string good = TxCounterFile.Format(8192u);
+                File.WriteAllText(path, good);
+                Check.That(TxCounterFile.WriteBlockedMarker(path, "test: blocked"), "marker writes");
+                uint ceil;
+                bool restore;
+                Check.That(TxCounterFile.ClassifyLoad(true, File.ReadAllText(path), false, null, TxCounterFile.BlockedMarkerPresent(path), out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.FailClosed,
+                    "blocked even with a good file on disk (repair step 3 pending)");
+                // Repair steps 2+3: trustworthy file at the canonical path, marker deleted.
+                File.WriteAllText(path, good);
+                File.Delete(TxCounterFile.BlockedPathFor(path));
+                Check.That(!TxCounterFile.BlockedMarkerPresent(path), "marker deleted by the human repair");
+                Check.That(TxCounterFile.ClassifyLoad(File.Exists(path), File.ReadAllText(path), File.Exists(backup), null, TxCounterFile.BlockedMarkerPresent(path), out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.ResumedPrimary && ceil == 8192u,
+                    "restart after repair resumes above the restored ceil");
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// The marker is never auto-deleted and never outvoted by file evidence:
+        /// valid files + marker => FailClosed (the loader must NOT archive the
+        /// on-disk files away — they may BE the human-restored repair awaiting
+        /// only the marker deletion), and refreshing the marker keeps FailClosed.
+        /// File bodies stay diagnostically readable through ResolveLoad regardless.
+        /// </summary>
+        private static void COUNTER_BlockedMarkerWinsOverValidFiles()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "chesttx_blocked_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string path = Path.Combine(dir, "BestAutoSort_TxCounter.txt");
+                string backup = TxCounterFile.BackupPathFor(path);
+                File.WriteAllText(path, TxCounterFile.Format(8192u));
+                File.WriteAllText(backup, TxCounterFile.Format(4096u));
+                Check.That(TxCounterFile.WriteBlockedMarker(path, "test"), "marker writes");
+                uint ceil;
+                bool restore;
+                Check.That(TxCounterFile.ClassifyLoad(true, File.ReadAllText(path), true, File.ReadAllText(backup), true, out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.FailClosed,
+                    "marker wins over valid files (no auto-heal, no auto-delete)");
+                Check.That(File.Exists(path) && File.Exists(backup), "classification moves nothing by itself");
+                Check.That(TxCounterFile.WriteBlockedMarker(path, "refresh"), "marker refresh succeeds");
+                Check.That(TxCounterFile.ClassifyLoad(true, File.ReadAllText(path), true, File.ReadAllText(backup), TxCounterFile.BlockedMarkerPresent(path), out ceil, out restore)
+                    == TxCounterFile.CounterLoadState.FailClosed,
+                    "refreshed marker still FailClosed");
+                uint resolved;
+                Check.That(TxCounterFile.ResolveLoad(File.ReadAllText(path), File.ReadAllText(backup), out resolved, out restore)
+                    && resolved == 8192u, "file bodies stay diagnostically readable for the human repair");
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); }
+                catch { }
+            }
+        }
+
+        /// <summary>
         /// Empty-chest observation (no behavior change — pins it): Take on an
         /// empty chest is a STABLE persisted Rejected (known-not-committed),
         /// never Indeterminate and never a debit; the retry is a replay of the
@@ -371,10 +562,11 @@ namespace ChestTx.Tests
         /// s_items==null observation (no behavior change — pins it): when the
         /// persisted authority is unavailable (null, modelling null s_items
         /// bytes at the production reload/takeover/structural sites), recovery
-        /// FAILS, the quarantine stays, fresh txIds answer the shared
-        /// quarantine terminal WITHOUT mutating/caching (but ARE fenced, so the
-        /// same txId stays stale-gated after recovery), and NOTHING is presumed
-        /// empty. Only a successful authoritative reload clears it.
+        /// FAILS, the quarantine stays, fresh txIds are refused through the
+        /// durable-terminal matrix (seeded Rejected, answered Rejected only when
+        /// durable — else Indeterminate with the seed evicted) WITHOUT executing
+        /// (nothing presumed empty), and NOTHING is presumed empty. Only a
+        /// successful authoritative reload clears it.
         /// </summary>
         private static void HARDENING_SItemsNullNeverPresumedEmpty()
         {
@@ -398,12 +590,12 @@ namespace ChestTx.Tests
 
             int before = chest.TotalOf(Wood);
             TxResult fresh = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
-            Check.That(fresh.Status == TxDecision.QuarantinedTerminal() && !fresh.IsReplay,
-                "quarantined fresh tx indeterminate, got " + fresh.Status);
+            Check.That(fresh.Status == TxStatus.Rejected && !fresh.IsReplay,
+                "quarantined fresh tx refused durable-Rejected, got " + fresh.Status);
             Check.Equal(before, chest.TotalOf(Wood), "quarantined tx mutates nothing (nothing presumed empty)");
             uint hw;
             Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
-                "quarantined fresh tx fenced (floor 11->3), so the same txId stays stale-gated");
+                "quarantined refusal keeps the high-water (floor 11->3), so a retry as a NEW txId stays safe");
 
             w.FailSave = false;
             w.NullAuthority = false;

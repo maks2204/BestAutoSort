@@ -9,7 +9,8 @@ namespace ChestTx.Tests
     /// offline core shares with production through the TxDurability seam:
     /// fence (floor write) -&gt; propagation-request AfterFence -&gt; Execute/save -&gt;
     /// ring + floor rewrite -&gt; propagation-request AfterCommit. Quarantined txIds
-    /// fence + propagate AfterFence with NO execute. Propagation is best-effort
+    /// seed a durable Rejected (ring + floor rewrite) + propagate AfterFence with
+    /// NO execute. Propagation is best-effort
     /// only (never an ACK/barrier, never correctness): a throwing hook is
     /// swallowed and changes no outcome.
     ///
@@ -136,9 +137,11 @@ namespace ChestTx.Tests
         }
 
         /// <summary>
-        /// Quarantined fresh tx: fence floor write + propagation-request AfterFence
-        /// fire, but NOTHING else (no save, no ring, no second floor write, no
-        /// AfterCommit) — peers learn the high-water, nothing executes.
+        /// Quarantined fresh tx: the durable refusal rewrites ring + floor and fires
+        /// propagation-request AfterFence — but NOTHING else (no save, no second
+        /// ring/floor rewrite, no AfterCommit): peers learn the high-water, the
+        /// txId is refused stable-Rejected, nothing executes. A throwing hook
+        /// changes none of that (best-effort, swallowed).
         /// </summary>
         private static void PROPAGATION_QuarantineFencePropagatesWithoutExecute()
         {
@@ -155,12 +158,11 @@ namespace ChestTx.Tests
 
             w.Order.Clear();
             TxResult fresh = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
-            Check.That(fresh.Status == TxStatus.UnknownTx && !fresh.IsReplay,
-                "quarantined fresh tx indeterminate, got " + fresh.Status);
-            for (int i = 0; i < w.Order.Count; i++)
-                Check.That(w.Order[i] == "floor#4" || w.Order[i] == "prop:AfterFence",
-                    "quarantine fires only fence + AfterFence, got " + w.OrderLine());
-            Check.Equal(2, w.Order.Count, "exactly fence + propagate, got " + w.OrderLine());
+            Check.That(fresh.Status == TxStatus.Rejected && !fresh.IsReplay,
+                "quarantined fresh tx refused durable-Rejected, got " + fresh.Status);
+            Check.That(w.OrderLine() == "ring>floor#4>prop:AfterFence",
+                "quarantine persists ring + floor then propagates AfterFence, got " + w.OrderLine());
+            Check.Equal(3, w.Order.Count, "exactly ring + floor + propagate, got " + w.OrderLine());
             Check.Equal(10, chest.TotalOf(Wood), "quarantined tx executes nothing (live holds only the failed-tx dirt)");
             uint hw;
             Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
@@ -189,8 +191,8 @@ namespace ChestTx.Tests
             Check.That(core.Apply(chest, AddReq(Tx(11, 2), 11, Wood, 5)).Status == TxStatus.UnknownTx, "failed tx indeterminate");
             Check.That(core.Quarantined, "quarantined");
             TxResult fresh = core.Apply(chest, AddReq(Tx(11, 3), 11, Wood, 7));
-            Check.That(fresh.Status == TxStatus.UnknownTx && !fresh.IsReplay,
-                "quarantine fence survives a throwing propagation hook, got " + fresh.Status);
+            Check.That(fresh.Status == TxStatus.Rejected && !fresh.IsReplay,
+                "quarantine refusal survives a throwing propagation hook, got " + fresh.Status);
             uint hw;
             Check.That(core.DumpFloor().TryGetValue(TxIdGen.PeerKey(11), out hw) && hw == 3,
                 "fence landed despite the throwing hook");

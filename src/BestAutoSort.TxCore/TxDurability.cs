@@ -47,6 +47,17 @@ namespace BestAutoSort.TxCore
     ///   DURING the write and propagates (never coerced to failure).
     /// - SaveItems runs after Execute mutated RAM and models Container.Save: false =
     ///   save failed (RAM mutation stays unpersisted), answer Indeterminate.
+    ///   A non-crash throw from SaveItems models an ambiguous save (the ZDO write
+    ///   may or may not have landed): the core recovers from persisted state and
+    ///   answers Indeterminate. TxCrashException always propagates.
+    /// - ReloadItems restores the live chest from the persisted items snapshot
+    ///   (production: ZDOVars.s_items) and returns true only when every step
+    ///   succeeded. Null/unavailable/false = recovery failure: the core stays
+    ///   quarantined, never presumes empty. Used after post-fence Execute/save
+    ///   failures (same-process authoritative reload, no restart needed).
+    /// - FailExecute models a mid-execution fault: when it returns true for a
+    ///   request, Execute mutates the first item and then throws, proving that
+    ///   partial RAM mutation is rolled back by recovery, not left dirty.
     /// - IsOwner is the post-fence ownership recheck (ZDO.Set is owner-gated):
     ///   false = ownership lost after the fence — no mutation may follow.
     /// - Crash fires at TxDurabilityPoints; throwing TxCrashException simulates
@@ -57,6 +68,8 @@ namespace BestAutoSort.TxCore
         public Func<byte[], bool> WriteFloor;
         public Func<byte[], bool> WriteRing;
         public Func<ModelChest, bool> SaveItems;
+        public Func<ModelChest, bool> ReloadItems;
+        public Func<TxRequest, bool> FailExecute;
         public Func<bool> IsOwner;
         public Action<TxDurabilityPoint> Crash;
     }

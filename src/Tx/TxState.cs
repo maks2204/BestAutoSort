@@ -138,6 +138,16 @@ namespace BestAutoSort.Tx
         public byte[] LastRingBytes;
         public byte[] LastFloorBytes;
         public long LastOwner;
+        /// <summary>
+        /// Post-fence recovery quarantine: live RAM may hold speculative inventory
+        /// from a failed Execute/save whose persistence outcome was ambiguous.
+        /// While set, fresh mutations never execute (Drain answers queued jobs as
+        /// UnknownTx without fencing/mutating; MutateLocal/OnTxRequest refuse fresh
+        /// txIds as UnknownTx). Replays/queries still answer. Cleared only by a
+        /// successful authoritative s_items reload (pump/takeover/reacquire path),
+        /// never by elapsed time. The failed tx keeps its fence (never rolls back).
+        /// </summary>
+        public bool TxQuarantined;
         // Viewer (we watch a foreign chest):
         public bool ViewedByMe;
         public uint SeenRev;

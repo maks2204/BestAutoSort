@@ -69,6 +69,7 @@ namespace BestAutoSort.TxCore
         private readonly Dictionary<long, uint> _floor = new Dictionary<long, uint>();
         private bool _corrupt;
         private bool _floorCorrupt;
+        private bool _quarantined;
 
         public uint Revision { get; private set; }
 
@@ -112,6 +113,42 @@ namespace BestAutoSort.TxCore
         }
 
         /// <summary>
+        /// Post-fence recovery quarantine: live RAM may hold speculative inventory
+        /// left by a failed Execute/save whose persistence outcome was ambiguous.
+        /// While set, fresh mutations never execute (Apply answers UnknownTx without
+        /// fencing, mutating, or caching); replays/queries still answer. Cleared only
+        /// by a successful authoritative reload (TryRecover), never by elapsed time.
+        /// The fence of the failed tx is kept (never rolls back).
+        /// </summary>
+        public bool Quarantined
+        {
+            get { lock (_gate) { return _quarantined; } }
+        }
+
+        /// <summary>
+        /// Controlled recovery path (pump/takeover analog): reloads live RAM from the
+        /// persisted items snapshot through the ReloadItems seam. Returns true only
+        /// when every step succeeded (quarantine cleared); false leaves quarantine set.
+        /// Unavailable seam (null) counts as recovery failure, never presumed empty.
+        /// </summary>
+        public bool TryRecover(ModelChest chest)
+        {
+            if (chest == null)
+                throw new ArgumentNullException("chest");
+            lock (_gate)
+            {
+                if (!_quarantined)
+                    return true;
+                if (ReloadItemsHook(chest))
+                {
+                    _quarantined = false;
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Apply a request to the state. A repeated txId returns the ORIGINAL
         /// cached outcome (IsReplay=true) without re-applying; a stale request
         /// (at/below its sender's high-water) answers UnknownTx without executing.
@@ -140,6 +177,15 @@ namespace BestAutoSort.TxCore
                 uint ctr = TxIdGen.CounterOf(request.TxId);
                 if (request.Sender != 0 && !TxIdGen.MatchesPeer(request.Sender, request.TxId))
                     return SpoofReject(request, peer);
+                if (_quarantined)
+                {
+                    // Fail-closed quarantine: speculative RAM may be dirty. Safe
+                    // replay/query responses still work (handled above/below), but
+                    // fresh mutations never execute, fence, or cache here — the same
+                    // txId stays retryable after TryRecover clears the quarantine.
+                    // (The failed tx that caused the quarantine keeps its fence.)
+                    return UnknownResult();
+                }
                 uint hw;
                 if (_floor.TryGetValue(peer, out hw) && ctr <= hw)
                 {
@@ -178,26 +224,59 @@ namespace BestAutoSort.TxCore
                         return UnknownResult();
                     }
                 }
+                // Pre-mutation snapshot AFTER the durable fence + ownership recheck:
+                // the fallback authority when the persisted reload is unavailable AND
+                // the save provably never ran (Execute-throw path only). Never used
+                // when the save outcome is ambiguous (save-fail/throw path).
+                List<int[]> preTxSnapshot = chest.Snapshot();
+                uint preTxRevision = Revision;
                 TxResult result;
                 try
                 {
                     result = Execute(chest, request);
                 }
+                catch (TxCrashException)
+                {
+                    throw;
+                }
                 catch
                 {
-                    // Post-fence Execute throw (production: ExecuteCall or
-                    // Container.Save): commitment unknowable, the fence stays, the
-                    // same txId is Indeterminate and never re-executes.
+                    // Post-fence Execute throw: the op may have partially mutated RAM
+                    // (never persisted on this path — the save never ran). Recover from
+                    // the authoritative persisted snapshot when available, else from the
+                    // fence-time snapshot (provably identical: nothing was saved after it).
+                    // The fence stays, the same txId is Indeterminate, never re-executes.
+                    RecoverAfterExecuteFailure(chest, preTxSnapshot, preTxRevision);
                     return UnknownResult();
                 }
                 if (Durability != null)
                 {
                     FireCrash(TxDurabilityPoint.AfterExecute);
-                    if (!SaveItemsHook(chest))
+                    bool saved;
+                    try
+                    {
+                        saved = SaveItemsHook(chest);
+                    }
+                    catch (TxCrashException)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // Ambiguous save throw: the ZDO write may or may not have landed
+                        // (a throw never proves failure). Reload the CURRENT persisted
+                        // state — not the stale pre-tx snapshot — or quarantine when the
+                        // persisted data is unavailable. Floor kept, never rolls back.
+                        RecoverAfterSaveFailure(chest);
+                        return UnknownResult();
+                    }
+                    if (!saved)
                     {
                         // Items-save failed (production SaveContainer): RAM may be
                         // mutated but nothing further persisted — Indeterminate,
-                        // fence stays, never re-executes.
+                        // fence stays, never re-executes. Reload authoritative state
+                        // (clean failure: persisted == pre-tx) or quarantine.
+                        RecoverAfterSaveFailure(chest);
                         return UnknownResult();
                     }
                     FireCrash(TxDurabilityPoint.AfterItemsSave);
@@ -812,6 +891,93 @@ namespace BestAutoSort.TxCore
             if (seam == null || seam.SaveItems == null)
                 return true;
             return seam.SaveItems(chest);
+        }
+
+        /// <summary>
+        /// Authoritative reload through the seam (production s_items Load analog).
+        /// Null seam/hook or false/throw (except TxCrashException, which propagates)
+        /// = recovery failure: the caller stays quarantined, never presumes empty.
+        /// </summary>
+        private bool ReloadItemsHook(ModelChest chest)
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.ReloadItems == null)
+                return false;
+            try
+            {
+                return seam.ReloadItems(chest);
+            }
+            catch (TxCrashException)
+            {
+                throw;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Mid-execution fault injection (tests only; null = no fault).</summary>
+        private bool FailExecuteHook(TxRequest request)
+        {
+            TxDurability seam = Durability;
+            if (seam == null || seam.FailExecute == null)
+                return false;
+            try
+            {
+                return seam.FailExecute(request);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Recovery after a post-fence Execute throw (the save never ran, so the
+        /// persisted snapshot still equals the fence-time snapshot). Marks quarantine
+        /// first, then reloads authoritative persisted state when available; falls back
+        /// to the fence-time snapshot (provably identical on this path only). Clears
+        /// quarantine only after every step succeeds; the floor is unchanged (kept).
+        /// </summary>
+        private void RecoverAfterExecuteFailure(ModelChest chest, List<int[]> preTxSnapshot, uint preTxRevision)
+        {
+            _quarantined = true;
+            if (ReloadItemsHook(chest))
+            {
+                _quarantined = false;
+                return;
+            }
+            if (preTxSnapshot != null)
+            {
+                try
+                {
+                    chest.Restore(preTxSnapshot);
+                    Revision = preTxRevision;
+                    _quarantined = false;
+                    return;
+                }
+                catch
+                {
+                }
+            }
+            // Reload unavailable and snapshot unusable: stay quarantined (fail-closed).
+        }
+
+        /// <summary>
+        /// Recovery after an ambiguous items-save (false or non-crash throw: the ZDO
+        /// write may or may not have landed). Marks quarantine first, then reloads the
+        /// CURRENT persisted state — never the stale pre-tx snapshot. A post-write throw
+        /// therefore keeps the already-written value live (committed-but-Indeterminate:
+        /// the client made no reciprocal change and must reconcile manually). Stays
+        /// quarantined when persisted data is unavailable. Floor kept, nothing cached.
+        /// </summary>
+        private void RecoverAfterSaveFailure(ModelChest chest)
+        {
+            _quarantined = true;
+            if (ReloadItemsHook(chest))
+                _quarantined = false;
+            // Else stay quarantined: fresh mutations blocked until TryRecover succeeds.
         }
 
         /// <summary>Post-fence ownership recheck through the seam (null = owner).</summary>
@@ -1530,6 +1696,8 @@ namespace BestAutoSort.TxCore
                 total += accepted;
                 if (accepted == it.Amount)
                     full++;
+                if (i == 0 && FailExecuteHook(request))
+                    throw new InvalidOperationException("injected execute fault after first add");
             }
             if (total > 0)
                 Revision++;
@@ -1555,6 +1723,8 @@ namespace BestAutoSort.TxCore
                 total += taken;
                 if (taken == it.Amount)
                     full++;
+                if (i == 0 && FailExecuteHook(request))
+                    throw new InvalidOperationException("injected execute fault after first take");
             }
             if (total > 0)
                 Revision++;
@@ -1601,6 +1771,8 @@ namespace BestAutoSort.TxCore
             }
             TxItem it = request.Items[0];
             bool ok = chest.Move(it.Key, it.X, it.Y, request.DstX, request.DstY, it.Amount, it.MaxStack);
+            if (FailExecuteHook(request))
+                throw new InvalidOperationException("injected execute fault after move");
             if (ok)
                 Revision++;
             result.Status = ok ? TxStatus.Accepted : TxStatus.Rejected;
@@ -1631,6 +1803,8 @@ namespace BestAutoSort.TxCore
                 rebuilt.AddItem(new ItemKey(e[1], e[2], e[3], e[4]), e[5], e[6]);
             }
             chest.Restore(rebuilt.Snapshot());
+            if (FailExecuteHook(request))
+                throw new InvalidOperationException("injected execute fault after sort");
             Revision++;
             TxResult result = new TxResult { Status = TxStatus.Accepted };
             result.Accepted.Add(snap.Count);

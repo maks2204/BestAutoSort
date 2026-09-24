@@ -1200,7 +1200,14 @@ namespace BestAutoSort.Tx
                 state.LastOwner = owner;
                 if (owner != ZNet.GetUID())
                     continue;
-                // I am the manager: queue, presence, lid.
+                // I am the manager: quarantine recovery first (controlled pump path:
+                // successful authoritative reload clears it, elapsed time alone never does),
+                // then the queue. Drain fail-closes queued jobs as UnknownTx while quarantined.
+                if (state.TxQuarantined)
+                {
+                    if (!TryReloadAuthoritative(state))
+                        TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " still quarantined (pump reload failed, queue fail-closed)");
+                }
                 Drain(state);
                 try
                 {
@@ -1225,6 +1232,7 @@ namespace BestAutoSort.Tx
             {
                 ZNetView netView = TxReflect.GetNetView(state.Container);
                 byte[] bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                bool reloaded = false;
                 if (bytes != null)
                 {
                     if (InventoryGui.instance != null)
@@ -1232,6 +1240,7 @@ namespace BestAutoSort.Tx
                     state.Container.GetInventory().Load(new ZPackage(bytes));
                     TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(state.Container);
+                    reloaded = true;
                 }
                 List<TxJob> dropped = DequeueAll(state);
                 state.Processed.Clear();
@@ -1265,12 +1274,25 @@ namespace BestAutoSort.Tx
                 state.SeenRev = 0u;
                 state.SeenOnce = false;
                 state.SeenBytes = null;
+                // Takeover reloads committed state from ZDO + reseeds the ring: the new
+                // manager's RAM is authoritative again, so a successful reload clears
+                // any prior quarantine. Null s_items means no reload ran: stay
+                // quarantined (never presumed empty) so speculative RAM never goes live.
+                if (reloaded)
+                    state.TxQuarantined = false;
+                else
+                {
+                    state.TxQuarantined = true;
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " takeover without authoritative reload (null s_items), staying quarantined");
+                }
                 TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " manager changed old=" + state.LastOwner
                     + " new=" + ZNet.GetUID() + " revision=" + netView.GetZDO().DataRevision);
             }
             catch (Exception ex)
             {
                 TxLog.Error("takeover failed: " + ex.Message);
+                // Fail-closed: a half-reloaded takeover may hold speculative RAM.
+                try { state.TxQuarantined = true; } catch { }
             }
         }
 

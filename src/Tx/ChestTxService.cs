@@ -434,6 +434,22 @@ namespace BestAutoSort.Tx
                 }
                 return;
             }
+            if (state.TxQuarantined)
+            {
+                // Fail-closed quarantine: live RAM may hold speculative inventory from
+                // a post-fence failure. Fresh mutations never execute until an
+                // authoritative s_items reload succeeds (pump/takeover/reacquire).
+                TxLog.Warn("tx=" + job.TxId + " local refused: quarantined after post-fence failure (indeterminate)");
+                if (onDone != null)
+                {
+                    StoredResult u = new StoredResult();
+                    u.Op = call.Op;
+                    u.Status = TxStatus.UnknownTx;
+                    u.Revision = CurrentRevision(container);
+                    onDone(u);
+                }
+                return;
+            }
             if (IsFloorStale(state, job.TxId))
             {
                 // Same-txId/counter already recorded: indeterminate, never execute.
@@ -507,11 +523,13 @@ namespace BestAutoSort.Tx
                     return false;
                 // Load the latest committed state before the structural operation.
                 byte[] bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                bool reloaded = false;
                 if (bytes != null)
                 {
                     container.GetInventory().Load(new ZPackage(bytes));
                     TxReflect.SetLastRevision(container, netView.GetZDO().DataRevision);
                     TxReflect.UpdateRows(container);
+                    reloaded = true;
                 }
                 ChestState state = GetState(container);
                 if (state != null)
@@ -549,6 +567,17 @@ namespace BestAutoSort.Tx
                     foreach (TxJob dj in dropped)
                         AnswerReject(state, dj, droppedStatus);
                     state.LastOwner = ZNet.GetUID();
+                    // Structural reacquire reloads committed state + reseeds the ring:
+                    // authoritative again, so a successful reload clears any prior
+                    // quarantine. Null s_items means no reload ran: stay quarantined
+                    // (never presumed empty) so speculative RAM never goes live.
+                    if (reloaded)
+                        state.TxQuarantined = false;
+                    else
+                    {
+                        state.TxQuarantined = true;
+                        TxLog.Warn("structural acquire without authoritative reload (null s_items), staying quarantined");
+                    }
                 }
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " structural acquire by " + ZNet.GetUID());
                 return true;
@@ -1009,6 +1038,15 @@ namespace BestAutoSort.Tx
                 Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
                 return;
             }
+            if (state.TxQuarantined)
+            {
+                // Fail-closed quarantine after a post-fence failure: live RAM may hold
+                // speculative inventory. Fresh txIds never execute until an authoritative
+                // s_items reload succeeds. Replays above already answered from cache.
+                TxLog.Warn("tx=" + txId + " refused: quarantined after post-fence failure (indeterminate, never executes)");
+                Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, call.Op);
+                return;
+            }
             if (IsFloorStale(state, txId))
             {
                 // At/below the sender's high-water with no record: evicted,
@@ -1229,6 +1267,30 @@ namespace BestAutoSort.Tx
                 {
                     n++;
                     TxJob job = state.Queue.Dequeue();
+                    if (state.TxQuarantined)
+                    {
+                        // Fail-closed quarantine: live RAM may hold speculative inventory.
+                        // Never execute fresh mutations against dirty RAM. Each queued job is
+                        // explicitly completed as UnknownTx (Indeterminate — never silently
+                        // dropped, never mutated, never fenced), so the same txId stays
+                        // retryable after the authoritative reload clears the quarantine.
+                        // (The failed tx that caused the quarantine keeps its fence.)
+                        TxLog.Warn("tx=" + job.TxId + " quarantined: answered indeterminate without executing");
+                        StoredResult q = new StoredResult();
+                        q.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                        q.Status = TxStatus.UnknownTx;
+                        q.Revision = CurrentRevision(state.Container);
+                        try
+                        {
+                            if (job.Complete != null)
+                                job.Complete(q);
+                        }
+                        catch (Exception ex)
+                        {
+                            TxLog.Error("tx=" + job.TxId + " completion failed: " + ex.Message);
+                        }
+                        continue;
+                    }
                     StoredResult result;
                     try
                     {
@@ -1244,8 +1306,10 @@ namespace BestAutoSort.Tx
                         // retry could contradict by executing. The durable pre-execution fence
                         // already recorded this txId before any mutation; the floor is
                         // seen-high-water and NEVER rolls back, so the same txId can never
-                        // execute later. Re-persist the fence copies best-effort (SameBytes skip).
+                        // execute later. Recover authoritative RAM BEFORE the next job (reload
+                        // s_items or quarantine), then re-persist the fence copies best-effort.
                         TxLog.Error("tx=" + job.TxId + " apply failed: " + ex.Message);
+                        RecoverPostFenceFailure(state, null, false, true);
                         result = new StoredResult();
                         result.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
                         result.Status = TxStatus.UnknownTx;
@@ -1379,6 +1443,36 @@ namespace BestAutoSort.Tx
                 ownerLost.Revision = CurrentRevision(job.Container);
                 return ownerLost;
             }
+            if (state.TxQuarantined)
+            {
+                // Recheck: quarantine engaged while queued (a previous post-fence failure
+                // dirtied RAM). Never execute against dirty RAM — Indeterminate, no fence.
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " quarantined (indeterminate, never executes)");
+                StoredResult quarantined = new StoredResult();
+                quarantined.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                quarantined.Status = TxStatus.UnknownTx;
+                quarantined.Revision = CurrentRevision(job.Container);
+                return quarantined;
+            }
+            // Pre-mutation snapshot AFTER the durable fence + ownership recheck: the
+            // persisted s_items bytes at fence time. Fallback authority ONLY when the
+            // save provably never ran (Execute-throw path); never when the save outcome
+            // is ambiguous (save-throw path must reload CURRENT persisted state).
+            byte[] preTxItems = null;
+            bool preTxRead = false;
+            try
+            {
+                ZNetView snapView = TxReflect.GetNetView(job.Container);
+                if ((Object)snapView != (Object)null && snapView.IsValid())
+                {
+                    preTxItems = snapView.GetZDO().GetByteArray(ZDOVars.s_items);
+                    preTxRead = true;
+                }
+            }
+            catch
+            {
+                preTxRead = false;
+            }
             StoredResult applied;
             try
             {
@@ -1387,16 +1481,40 @@ namespace BestAutoSort.Tx
             catch (Exception ex)
             {
                 // Post-fence Execute throw: the op may have partially mutated RAM
-                // inventory (never persisted on this path) — commitment unknowable.
-                // The fence stays: the same txId is Indeterminate, never re-executes.
+                // inventory (never persisted on this path — the save never ran).
+                // Recover authoritative RAM BEFORE the next job (persisted reload
+                // preferred, fence-time snapshot fallback), then answer Indeterminate.
+                // The fence stays: the same txId never re-executes. Floor never rolls back.
                 TxLog.Error("tx=" + job.TxId + " execute failed: " + ex.Message);
+                RecoverPostFenceFailure(state, preTxItems, preTxRead, false);
                 StoredResult execFail = new StoredResult();
                 execFail.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
                 execFail.Status = TxStatus.UnknownTx;
                 execFail.Revision = CurrentRevision(job.Container);
                 return execFail;
             }
-            CommitResult(state, job, applied);
+            try
+            {
+                CommitResult(state, job, applied);
+            }
+            catch (Exception ex)
+            {
+                // SaveContainer/UpdateRows throw AFTER RAM mutation: the ZDO write may or
+                // may not have landed (a throw never proves failure). Recover the CURRENT
+                // persisted s_items — never the stale pre-tx snapshot — or quarantine when
+                // persisted data is unavailable. No exact ring result is cached; the fence
+                // stays so the same txId stays Indeterminate forever. Floor never rolls back.
+                // Residual gap: a post-write throw leaves a committed-but-Indeterminate tx
+                // (client made no reciprocal change — manual reconciliation needed). See
+                // RecoverPostFenceFailure per-op audit below.
+                TxLog.Error("tx=" + job.TxId + " commit save failed: " + ex.Message);
+                RecoverPostFenceFailure(state, preTxItems, preTxRead, true);
+                StoredResult commitFail = new StoredResult();
+                commitFail.Op = (job.Call != null) ? job.Call.Op : TxOp.Query;
+                commitFail.Status = TxStatus.UnknownTx;
+                commitFail.Revision = CurrentRevision(job.Container);
+                return commitFail;
+            }
             // CommitResult persists items, then ring+floor best-effort. A failed commit
             // write does NOT change the answer: the pre-execution fence is already
             // durable, so a retry stays Indeterminate (never double-applies) and the
@@ -1951,6 +2069,125 @@ namespace BestAutoSort.Tx
             }
             catch
             {
+            }
+        }
+
+        /// <summary>
+        /// Central post-fence recovery: authoritative persisted-s_items reload + fail-closed
+        /// quarantine for ExecuteCall/save exceptions. Called BEFORE Drain advances to the
+        /// next job. The floor is unchanged here (the failed tx keeps the fence it already
+        /// took; fresh txIds are never fenced while quarantined). Nothing is cached for the
+        /// ambiguous tx (no exact ring result).
+        ///
+        /// Steps: mark quarantined FIRST, then TryReloadAuthoritative (fresh s_items read →
+        /// Inventory.Load → SetLastRevision(DataRevision) → UpdateRows → invalidate viewer
+        /// refresh caches). Clear quarantine ONLY after every step succeeds. When the save
+        /// provably never ran (saveMayHaveRun=false, Execute-throw path) and the fresh reload
+        /// is unavailable, fall back to the fence-time snapshot (provably identical: nothing
+        /// was saved after it). When the save outcome is ambiguous (saveMayHaveRun=true),
+        /// NEVER use the stale snapshot: a SaveContainer throw never proves the ZDO write
+        /// failed, so the CURRENT persisted bytes are the only authority. Unavailable or
+        /// unreadable persisted data (null ZDO, invalid netview, Load/UpdateRows throw) is
+        /// recovery failure — quarantine stays, never presumed empty.
+        ///
+        /// Per-op audit (inventory vs non-inventory effects):
+        /// - Add/AddBatch: RAM merge/new-cells via TxInventory; persisted via s_items save.
+        ///   Reload discards speculative credit. Client stays Indeterminate (removes nothing).
+        /// - Take/TakeBatch: RAM RemoveExact; reload discards speculative debit. Client credits
+        ///   nothing on Indeterminate. Totals-only ring replay still credits nothing.
+        /// - Move: RAM MoveWithin/swap; reload discards speculative reorder. Refresh only.
+        /// - Sort: RAM full reorder; reload discards speculative order. Refresh only.
+        /// - Upgrade: NO inventory mutation in Execute (destroys/recreates the chest object,
+        ///   consumes requirements, migrates the rule). Inventory reload cannot undo consumed
+        ///   resources, effects, or object-identity change — residual non-inventory gap.
+        /// - SetRule: NO inventory mutation (ZDO rule key written synchronously in Execute,
+        ///   NOT via s_items). The rule write is durable even when the incidental items-save
+        ///   then throws (split-brain: rule persisted, UnknownTx answered) — reload cannot
+        ///   undo it. Residual non-inventory gap, documented not solved.
+        /// - Post-write throw residual gap (all mutating ops): when Container.Save writes
+        ///   s_items and THEN throws, the tx is durable while the client receives
+        ///   Indeterminate and makes no reciprocal change. Reload keeps the written value
+        ///   live (correct) but the committed-but-Indeterminate conservation gap needs manual
+        ///   reconciliation — reported plainly, never claimed as solved by reload.
+        /// </summary>
+        private static bool RecoverPostFenceFailure(ChestState state, byte[] preTxItems, bool preTxRead, bool saveMayHaveRun)
+        {
+            if (state == null)
+                return false;
+            if (!state.TxQuarantined)
+            {
+                state.TxQuarantined = true;
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " quarantined after post-fence failure (authoritative reload pending)");
+            }
+            if (TryReloadAuthoritative(state))
+                return true;
+            if (!saveMayHaveRun && preTxRead && preTxItems != null)
+            {
+                try
+                {
+                    state.Container.GetInventory().Load(new ZPackage((byte[])preTxItems.Clone()));
+                    ZNetView nv = TxReflect.GetNetView(state.Container);
+                    TxReflect.SetLastRevision(state.Container, nv.GetZDO().DataRevision);
+                    TxReflect.UpdateRows(state.Container);
+                    state.SeenRev = 0u;
+                    state.SeenOnce = false;
+                    state.SeenBytes = null;
+                    state.TxQuarantined = false;
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " recovered from fence-time snapshot (save never ran)");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " snapshot fallback failed, staying quarantined: " + ex.Message);
+                    return false;
+                }
+            }
+            TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " authoritative reload failed, staying quarantined (no fresh mutations)");
+            return false;
+        }
+
+        /// <summary>
+        /// Authoritative reload: fresh s_items bytes are the best available authority after an
+        /// ambiguous save (a throw never proves the write failed). Returns true only when every
+        /// step succeeds (read → Load → SetLastRevision → UpdateRows → viewer-cache invalidate)
+        /// and clears the quarantine; any failure (null netview, unreadable ZDO, null bytes,
+        /// Load/UpdateRows throw) leaves quarantine set. Null bytes count as failure (never
+        /// presumed empty). Never throws.
+        /// </summary>
+        private static bool TryReloadAuthoritative(ChestState state)
+        {
+            try
+            {
+                if (state == null || (Object)state.Container == (Object)null)
+                    return false;
+                ZNetView netView = TxReflect.GetNetView(state.Container);
+                if ((Object)netView == (Object)null || !netView.IsValid())
+                    return false;
+                byte[] bytes;
+                try
+                {
+                    bytes = netView.GetZDO().GetByteArray(ZDOVars.s_items);
+                }
+                catch
+                {
+                    return false;
+                }
+                if (bytes == null)
+                    return false;
+                state.Container.GetInventory().Load(new ZPackage(bytes));
+                TxReflect.SetLastRevision(state.Container, netView.GetZDO().DataRevision);
+                TxReflect.UpdateRows(state.Container);
+                state.SeenRev = 0u;
+                state.SeenOnce = false;
+                state.SeenBytes = null;
+                state.TxQuarantined = false;
+                TxLog.Warn("container=" + TxLog.Zid(state.ZdoId) + " authoritative reload ok, quarantine cleared");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("authoritative reload failed, staying quarantined: " + ex.Message);
+                return false;
             }
         }
 

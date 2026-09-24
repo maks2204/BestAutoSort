@@ -120,6 +120,9 @@ namespace BestAutoSort.Tx
             AutoFeedService.Attach(container);
             // Wave-1 server authority: attach/discovery repair (server-only inside).
             ServerAuthority.EnsureOnAwake(container);
+            // 0.6.x upgrade sweep: resume persisted op snapshots, quarantine
+            // (never destroy) ghosts with an incomplete reverse link and no op.
+            TxRemoteUpgradeOnAwake(container);
         }
 
         /// <summary>
@@ -1023,6 +1026,17 @@ namespace BestAutoSort.Tx
 
         private static void Submit(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
         {
+            SubmitPreIssued(container, call, onDone, 0L, playerId, actorPos, expectedItems);
+        }
+
+        /// <summary>
+        /// Submit with a caller-issued txId (upgrade REQUEST: the op nonce is the
+        /// counter half of this txId, so the op identity is fixed before send
+        /// and a timeout re-queries the SAME txId/op — never a new nonce).
+        /// preIssuedTxId == 0 issues one here (all other callers).
+        /// </summary>
+        private static void SubmitPreIssued(Container container, TxOpCall call, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, long preIssuedTxId, long playerId = 0L, Vector3? actorPos = null, int expectedItems = -1)
+        {
             if (!Plugin.IsActive || !IsShared(container))
             {
                 if (AutoFeedService.IsLocked(container))
@@ -1096,7 +1110,7 @@ namespace BestAutoSort.Tx
             bool owned = false;
             try
             {
-                long txId = IssueTxId();
+                long txId = preIssuedTxId != 0L ? preIssuedTxId : IssueTxId();
                 if (txId == 0L)
                 {
                     TellPlayer("Chest request counter exhausted. Restart the game before retrying.");
@@ -1237,6 +1251,11 @@ namespace BestAutoSort.Tx
                 case TxOp.Upgrade:
                     pkg.Write(call.Tier);
                     break;
+                case TxOp.UpgradeRequest:
+                    pkg.Write(call.Tier);
+                    pkg.Write(call.UpgradeNonce);
+                    pkg.Write(call.UpgradeFree);
+                    break;
                 case TxOp.SetRule:
                     pkg.Write(call.Rule ?? string.Empty);
                     break;
@@ -1357,6 +1376,18 @@ namespace BestAutoSort.Tx
             if (call.Op == TxOp.Query)
             {
                 RespondQuery(container, sender, txId, call.IsTransientRetry);
+                return;
+            }
+            if (call.Op == TxOp.Upgrade
+                && TxUpgradeGate.RefuseLegacyUpgradeFrame(ServerAuthority.IsAuthorityMode(), ServerAuthority.IsServerManagedContainer(container)))
+            {
+                // Old direct-mutation upgrade frames never execute on managed
+                // chests in authority mode: only UpgradeRequest (server-executed
+                // ghost protocol with an authenticated op identity) runs there.
+                // EPHEMERAL Rejected (known-not-committed, nothing applied) so
+                // the sender retries through the mediated path, never this one.
+                TxLog.Warn("tx=" + txId + " REJECT legacy Upgrade frame for managed chest (use UpgradeRequest)");
+                Respond(container, sender, txId, TxStatus.Rejected, CurrentRevision(container), new ZPackage(), false, call.Op);
                 return;
             }
             if (TxDecision.ClassifySenderBinding(sender, txId) == TxDecision.SenderBinding.UnboundStranger)
@@ -1717,6 +1748,12 @@ namespace BestAutoSort.Tx
                         break;
                     case TxOp.Upgrade:
                         call.Tier = payload.ReadInt();
+                        break;
+                    case TxOp.UpgradeRequest:
+                        call.Tier = payload.ReadInt();
+                        call.UpgradeNonce = payload.ReadUInt();
+                        try { call.UpgradeFree = payload.ReadBool(); }
+                        catch { call.UpgradeFree = false; }
                         break;
                     case TxOp.SetRule:
                         call.Rule = payload.ReadString();
@@ -2154,6 +2191,8 @@ namespace BestAutoSort.Tx
                     return ExecuteSort(inv, job.Call);
                 case TxOp.Upgrade:
                     return ExecuteUpgrade(state, job);
+                case TxOp.UpgradeRequest:
+                    return ExecuteUpgradeRequest(state, job);
                 case TxOp.SetRule:
                     return ExecuteSetRule(state, job);
                 default:
@@ -2439,8 +2478,20 @@ namespace BestAutoSort.Tx
         private static bool CommitResult(ChestState state, TxJob job, StoredResult result)
         {
             bool mutated = result.Status == TxStatus.Accepted || result.Status == TxStatus.Partial;
+            // Upgrade commits NEVER touch the source shell: the executor
+            // already UpdateRows+SaveContainer'd the ghost at pointer-switch
+            // (the new chest is authoritative) and retired the source. The
+            // skip is a pure function of the op — never of Unity
+            // destroyed-null timing on the dead shell.
+            bool upgradeCommitted = mutated && job.Call != null && job.Call.Op == TxOp.UpgradeRequest;
             if (mutated)
             {
+                if (upgradeCommitted)
+                {
+                    TxLog.Info("container=" + TxLog.Zid(state.ZdoId) + " tx=" + job.TxId + " upgrade shell retired (source save skipped, new chest authoritative)");
+                }
+                else
+                {
                 // Chest height must track content (otherwise viewers see rows
                 // the manager lacks, and drops there get rejected).
                 TxReflect.UpdateRows(state.Container);
@@ -2449,13 +2500,17 @@ namespace BestAutoSort.Tx
                 // the pre-execution fence is durable — the same txId stays Indeterminate
                 // forever, never re-executes. The floor NEVER rolls back.
                 TxReflect.SaveContainer(state.Container);
+                }
             }
             // Post-inventory-save commit checkpoint: captured BEFORE the ring
             // ZDO write and used consistently in the result, the RAM cache,
             // the ring entry and the response. Never re-read DataRevision after
             // ZDO.Set(RingKey): the ring write itself may bump the revision, so
             // a read-back would describe the ring write, not the commit.
-            result.Revision = CurrentRevision(state.Container);
+            // Upgrade commits keep the executor-set revision (the source shell
+            // is dead; the new chest is authoritative) — never re-read it.
+            if (!upgradeCommitted)
+                result.Revision = CurrentRevision(state.Container);
             // Authenticated committer's CANONICAL peer key, stamped before caching: replays check it.
             result.Sender = TxIdGen.PeerKey(job.Sender);
             result.IsReplay = false;
@@ -2510,6 +2565,7 @@ namespace BestAutoSort.Tx
             r.TotalsOnly = src.TotalsOnly;
             r.Sender = src.Sender;
             r.IsReplay = isReplay;
+            r.Receipt = src.Receipt;
             return r;
         }
 

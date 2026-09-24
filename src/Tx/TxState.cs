@@ -18,6 +18,19 @@ namespace BestAutoSort.Tx
         public int Tier;
         public string Rule;
         /// <summary>
+        /// Durable client nonce for UpgradeRequest identity: the op id is
+        /// source ZDO id + authenticated sender peer key + this nonce
+        /// (see TxUpgradeManager.BuildOpId). A timeout re-queries the SAME
+        /// txId/op — never a new nonce — so retries never spawn twice.
+        /// </summary>
+        public uint UpgradeNonce;
+        /// <summary>
+        /// Host-local no-cost assertion (NoCostCheat). Honored ONLY for
+        /// manager-local jobs (same process, trustworthy); remote requests
+        /// always consume pre-deposited ingredients from the source chest.
+        /// </summary>
+        public bool UpgradeFree;
+        /// <summary>
         /// Enforce chest rules on the manager (quick-stack/automation).
         /// Manual GUI moves pass false (vanilla behavior).
         /// </summary>
@@ -79,6 +92,13 @@ namespace BestAutoSort.Tx
         }
         /// <summary>Take-result items (clones with the actual stack). Same-manager only.</summary>
         public List<TakeEntry> Takes = new List<TakeEntry>();
+        /// <summary>
+        /// UpgradeRequest receipt: the new chest ZDO id string after a validated
+        /// pointer switch (null/empty = no receipt — the client must NOT open a
+        /// new view). Never survives a totals-only ring replay: a receipt-less
+        /// Accepted means "completed but new chest unknown, check manually".
+        /// </summary>
+        public string Receipt;
         /// <summary>True when the entry was restored without exact payloads (legacy ring or inexact Take metadata).</summary>
         public bool TotalsOnly;
         /// <summary>Authenticated sender peer key recorded at commit (TxIdGen.PeerOf(txId)).</summary>

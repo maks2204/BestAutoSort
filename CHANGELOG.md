@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.x-Dedicated-Test remote upgrade (experimental slice, honest-weak)
+
+- Server-mediated remote chest upgrade (`TxOp.UpgradeRequest`): client sends a REQUEST (source ZDOID + authenticated sender + durable client nonce = fencing txId counter half + tier); the server executes the ghost protocol in its per-chest manager queue (pure core `TxUpgradeManager`/`TxUpgradeGate` in `BestAutoSort.TxCore/TxUpgradeOp.cs`, production host in `src/Tx/TxRemoteUpgrade.cs`). Spawn -> synchronous reverse-link write -> non-destructive copy -> validate Ready -> one-way pointer switch -> receipt -> idempotent retire; same op never spawns twice (record gate + reverse-link adoption); different ops queue behind the prepared head.
+- Ingredients pre-deposited in the source chest via normal ChestTX Takes; the op never charges the client inventory; spend recorded at-most-once, refunds only as an op-keyed entitlement via the idempotent ClaimRefund step. Old `TxOp.Upgrade` frames refused for managed chests in authority mode; host-local upgrades route through the same queue. UI closes the old view, shows locked-pending, and opens the new view only on a validated receipt; timeouts re-query the same op.
+- Residuals (documented in `docs/remote-upgrade-mediated.md`): hard-kill mint-link micro-window => unlinked ghost kept standing + quarantine + manual reconcile; copy-window duplication safe-direction; totals-only ring replay loses the receipt (manual check, never auto-open).
+
 ## 0.6.x-Dedicated-Test wave 1 (experimental slice, invariant NOT claimed)
 
 - Server-authority migration, vertical slice: canonical eligible-chest policy (stationary storage in, player/tomb/wagon/ship/moving/unknown out), authority UID (server GetUID / client server-peer uid, unknown fail closed), ServerAuthority (default) + LegacyDistributed modes with Hello/mode compat negotiation (mismatched peers rejected; vanilla clients unsupported for managed chests).

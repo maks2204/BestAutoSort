@@ -140,6 +140,100 @@ internal static class ChestUpgradeService
 		return true;
 	}
 
+	/// <summary>
+	/// Server-mediated upgrade (0.6.x): the client sends a REQUEST and the server
+	/// executes the ghost protocol in its per-chest queue. UI contract: the old
+	/// view is closed up front, a locked-pending message shows, and the new view
+	/// opens ONLY on a validated receipt (see RequestUpgradeRemote /
+	/// RequestUpgradeLocal completions). Ingredients must be pre-deposited in the
+	/// SOURCE chest via normal ChestTX Takes: the op consumes from the chest,
+	/// never from the client inventory.
+	/// </summary>
+	internal static void UpgradeOpenChestMediated(Container source, int targetTier)
+	{
+		Player localPlayer = Player.m_localPlayer;
+		if ((Object)(object)localPlayer == (Object)null || (Object)(object)source == (Object)null)
+		{
+			ShowMessage("Open a wooden, compact reinforced, or compact black-metal chest to upgrade it.");
+			return;
+		}
+		int currentTier = ManagedTier(source);
+		if (!ChestUpgradePath.CanUpgrade(currentTier, targetTier))
+		{
+			ShowMessage("That chest tier is not an available upgrade from the current chest.");
+			return;
+		}
+		if (!PrivateArea.CheckAccess(((Component)source).transform.position, 0f, true, false))
+		{
+			ShowMessage("You do not have access to upgrade this chest.");
+			return;
+		}
+		if (!TryGetTierComponents(Tiers[targetTier], out Container _, out Piece piece) || (Object)(object)piece == (Object)null)
+		{
+			ShowMessage(Tiers[targetTier].DisplayName + " chest assets are not available.");
+			return;
+		}
+		bool freeBuild = (Object)(object)ZoneSystem.instance != (Object)null && ZoneSystem.instance.GetGlobalKey(piece.FreeBuildKey());
+		bool localCheat = localPlayer.NoCostCheat();
+		if (!freeBuild && !localCheat && !localPlayer.IsRecipeKnown(piece.m_name))
+		{
+			ShowMessage(Tiers[targetTier].DisplayName + " chest construction has not been unlocked yet.");
+			return;
+		}
+		if (!freeBuild && !localCheat)
+		{
+			string missing = MissingInSource(source, piece);
+			if (!string.IsNullOrEmpty(missing))
+			{
+				ShowMessage("Place " + missing + " inside the chest first — the upgrade consumes from the chest, never your inventory.");
+				return;
+			}
+		}
+		ShowMessage("Upgrade requested — the server is rebuilding the chest. Wait for the receipt.");
+		if (BestAutoSort.Tx.ChestTxService.IsManager(source))
+		{
+			// Host-local path through the SAME queue (same op machine, same receipt).
+			BestAutoSort.Tx.ChestTxService.RequestUpgradeLocal(source, targetTier, null);
+		}
+		else
+		{
+			BestAutoSort.Tx.ChestTxService.RequestUpgradeRemote(source, targetTier, null);
+		}
+	}
+
+	private static string MissingInSource(Container source, Piece piece)
+	{
+		try
+		{
+			Inventory inv = source.GetInventory();
+			if (inv == null)
+				return DescribeRequirements(piece);
+			List<string> missing = new List<string>();
+			foreach (Piece.Requirement requirement in piece.m_resources)
+			{
+				if (requirement == null || requirement.m_amount <= 0 || requirement.m_resItem?.m_itemData?.m_shared == null)
+					continue;
+				string name = requirement.m_resItem.m_itemData.m_shared.m_name;
+				int have = 0;
+				foreach (ItemData item in inv.GetAllItems())
+				{
+					if (item != null && item.m_shared != null && string.Equals(item.m_shared.m_name, name, StringComparison.Ordinal))
+						have += Math.Max(0, item.m_stack);
+				}
+				if (have < requirement.m_amount)
+				{
+					string display = ((Localization.instance != null) ? Localization.instance.Localize(name) : name);
+					missing.Add((requirement.m_amount - have) + " " + display);
+				}
+			}
+				return string.Join(", ", missing);
+		}
+		catch
+		{
+			return DescribeRequirements(piece);
+		}
+	}
+
 	internal static void UpgradeOpenChest(int targetTier)
 	{
 		Player localPlayer = Player.m_localPlayer;
@@ -170,6 +264,13 @@ internal static class ChestUpgradeService
 		// Wave-2: repair-first (server-only inside; remote no-op) so a genuine host
 		// upgrade is not mistaken for a remote structural attempt.
 		ServerAuthority.EnsureServerOwnership(val, "upgrade");
+		// 0.6.x: server-managed chests upgrade through the server-mediated queue
+		// (ghost protocol with a validated receipt) — host-local and remote alike.
+		if (ServerAuthority.IsAuthorityMode() && ServerAuthority.IsServerManagedContainer(val))
+		{
+			UpgradeOpenChestMediated(val, targetTier);
+			return;
+		}
 		if (!component.IsOwner())
 		{
 			// Wave-2 structural: a remote viewer of a server-managed chest fails
@@ -1092,6 +1193,28 @@ internal static class ChestUpgradeService
 			return -1;
 		}
 		return ChestUpgradePath.ResolveManagedTier(PrefabName(container), ReadTierMarker(container));
+	}
+
+	/// <summary>
+	/// Executor seam for the server-mediated upgrade (TxRemoteUpgrade): the
+	/// current managed tier and the target-tier recipe piece. Same-assembly
+	/// only; the executor consumes requirements from the SOURCE chest (never
+	/// the client inventory) and refunds the destroyed tier beside the new one.
+	/// </summary>
+	internal static int ManagedTierForExecutor(Container? container)
+	{
+		return ManagedTier(container);
+	}
+
+	internal static bool TryGetUpgradeRecipe(int tier, out Piece? piece)
+	{
+		piece = null;
+		if (tier < 0 || tier > 3)
+			return false;
+		if (!TryGetTierComponents(Tiers[tier], out Container _, out Piece piece2) || (Object)(object)piece2 == (Object)null)
+			return false;
+		piece = piece2;
+		return true;
 	}
 
 	private static string PrefabName(Container container)

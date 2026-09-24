@@ -13,6 +13,14 @@ namespace BestAutoSort.TxCore
         Sort = 6,
         Upgrade = 7,
         SetRule = 8,
+        /// <summary>
+        /// Server-mediated remote chest upgrade (0.6.x): the client sends a
+        /// REQUEST (source ZDO id + authenticated sender + durable client nonce
+        /// + tier/recipe) and the server executes the ghost protocol in its
+        /// per-chest manager queue. Old TxOp.Upgrade frames are refused for
+        /// managed chests in authority mode (see TxUpgradeGate).
+        /// </summary>
+        UpgradeRequest = 9,
         /// <summary>Viewer presence (opened/closed the GUI). No mutation.</summary>
         ViewerOpen = 100,
         ViewerClose = 101,

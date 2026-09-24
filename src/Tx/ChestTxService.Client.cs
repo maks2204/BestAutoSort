@@ -62,6 +62,17 @@ namespace BestAutoSort.Tx
                     for (int i = 0; i < r.Accepted.Count; i++)
                         body.Write(r.Accepted[i]);
                     break;
+                case TxOp.UpgradeRequest:
+                    body.Write(r.Accepted.Count);
+                    for (int i = 0; i < r.Accepted.Count; i++)
+                        body.Write(r.Accepted[i]);
+                    // Validated receipt: the new chest ZDO id. Empty = no
+                    // receipt (never open a new view on it). A totals-only
+                    // ring replay loses the receipt by design (see
+                    // EncodeCachedBody): receipt-less Accepted is "completed
+                    // but new chest unknown".
+                    body.Write(r.Receipt ?? string.Empty);
+                    break;
                 case TxOp.Take:
                 case TxOp.TakeBatch:
                     body.Write(r.Takes.Count);

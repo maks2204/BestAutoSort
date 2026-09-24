@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace BestAutoSort;
 
-[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.5.16")]
+[BepInPlugin("dev.maks2204.bestautosort", "BestAutoSort", "0.6.0")]
 [BepInProcess("valheim.exe")]
 [BepInProcess("valheim_server.exe")]
 [BepInIncompatibility("goldenrevolver.quick_stack_store")]
@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.5.16";
+	internal const string PluginVersion = "0.6.0";
 
 
 	private Harmony? _harmony;
@@ -201,11 +201,13 @@ public sealed class Plugin : BaseUnityPlugin
 			// Wave-2: repair-first (server-only inside; remote no-op) so a genuine
 			// host upgrade is not mistaken for a remote structural attempt.
 			ServerAuthority.EnsureServerOwnership(val, "upgrade-open");
-			// Wave-2 structural: remote managed chests fail closed with a loud error
-			// (no AcquireForStructural, no claim); the host/server-local path is
-			// unchanged (already authority).
-			if (ServerAuthority.BlockStructuralForRemote(val, "upgrade-open"))
+			// 0.6.x: server-managed chests upgrade through the server-mediated
+			// queue (ghost protocol + validated receipt) — host and remote alike.
+			if (ServerAuthority.IsAuthorityMode() && ServerAuthority.IsServerManagedContainer(val))
+			{
+				ChestUpgradeService.UpgradeOpenChest(targetTier);
 				return;
+			}
 			if (!ChestTxService.IsShared(val) || ChestTxService.IsManager(val))
 			{
 				ChestUpgradeService.UpgradeOpenChest(targetTier);

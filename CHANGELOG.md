@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.9 (virgin veto refinement)
+
+- Virgin veto refined: only committed ring entries (Accepted/Partial/
+  Duplicate via TxRing.IsCommittedStatus) block; Rejected-only rings and
+  floor keys no longer self-poison virgin chests. Corrupt rings still veto.
+
+
 ## 0.6.8 (virgin init, submit truth, honest Take diagnostics)
 
 - Virgin-chest initialization: ownerless s_items-null with no ring/floor

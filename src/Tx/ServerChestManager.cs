@@ -409,13 +409,15 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Virgin-chest initialization (brand-new ownerless chest): s_items null
-        /// AND ring/floor keys absent (no recorded history anywhere) AND no live
-        /// owner (nobody can be about to vanilla-save: saves need ownership,
+        /// AND no committed ring entries (Rejected-only or absent ring carries
+        /// no commits; floor keys are pure counters) AND no live owner (nobody
+        /// can be about to vanilla-save: saves need ownership,
         /// which the guard never grants eligible chests). Writes a vanilla-empty
         /// blob (same Inventory.Save a fresh chest produces) and clears the
-        /// quarantine so the request serves normally. Anything else (present but
-        /// invalid s_items, any ring/floor history, live owner) keeps the
-        /// quarantine: fail closed, never presume empty over possible state.
+        /// quarantine so the request serves normally. Anything else (present
+        /// s_items even if invalid, any committed ring entry, corrupt ring,
+        /// live owner) keeps the quarantine: fail closed, never presume empty
+        /// over possible state.
         /// </summary>
         private static bool TryVirginMaterialize(ServerChestSession session, ZDO zdo)
         {
@@ -427,16 +429,34 @@ namespace BestAutoSort.Tx
                 try { items = zdo.GetByteArray(ZDOVars.s_items); } catch { return false; }
                 if (items != null)
                     return false;
-                byte[] ring = null;
-                byte[] floor = null;
+                // History veto (refined): only COMMITTED ring entries veto.
+                // Floor keys are pure counters (no stock); ring entries that are
+                // all Rejected record no commits. This matters because pre-fix
+                // quarantine refusals persisted ring+floor for virgin chests
+                // (self-poisoning): without the refinement those chests could
+                // never virgin-materialize. A corrupt/unreadable ring vetoes
+                // (cannot prove no commits). s_items==null with an Accepted /
+                // Partial ring entry is a data-loss shape: stay quarantined.
                 try
                 {
-                    ring = zdo.GetByteArray(ChestTxService.RingKey.GetStableHashCode());
-                    floor = zdo.GetByteArray(ChestTxService.FloorKey.GetStableHashCode());
+                    byte[] ring = zdo.GetByteArray(ChestTxService.RingKey.GetStableHashCode());
+                    if (ring != null)
+                    {
+                        RingData data = null;
+                        try { data = TxCore.TxCore.DecodeEnvelope(ring); } catch { data = null; }
+                        if (data == null || data.Corrupt)
+                            return false;
+                        if (data.Entries != null)
+                        {
+                            foreach (RingEntry e in data.Entries)
+                            {
+                                if (TxRing.IsCommittedStatus(e.Status))
+                                    return false;
+                            }
+                        }
+                    }
                 }
                 catch { return false; }
-                if (ring != null || floor != null)
-                    return false;
                 if (IsLiveOwner(zdo))
                     return false;
                 Inventory empty = null;

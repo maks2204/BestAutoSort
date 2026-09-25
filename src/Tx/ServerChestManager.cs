@@ -159,8 +159,36 @@ namespace BestAutoSort.Tx
 
                 if (CheckReplayOrStale(session, zdo, sender, txId, call, nowRev))
                     return;
+                // Virgin attempt BEFORE the owner gate (P0): a live-owned virgin
+                // chest would otherwise die at the gate before ever arming the
+                // bypass. Replay above already protected committed truth.
+                if (session.Quarantined)
+                {
+                    try { TryVirginMaterialize(session, zdo); } catch { }
+                }
                 if (!CheckOwnerGate(session, zdo, sender, txId, call.Op, nowRev))
                     return;
+                // Continuous revalidation (bounded trust, not forever-trust):
+                // a virgin-born session serves only while no FOREIGN write
+                // landed since our last write (every server Set flows through
+                // ServerZdoSet, which stamps VirginRev). A moved revision here
+                // is the proven ex-owner race materializing: drop the bypass,
+                // quarantine loudly, answer UnknownTx (fail closed).
+                if (session.VirginBorn)
+                {
+                    uint curRev = 0u;
+                    try { curRev = zdo.DataRevision; } catch { curRev = 0u; }
+                    if (curRev != session.VirginRev)
+                    {
+                        session.VirginBorn = false;
+                        session.Quarantined = true;
+                        session.QuarantineReason = "foreign-write-detected";
+                        try { session.QuarantineOldOwner = zdo.GetOwner(); } catch { }
+                        TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " FOREIGN WRITE detected rev " + session.VirginRev + "->" + curRev + " (virgin bypass dropped, quarantined, indeterminate)");
+                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
+                        return;
+                    }
+                }
                 if (!IsSupportedOp(call.Op))
                 {
                     TxLog.Info("tx=" + txId + " op=" + call.Op + " unsupported on server manager (persisted reject)");
@@ -209,7 +237,9 @@ namespace BestAutoSort.Tx
                     return;
                 }
 
-                if (session.Quarantined && !TryVirginMaterialize(session, zdo))
+                // Virgin was already attempted pre-gate; a still-quarantined
+                // session refuses here (no second attempt: deterministic).
+                if (session.Quarantined)
                 {
                     bool qDurable;
                     TxStatus qTerminal = PersistQuarantine(session, zdo, txId, call.Op, sender, out qDurable);
@@ -367,7 +397,9 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Single-writer gate: the server executes only when no live client owns
-        /// the chest (owner == 0, owner == self, or owner has no live peer). A
+        /// the chest (owner == 0, owner == self, or owner has no live peer),
+        /// plus the virgin-born bypass (session.VirginBorn with unchanged
+        /// birth owner — continuously revalidated against foreign writes). A
         /// live owner could vanilla-write concurrently, so serve is refused
         /// EPHEMERALLY (Rejected, no seed/floor/ring — same seam as
         /// spoof/version-skew refusals): the same txId answers identically
@@ -387,6 +419,8 @@ namespace BestAutoSort.Tx
                 if (owner == 0L)
                     return true;
                 if (IsSelf(owner))
+                    return true;
+                if (session.VirginBorn && owner == session.BirthOwner)
                     return true;
                 bool alive = false;
                 try
@@ -408,16 +442,21 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Virgin-chest initialization (brand-new ownerless chest): s_items null
-        /// AND no committed ring entries (Rejected-only or absent ring carries
-        /// no commits; floor keys are pure counters) AND no live owner (nobody
-        /// can be about to vanilla-save: saves need ownership,
-        /// which the guard never grants eligible chests). Writes a vanilla-empty
-        /// blob (same Inventory.Save a fresh chest produces) and clears the
-        /// quarantine so the request serves normally. Anything else (present
-        /// s_items even if invalid, any committed ring entry, corrupt ring,
-        /// live owner) keeps the quarantine: fail closed, never presume empty
-        /// over possible state.
+        /// Virgin-chest initialization (brand-new chest): s_items null AND no
+        /// committed ring entries (Rejected-only or absent ring carries no
+        /// commits; floor keys are pure counters). A live birth owner is
+        /// allowed and pinned (VirginBorn/BirthOwner): the chest RAM is empty
+        /// by construction at birth and every later content flow goes through
+        /// this manager, so no competing writer exists; any ownership change
+        /// re-arms the single-writer gate. Writes a vanilla-empty blob (same
+        /// Inventory.Save a fresh chest produces) and clears the quarantine so
+        /// the request serves normally. Trust is bounded, not forever: every
+        /// server Set stamps VirginRev (ServerZdoSet choke point) and each
+        /// virgin-born request serves only while the live revision still
+        /// equals it — a foreign write drops the bypass, quarantines loudly
+        /// and answers UnknownTx. Anything else (present s_items even if
+        /// invalid, any committed ring entry, corrupt ring) keeps the
+        /// quarantine: fail closed, never presume empty over possible state.
         /// </summary>
         private static bool TryVirginMaterialize(ServerChestSession session, ZDO zdo)
         {
@@ -457,8 +496,8 @@ namespace BestAutoSort.Tx
                     }
                 }
                 catch { return false; }
-                if (IsLiveOwner(zdo))
-                    return false;
+                long birthOwner = 0L;
+                try { birthOwner = zdo.GetOwner(); } catch { birthOwner = 0L; }
                 Inventory empty = null;
                 try { empty = new Inventory("srv-" + session.PrefabName, null, session.W, session.H); }
                 catch { return false; }
@@ -472,38 +511,10 @@ namespace BestAutoSort.Tx
                 session.Quarantined = false;
                 session.QuarantineReason = "?";
                 session.QuarantineOldOwner = 0L;
+                session.BirthOwner = birthOwner;
+                session.VirginBorn = true;
                 try { Plugin.LogInstance.LogInfo((object)("[ChestTX] container=" + TxLog.Zid(session.ZdoId) + " virgin chest initialized (empty s_items materialized, quarantine cleared)")); } catch { }
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Liveness probe shared by CheckOwnerGate (refuse) and virgin
-        /// materialization (proceed): owner==0/self/dead-peer -> false.
-        /// Faults fail toward false (no live writer provable).
-        /// </summary>
-        internal static bool IsLiveOwner(ZDO zdo)
-        {
-            try
-            {
-                if (zdo == null)
-                    return false;
-                long owner = 0L;
-                try { owner = zdo.GetOwner(); } catch { owner = 0L; }
-                if (owner == 0L)
-                    return false;
-                if (IsSelf(owner))
-                    return false;
-                try
-                {
-                    ZNet net = ZNet.instance;
-                    return net != null && net.GetPeer(owner) != null;
-                }
-                catch { return false; }
             }
             catch
             {
@@ -837,7 +848,8 @@ namespace BestAutoSort.Tx
                 }
                 if (ChestTxService.SameBytes(bytes, state.LastRingBytes))
                     return true;
-                zdo.Set(ChestTxService.RingKey, bytes);
+                if (!ServerZdoSet(session, zdo, ChestTxService.RingKey, bytes))
+                    return false;
                 state.LastRingBytes = TxSItemsGuard.CloneBytes(bytes);
                 return true;
             }
@@ -864,7 +876,8 @@ namespace BestAutoSort.Tx
                 }
                 if (ChestTxService.SameBytes(bytes, state.LastFloorBytes))
                     return true;
-                zdo.Set(ChestTxService.FloorKey, bytes);
+                if (!ServerZdoSet(session, zdo, ChestTxService.FloorKey, bytes))
+                    return false;
                 state.LastFloorBytes = TxSItemsGuard.CloneBytes(bytes);
                 return true;
             }
@@ -873,6 +886,39 @@ namespace BestAutoSort.Tx
                 TxLog.Warn("floor persist failed: " + ex.Message);
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Single choke point for every server ZDO write on a session (s_items,
+        /// ring, floor, virgin materialization): performs the Set and stamps
+        /// VirginRev so the continuous revalidation can tell our writes apart
+        /// from foreign ones. Throw inside == false (mirrors the previous
+        /// throw-to-catch-false shape at every call site).
+        /// </summary>
+        internal static bool ServerZdoSet(ServerChestSession session, ZDO zdo, int hash, byte[] bytes)
+        {
+            try
+            {
+                if (session == null || zdo == null || bytes == null)
+                    return false;
+                zdo.Set(hash, bytes);
+                try { session.VirginRev = zdo.DataRevision; } catch { }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        internal static bool ServerZdoSet(ServerChestSession session, ZDO zdo, string key, byte[] bytes)
+        {
+            try
+            {
+                if (session == null || zdo == null || key == null || bytes == null)
+                    return false;
+                zdo.Set(key, bytes);
+                try { session.VirginRev = zdo.DataRevision; } catch { }
+                return true;
+            }
+            catch { return false; }
         }
 
         private static void ForceSend(ServerChestSession session)

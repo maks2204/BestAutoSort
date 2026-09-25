@@ -45,6 +45,18 @@ namespace BestAutoSort.Tx
         /// equivalent, session-scoped RAM): retained same-tx retries instead of
         /// terminal forget. Dropped with the session (restart/prune).</summary>
         internal readonly HashSet<long> Transient = new HashSet<long>();
+        /// <summary>DataRevision right after our last ZDO write on this session
+        /// (every server Set flows through ServerChestManager.ServerZdoSet).
+        /// The virgin-born continuous revalidation serves only while the live
+        /// revision still equals this (any foreign write fails closed).</summary>
+        internal uint VirginRev;
+        /// <summary>Owner pinned at virgin materialization (may be live).
+        /// While the owner is unchanged, the single-writer gate is bypassed:
+        /// a virgin-born chest has no competing writer by construction (empty
+        /// RAM at birth, every content flow thereafter goes through this
+        /// manager). Any ownership change re-arms the gate.</summary>
+        internal long BirthOwner;
+        internal bool VirginBorn;
     }
 
     internal static class ServerChestSessions
@@ -345,10 +357,9 @@ namespace BestAutoSort.Tx
                     why = "save produced null";
                     return false;
                 }
-                try { zdo.Set(ZDOVars.s_items, bytes); }
-                catch (Exception ex)
+                if (!ServerChestManager.ServerZdoSet(session, zdo, ZDOVars.s_items, bytes))
                 {
-                    why = "zdo set failed: " + ex.Message;
+                    why = "zdo set failed";
                     return false;
                 }
                 try { newRev = zdo.DataRevision; } catch { newRev = 0u; }

@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 0.6.10 (virgin-born owner bypass + continuous revalidation)
+
+- Virgin attempt runs before the owner gate (live-owned new chests arm the
+  bypass instead of dying at the gate).
+- Bounded trust: every server ZDO write flows through ServerZdoSet (stamps
+  VirginRev); virgin-born requests serve only while no foreign write landed
+  (else bypass dropped, quarantine, UnknownTx). No production code touched.
+
+
 ## 0.6.9 (virgin veto refinement)
 
 - Virgin veto refined: only committed ring entries (Accepted/Partial/

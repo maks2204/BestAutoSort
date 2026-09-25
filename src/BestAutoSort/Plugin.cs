@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using BepInEx;
@@ -54,6 +54,14 @@ public sealed class Plugin : BaseUnityPlugin
 			PatchAllSafely();
 			IsActive = true;
 			Logger.LogInfo((object)("BestAutoSort " + PluginVersion + " (" + BuildInfo.Commit + ") loaded."));
+			try
+			{
+				Logger.LogInfo((object)("[ChestTX] config: TxVerbose=" + ModConfig.TxVerbose.Value + " ChestAuthorityMode=" + ModConfig.ChestAuthorityMode.Value + " effective=" + ServerAuthority.EffectiveMode()));
+			}
+			catch (Exception ex2)
+			{
+				Logger.LogInfo((object)("[ChestTX] config dump failed: " + ex2.Message));
+			}
 		}
 		catch (Exception ex)
 		{

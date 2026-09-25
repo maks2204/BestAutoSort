@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
@@ -88,6 +88,14 @@ namespace BestAutoSort.Tx
 
         internal static void OnContainerAwake(Container container)
         {
+            try
+            {
+                bool awakeVerbose = false;
+                try { awakeVerbose = ModConfig.TxVerbose.Value; } catch { awakeVerbose = false; }
+                if (awakeVerbose)
+                    Plugin.LogInstance.LogInfo((object)("[ChestTX] container awake: " + (((Object)container == (Object)null) ? "null" : ((Object)container).name)));
+            }
+            catch { }
             if ((Object)container == (Object)null)
                 return;
             ZNetView netView = TxReflect.GetNetView(container);

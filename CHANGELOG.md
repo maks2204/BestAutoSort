@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2-DIAG (temporary dedicated-server silence diagnostics, revert after diagnosis)
+
+- Temporary verbose probes only, no behavior change: `[ChestTX] config:` startup dump (TxVerbose/mode/effective), `authority awake probe` at EnsureOnAwake entry, `container awake: <name>` at OnContainerAwake entry. Purpose: prove whether Container.Awake/adoption runs at all on the dedicated server (live symptom: client SENDs, zero server ChestTX lines, every op Indeterminate). Revert before any release.
+
 ## 0.6.1 (experimental: full review-loop fixes on 0.6.x)
 
 - Review-loop hardening: dead authority seams wired into production (remote-mutation ban, stale-route drop, structural single rule); quarantine gates on craft consume/loan and SortLocal paths (incl. priority loan); manifest 0.6.x packaging consistent; README experimental banner + wire/ops table; threat model stated; verification table narrowed to seam-confirmed with wiring-assumed + transient C15 row.

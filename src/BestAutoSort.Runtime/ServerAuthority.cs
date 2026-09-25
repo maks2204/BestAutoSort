@@ -651,6 +651,10 @@ internal static class ServerAuthority
     {
         try
         {
+            bool verbose = false;
+            try { verbose = ModConfig.TxVerbose.Value; } catch { verbose = false; }
+            if (verbose)
+                Plugin.LogInstance.LogInfo((object)"[ChestTX] authority awake probe");
             if (!IsAuthorityMode())
                 return;
             ZNet net = ZNet.instance;

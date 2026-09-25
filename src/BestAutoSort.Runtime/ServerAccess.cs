@@ -25,6 +25,14 @@ namespace BestAutoSort.Runtime
     /// </summary>
     internal static class ServerAccess
     {
+        /// <summary>
+        /// Slack between the client-stamped actor position and the
+        /// server-resolved actor position (replication-lag tolerance).
+        /// Denials keep distinct reasons: "too-far" (chest vs claim) vs
+        /// "pos-mismatch" (claim vs server-resolved actor).
+        /// </summary>
+        private const float RangeSlackMeters = 8f;
+
         internal static bool CanUse(ZDO zdo, long sender, long claimedPlayerId, Vector3 claimedPos, out string why)
         {
             why = "ok";
@@ -117,6 +125,11 @@ namespace BestAutoSort.Runtime
                 if (!InRange(chestPos, claimedPos, range))
                 {
                     why = "too-far";
+                    return false;
+                }
+                if (!InRange(claimedPos, resolvedPos, RangeSlackMeters))
+                {
+                    why = "pos-mismatch";
                     return false;
                 }
                 if (!VanillaAccess(privacyPublic, creator, playerId))

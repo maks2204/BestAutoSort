@@ -83,7 +83,13 @@ namespace BestAutoSort.Runtime
                         why = "ward";
                         return false;
                     }
-                    catch { }
+                    catch
+                    {
+                        // Per-candidate fault: the ward set is undecidable, so
+                        // deny the whole check (fail closed, never grant).
+                        why = "ward-undecidable";
+                        return false;
+                    }
                 }
                 return true;
             }

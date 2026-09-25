@@ -45,6 +45,9 @@ namespace BestAutoSort.Tx
     {
 
 
+        private const float PruneInterval = 10f;
+        private static float _nextPruneAt;
+
         internal static void Pump()
         {
             try
@@ -63,6 +66,11 @@ namespace BestAutoSort.Tx
                 try { authority = ServerAuthority.IsAuthorityMode(); } catch { authority = false; }
                 if (!authority)
                     return;
+                float now = 0f;
+                try { now = Time.realtimeSinceStartup; } catch { now = 0f; }
+                if (now < _nextPruneAt)
+                    return;
+                _nextPruneAt = now + PruneInterval;
                 ServerChestSessions.Prune();
             }
             catch
@@ -119,7 +127,8 @@ namespace BestAutoSort.Tx
                 catch { decoded = false; }
                 if (!decoded || call == null)
                 {
-                    TxLog.Warn("tx=" + txId + " undecodable server request from " + sender + " (silent drop, prod parity)");
+                    TxLog.Warn("tx=" + txId + " undecodable server request from " + sender + " (indeterminate, never applied, never cached)");
+                    Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, TxOp.Query);
                     return;
                 }
 
@@ -157,8 +166,40 @@ namespace BestAutoSort.Tx
                     return;
                 }
 
-                if (CheckReplayOrStale(session, zdo, sender, txId, call, nowRev))
+                if (CheckReplayOrTransient(session, zdo, sender, txId, call, nowRev))
                     return;
+                if (session.State.RingCorrupt && session.State.FloorCorrupt)
+                {
+                    TxLog.Warn("tx=" + txId + " refused: ring corrupt (fail closed)");
+                    Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
+                    return;
+                }
+                if (!IsSupportedOp(call.Op))
+                {
+                    TxLog.Info("tx=" + txId + " op=" + call.Op + " unsupported on server manager (persisted reject)");
+                    TxStatus rej;
+                    if (TryPersistReject(session, zdo, txId, call.Op, sender, out rej) && rej == TxStatus.Rejected)
+                        Answer(sender, session, zdo, txId, TxStatus.Rejected, nowRev, new ZPackage(), false, call.Op);
+                    else if (rej == TxStatus.UnknownTx)
+                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
+                    return;
+                }
+                // Access runs before virgin-attempt/owner-clear, quarantine/
+                // flagged and floor-stale BY DESIGN: access reads (creator,
+                // position, privacy, wards) are state-independent of the later
+                // writes (virgin empty-write, owner-clear, ring/floor writes),
+                // so an early access verdict can never be invalidated by them.
+                string accessWhy = "ok";
+                if (!ServerAccess.CanUse(zdo, sender, playerId, actorPos, out accessWhy))
+                {
+                    TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " REJECT access (" + accessWhy + ")");
+                    TxStatus arej;
+                    if (TryPersistReject(session, zdo, txId, call.Op, sender, out arej) && arej == TxStatus.Rejected)
+                        Answer(sender, session, zdo, txId, TxStatus.Rejected, nowRev, new ZPackage(), false, call.Op);
+                    else if (arej == TxStatus.UnknownTx)
+                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
+                    return;
+                }
                 // Virgin attempt BEFORE the owner gate (P0): a live-owned virgin
                 // chest would otherwise die at the gate before ever arming the
                 // bypass. Replay above already protected committed truth.
@@ -185,21 +226,27 @@ namespace BestAutoSort.Tx
                         session.QuarantineReason = "foreign-write-detected";
                         try { session.QuarantineOldOwner = zdo.GetOwner(); } catch { }
                         TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " FOREIGN WRITE detected (s_items diverged, quarantined, indeterminate)");
-                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
-                        return;
                     }
                 }
-                if (!IsSupportedOp(call.Op))
+                // Virgin was already attempted pre-gate; a still-quarantined
+                // session refuses here (no second attempt: deterministic).
+                if (session.Quarantined)
                 {
-                    TxLog.Info("tx=" + txId + " op=" + call.Op + " unsupported on server manager (persisted reject)");
-                    TxStatus rej;
-                    if (TryPersistReject(session, zdo, txId, call.Op, sender, out rej) && rej == TxStatus.Rejected)
-                        Answer(sender, session, zdo, txId, TxStatus.Rejected, nowRev, new ZPackage(), false, call.Op);
-                    else if (rej == TxStatus.UnknownTx)
-                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
+                    bool qDurable;
+                    TxStatus qTerminal = PersistQuarantine(session, zdo, txId, call.Op, sender, out qDurable);
+                    if (!qDurable)
+                    {
+                        try { session.Transient.Add(txId); } catch { }
+                        TxLog.Warn("tx=" + txId + " quarantined and refusal not persisted (TRANSIENT recorded: same-tx retry retained)");
+                        Answer(sender, session, zdo, txId, TxStatus.TransientUnavailable, nowRev, new ZPackage(), false, call.Op);
+                        return;
+                    }
+                    if (qTerminal == TxStatus.Rejected)
+                        ForceSend(session);
+                    TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " refused: quarantined (" + session.QuarantineReason + ", status=" + qTerminal + ")");
+                    Answer(sender, session, zdo, txId, qTerminal, nowRev, new ZPackage(), true, call.Op);
                     return;
                 }
-
                 if (call.IsTransientRetry && call.Op != TxOp.Query)
                 {
                     if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
@@ -229,46 +276,12 @@ namespace BestAutoSort.Tx
                     Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
                     return;
                 }
-
-                if (session.State.RingCorrupt && session.State.FloorCorrupt)
+                if (ChestTxService.IsFloorStale(session.State, txId))
                 {
-                    TxLog.Warn("tx=" + txId + " refused: ring corrupt (fail closed)");
+                    TxLog.Warn("tx=" + txId + " refused: at/below execution floor (indeterminate, never executes)");
                     Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
                     return;
                 }
-
-                // Virgin was already attempted pre-gate; a still-quarantined
-                // session refuses here (no second attempt: deterministic).
-                if (session.Quarantined)
-                {
-                    bool qDurable;
-                    TxStatus qTerminal = PersistQuarantine(session, zdo, txId, call.Op, sender, out qDurable);
-                    if (!qDurable)
-                    {
-                        try { session.Transient.Add(txId); } catch { }
-                        TxLog.Warn("tx=" + txId + " quarantined and refusal not persisted (TRANSIENT recorded: same-tx retry retained)");
-                        Answer(sender, session, zdo, txId, TxStatus.TransientUnavailable, nowRev, new ZPackage(), false, call.Op);
-                        return;
-                    }
-                    if (qTerminal == TxStatus.Rejected)
-                        ForceSend(session);
-                    TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " refused: quarantined (" + session.QuarantineReason + ", status=" + qTerminal + ")");
-                    Answer(sender, session, zdo, txId, qTerminal, nowRev, new ZPackage(), true, call.Op);
-                    return;
-                }
-
-                string accessWhy = "ok";
-                if (!ServerAccess.CanUse(zdo, sender, playerId, actorPos, out accessWhy))
-                {
-                    TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " REJECT access (" + accessWhy + ")");
-                    TxStatus arej;
-                    if (TryPersistReject(session, zdo, txId, call.Op, sender, out arej) && arej == TxStatus.Rejected)
-                        Answer(sender, session, zdo, txId, TxStatus.Rejected, nowRev, new ZPackage(), false, call.Op);
-                    else if (arej == TxStatus.UnknownTx)
-                        Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
-                    return;
-                }
-
                 ProcessRequest(session, zdo, sender, txId, call, baseRev, playerId, actorPos, nowRev);
             }
             catch
@@ -405,7 +418,7 @@ namespace BestAutoSort.Tx
         /// spoof/version-skew refusals): the same txId answers identically
         /// while the owner lives, and becomes servable the moment the owner
         /// dies, with no burned floor. Committed replays are answered before
-        /// this gate (CheckReplayOrStale runs first), so an original outcome
+        /// this gate (CheckReplayOrTransient runs first), so an original outcome
         /// survives ownership changes. Ownership itself is never mutated here
         /// (client open-routing depends on owner 0/self-routing; auto-clear is
         /// out of scope — a stuck live owner needs a client relog).
@@ -535,10 +548,11 @@ namespace BestAutoSort.Tx
         }
 
         /// <summary>
-        /// Shared replay/transient/floor gate (production order: replay, then
-        /// transient map, then floor-stale). Returns true when answered.
+        /// Shared replay/transient gate (floor-stale runs last in OnRequest,
+        /// just before the fence, so earlier refusal legs keep their verdicts).
+        /// Returns true when answered.
         /// </summary>
-        private static bool CheckReplayOrStale(ServerChestSession session, ZDO zdo, long sender, long txId, TxOpCall call, uint nowRev)
+        private static bool CheckReplayOrTransient(ServerChestSession session, ZDO zdo, long sender, long txId, TxOpCall call, uint nowRev)
         {
             try
             {
@@ -599,12 +613,6 @@ namespace BestAutoSort.Tx
                     Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
                     return true;
                 }
-                if (ChestTxService.IsFloorStale(state, txId))
-                {
-                    TxLog.Warn("tx=" + txId + " refused: at/below execution floor (indeterminate, never executes)");
-                    Answer(sender, session, zdo, txId, TxStatus.UnknownTx, nowRev, new ZPackage(), true, call.Op);
-                    return true;
-                }
                 return false;
             }
             catch
@@ -633,6 +641,20 @@ namespace BestAutoSort.Tx
                     TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " QUERY hit status=" + cached.Status);
                     Answer(sender, session, zdo, txId, cached.Status, cached.Revision,
                         ChestTxService.EncodeCachedBody(cached), cached.TotalsOnly, cached.Op);
+                    return;
+                }
+                bool transientHeld = false;
+                try { transientHeld = session.Transient.Contains(txId); } catch { transientHeld = false; }
+                if (transientHeld)
+                {
+                    if (sender != 0L && !TxIdGen.MatchesPeer(sender, txId))
+                    {
+                        TxLog.Warn("tx=" + txId + " TRANSIENT-QUERY sender mismatch");
+                        Answer(sender, session, zdo, txId, TxStatus.Rejected, rev, new ZPackage(), false, TxOp.Query);
+                        return;
+                    }
+                    TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " TRANSIENT-QUERY hit (same-tx retry retained)");
+                    Answer(sender, session, zdo, txId, TxStatus.TransientUnavailable, rev, new ZPackage(), false, TxOp.Query);
                     return;
                 }
                 if (isTransientRetry)

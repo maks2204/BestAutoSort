@@ -45,6 +45,9 @@ namespace BestAutoSort.Patches
             }
             catch
             {
+                // Fault deciding: skip the SetOwner call (fail closed) instead
+                // of proceeding with an undecided guard.
+                return;
             }
             try
             {
@@ -90,7 +93,7 @@ namespace BestAutoSort.Patches
             }
             catch
             {
-                return true;
+                return false;
             }
         }
     }
@@ -124,7 +127,7 @@ namespace BestAutoSort.Patches
             }
             catch
             {
-                return true;
+                return false;
             }
         }
     }
@@ -161,7 +164,7 @@ namespace BestAutoSort.Patches
             }
             catch
             {
-                return true;
+                return false;
             }
         }
     }
@@ -212,7 +215,7 @@ namespace BestAutoSort.Patches
             }
             catch
             {
-                return true;
+                return false;
             }
         }
     }

@@ -330,7 +330,7 @@ namespace BestAutoSort.Tx
         /// <summary>
         /// Encode a detached Inventory back to s_items (vanilla Inventory.Save —
         /// same call Container.Save makes), Set on the ZDO (auto revision bump),
-        /// ForceSendZDO propagation hint (never ACK). Returns the new revision.
+        /// no propagation hint here; the caller sends post-commit. Returns the new revision.
         /// </summary>
         internal static bool TrySaveItems(ServerChestSession session, ZDO zdo, Inventory inv, out uint newRev, out string why)
         {
@@ -369,12 +369,6 @@ namespace BestAutoSort.Tx
                 try { newRev = zdo.DataRevision; } catch { newRev = 0u; }
                 try { session.LastSeenRev = newRev; } catch { }
                 try { session.SItemsHash = Fnv1a64(bytes); session.HasSItemsHash = true; } catch { }
-                try
-                {
-                    if (ZDOMan.instance != null)
-                        ZDOMan.instance.ForceSendZDO(session.ZdoId);
-                }
-                catch { }
                 why = "ok";
                 return true;
             }

@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 0.6.12 (review-loop hardening: gate order, auth, fault directions)
+
+- OnRequest gate order mirrors production (binding, replay, transient,
+  ring-corrupt, unsupported, access, virgin, owner, revalidation,
+  quarantine, flagged, floor, fence). AnswerQuery consults the transient
+  set; undecodable requests answer UnknownTx.
+- Response sender authenticated (server peer only); range checked against
+  server-resolved position with 8m slack; guard/ward faults fail closed;
+  prune throttled (10s); foreign-write refusals go through the durable
+  quarantine matrix.
+
+
 ## 0.6.11 (virgin clear-to-0, content-hash revalidation)
 
 - Virgin birth converges ownership to 0 (verified by read-back): new chests

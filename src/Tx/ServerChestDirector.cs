@@ -247,6 +247,33 @@ namespace BestAutoSort.Tx
                 try { kind = pkg.ReadByte(); } catch { return; }
                 if (kind == KindTx)
                 {
+                    // Response sender auth: only the server may answer. On a
+                    // host/listen server the only valid sender is self
+                    // (loopback); on a remote client only the server peer
+                    // (null server peer -> drop). Anything else is dropped
+                    // with no state touch.
+                    bool senderOk = false;
+                    try
+                    {
+                        ZNet net = ZNet.instance;
+                        if ((UnityEngine.Object)net != (UnityEngine.Object)null && net.IsServer())
+                        {
+                            long me = 0L;
+                            try { me = ZNet.GetUID(); } catch { me = 0L; }
+                            senderOk = sender != 0L && sender == me;
+                        }
+                        else
+                        {
+                            ZNetPeer serverPeer = net != null ? net.GetServerPeer() : null;
+                            senderOk = serverPeer != null && sender == serverPeer.m_uid;
+                        }
+                    }
+                    catch { senderOk = false; }
+                    if (!senderOk)
+                    {
+                        try { TxLog.Warn("server-director: response from unexpected sender=" + sender + " dropped (fail closed)"); } catch { }
+                        return;
+                    }
                     ZDOID chestId = ZDOID.None;
                     ZPackage inner = null;
                     try
@@ -260,6 +287,8 @@ namespace BestAutoSort.Tx
                     try { ChestTxService.HandleServerTxResponse(sender, chestId, inner); } catch { }
                     return;
                 }
+                // Pong is log-only (no item/state impact), so no sender auth:
+                // a spoofed pong only emits a log line, never touches tx state.
                 if (kind != KindPong)
                     return;
                 long nonce = 0L;

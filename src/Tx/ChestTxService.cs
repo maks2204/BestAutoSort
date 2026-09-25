@@ -1300,8 +1300,10 @@ namespace BestAutoSort.Tx
                     return;
                 }
                 owned = true;
+                int submitItems = 0;
+                try { submitItems = call != null && call.Items != null ? call.Items.Count : -1; } catch { submitItems = -2; }
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + txId
-                    + " peer=" + ZNet.GetUID() + " op=" + call.Op + " " + DescribeCall(call) + " SEND");
+                    + " peer=" + ZNet.GetUID() + " op=" + call.Op + " " + DescribeCall(call) + " SEND items=" + submitItems + " expected=" + expectedItems);
                 SendPayload(container, request);
                 pending.Attempts = 1;
                 pending.NextTryAt = Time.realtimeSinceStartup + RequestTimeout;

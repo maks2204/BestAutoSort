@@ -209,7 +209,7 @@ namespace BestAutoSort.Tx
                     return;
                 }
 
-                if (session.Quarantined)
+                if (session.Quarantined && !TryVirginMaterialize(session, zdo))
                 {
                     bool qDurable;
                     TxStatus qTerminal = PersistQuarantine(session, zdo, txId, call.Op, sender, out qDurable);
@@ -386,9 +386,7 @@ namespace BestAutoSort.Tx
                 try { owner = zdo.GetOwner(); } catch { owner = 0L; }
                 if (owner == 0L)
                     return true;
-                long me = 0L;
-                try { me = ZNet.GetUID(); } catch { me = 0L; }
-                if (me != 0L && owner == me)
+                if (IsSelf(owner))
                     return true;
                 bool alive = false;
                 try
@@ -406,6 +404,103 @@ namespace BestAutoSort.Tx
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Virgin-chest initialization (brand-new ownerless chest): s_items null
+        /// AND ring/floor keys absent (no recorded history anywhere) AND no live
+        /// owner (nobody can be about to vanilla-save: saves need ownership,
+        /// which the guard never grants eligible chests). Writes a vanilla-empty
+        /// blob (same Inventory.Save a fresh chest produces) and clears the
+        /// quarantine so the request serves normally. Anything else (present but
+        /// invalid s_items, any ring/floor history, live owner) keeps the
+        /// quarantine: fail closed, never presume empty over possible state.
+        /// </summary>
+        private static bool TryVirginMaterialize(ServerChestSession session, ZDO zdo)
+        {
+            try
+            {
+                if (session == null || zdo == null)
+                    return false;
+                byte[] items = null;
+                try { items = zdo.GetByteArray(ZDOVars.s_items); } catch { return false; }
+                if (items != null)
+                    return false;
+                byte[] ring = null;
+                byte[] floor = null;
+                try
+                {
+                    ring = zdo.GetByteArray(ChestTxService.RingKey.GetStableHashCode());
+                    floor = zdo.GetByteArray(ChestTxService.FloorKey.GetStableHashCode());
+                }
+                catch { return false; }
+                if (ring != null || floor != null)
+                    return false;
+                if (IsLiveOwner(zdo))
+                    return false;
+                Inventory empty = null;
+                try { empty = new Inventory("srv-" + session.PrefabName, null, session.W, session.H); }
+                catch { return false; }
+                uint newRev = 0u;
+                string saveWhy = "?";
+                bool saved = false;
+                try { saved = ServerChestSessions.TrySaveItems(session, zdo, empty, out newRev, out saveWhy); }
+                catch { saved = false; }
+                if (!saved)
+                    return false;
+                session.Quarantined = false;
+                session.QuarantineReason = "?";
+                session.QuarantineOldOwner = 0L;
+                try { Plugin.LogInstance.LogInfo((object)("[ChestTX] container=" + TxLog.Zid(session.ZdoId) + " virgin chest initialized (empty s_items materialized, quarantine cleared)")); } catch { }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Liveness probe shared by CheckOwnerGate (refuse) and virgin
+        /// materialization (proceed): owner==0/self/dead-peer -> false.
+        /// Faults fail toward false (no live writer provable).
+        /// </summary>
+        internal static bool IsLiveOwner(ZDO zdo)
+        {
+            try
+            {
+                if (zdo == null)
+                    return false;
+                long owner = 0L;
+                try { owner = zdo.GetOwner(); } catch { owner = 0L; }
+                if (owner == 0L)
+                    return false;
+                if (IsSelf(owner))
+                    return false;
+                try
+                {
+                    ZNet net = ZNet.instance;
+                    return net != null && net.GetPeer(owner) != null;
+                }
+                catch { return false; }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsSelf(long uid)
+        {
+            try
+            {
+                long me = ZNet.GetUID();
+                return me != 0L && uid == me;
+            }
+            catch
+            {
+                return uid == 0L;
             }
         }
 
@@ -789,15 +884,21 @@ namespace BestAutoSort.Tx
                     return;
                 try { rpc.InvokeRoutedRPC(sender, ServerChestDirector.ServerResponseRpc, new object[1] { outer }); } catch { }
                 int accTotal = -1;
+                int takeBlobs = -1;
                 try
                 {
                     ZPackage diag = new ZPackage(body.GetArray());
                     int n = diag.ReadInt();
-                    accTotal = 0;
-                    for (int i = 0; i < n; i++) { try { accTotal += diag.ReadInt(); } catch { break; } }
+                    if (op == TxOp.Take || op == TxOp.TakeBatch)
+                        takeBlobs = n;
+                    else
+                    {
+                        accTotal = 0;
+                        for (int i = 0; i < n; i++) { try { accTotal += diag.ReadInt(); } catch { break; } }
+                    }
                 }
                 catch { }
-                TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " op=" + op + " response status=" + status + " rev=" + revision + " acceptedTotal=" + accTotal + " to=" + sender);
+                TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " op=" + op + " response status=" + status + " rev=" + revision + " acceptedTotal=" + accTotal + " takes=" + takeBlobs + " to=" + sender);
             }
             catch
             {

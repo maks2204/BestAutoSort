@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 0.6.8 (virgin init, submit truth, honest Take diagnostics)
+
+- Virgin-chest initialization: ownerless s_items-null with no ring/floor
+  history materializes a vanilla-empty blob and serves (new chests usable);
+  any history/live owner keeps the quarantine.
+- SEND line carries items=/expected= submit truth (open AddBatch arity case).
+- Answer() logs takes= blob count for Take ops instead of a fake int sum.
+
+
 ## 0.6.7 (remote flow visuals, guard no-op quiet, arity diagnostics)
 
 - Server broadcasts TxFlights after Add/AddBatch/TakeBatch commits: watchers

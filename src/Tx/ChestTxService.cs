@@ -1318,6 +1318,34 @@ namespace BestAutoSort.Tx
             ZNetView netView = TxReflect.GetNetView(container);
             if ((Object)netView == (Object)null || !netView.IsValid())
                 return;
+            // Option-B: managed chests in authority mode go instance-independent
+            // to the server peer (works with zero server-side GameObjects).
+            // Legacy/unmanaged keep owner-routed view RPCs bit-for-bit.
+            bool authority = false;
+            try { authority = ServerAuthority.IsAuthorityMode(); } catch { authority = false; }
+            if (authority)
+            {
+                bool managed = false;
+                try { managed = ServerAuthority.IsServerManagedContainer(container); } catch { managed = false; }
+                if (managed)
+                {
+                    ZDOID zid = ZDOID.None;
+                    try { zid = netView.GetZDO().m_uid; } catch { zid = ZDOID.None; }
+                    if (!zid.IsNone())
+                    {
+                        try
+                        {
+                            if (ServerChestDirector.SubmitToServer(zid, request))
+                                return;
+                            TxLog.Warn("server submit failed, falling back to view route (likely dead)");
+                        }
+                        catch (Exception ex)
+                        {
+                            TxLog.Warn("server submit failed: " + ex.Message);
+                        }
+                    }
+                }
+            }
             try
             {
                 netView.InvokeRPC(TxNet.TxRequestRpc, request);
@@ -1816,7 +1844,7 @@ namespace BestAutoSort.Tx
                 + " owner=" + owner + " local=" + localUid);
         }
 
-        private static bool DecodeCall(ZPackage payload, out TxOpCall call, out uint baseRev, out long playerId, out Vector3 actorPos)
+        internal static bool DecodeCall(ZPackage payload, out TxOpCall call, out uint baseRev, out long playerId, out Vector3 actorPos)
         {
             call = null;
             baseRev = 0u;
@@ -2307,7 +2335,7 @@ namespace BestAutoSort.Tx
             return applied;
         }
 
-        private static StoredResult ExecuteCall(ChestState state, TxJob job, Inventory inv)
+        internal static StoredResult ExecuteCall(ChestState state, TxJob job, Inventory inv)
         {
             switch (job.Call.Op)
             {
@@ -2332,6 +2360,41 @@ namespace BestAutoSort.Tx
             }
         }
 
+        /// <summary>
+        /// ZDO-first inventory context for Execute* (option-B server manager):
+        /// production states resolve through their live Container netview (the
+        /// identical ZDO object as before); server states (Container == null)
+        /// resolve through ZDOMan by ZdoId. Lets ExecuteAdd/ExecuteTake share
+        /// ONE implementation across both paths.
+        /// </summary>
+        internal static ZDO ExecZdo(ChestState state)
+        {
+            try
+            {
+                if (state == null)
+                    return null;
+                if ((Object)state.Container != (Object)null)
+                {
+                    // Parity with the old Read/ReadRaw legs: the ZDO is read
+                    // without an IsValid gate (teardown windows resolve the
+                    // stored rule instead of a fail-open default).
+                    ZNetView nv = TxReflect.GetNetView(state.Container);
+                    if ((Object)nv != (Object)null)
+                        return nv.GetZDO();
+                    return null;
+                }
+                ZDOMan man = null;
+                try { man = ZDOMan.instance; } catch { man = null; }
+                if (man == null)
+                    return null;
+                return man.GetZDO(state.ZdoId);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static StoredResult ExecuteAdd(Inventory inv, TxOpCall call, ChestState state)
         {
             StoredResult result = new StoredResult();
@@ -2344,7 +2407,7 @@ namespace BestAutoSort.Tx
                 destNames = new HashSet<string>();
                 destCats = new HashSet<BestAutoSort.Core.ItemCategory>();
                 QuickStackTransfer.DestSeeds(inv, destNames, destCats);
-                rule = ChestRuleStore.Read(state.Container);
+                rule = ChestRuleStore.Read(ExecZdo(state));
             }
             int full = 0;
             for (int i = 0; i < call.Items.Count; i++)
@@ -2500,7 +2563,7 @@ namespace BestAutoSort.Tx
             {
                 if (remaining <= 0)
                     break;
-                int avail = ChestReserveStore.Available(state.Container, stack);
+                int avail = ChestReserveStore.Available(ExecZdo(state), inv, stack);
                 if (avail <= 0)
                     continue;
                 int n = remaining < stack.m_stack ? remaining : stack.m_stack;
@@ -2686,7 +2749,7 @@ namespace BestAutoSort.Tx
             return result;
         }
 
-        private static StoredResult CloneStored(StoredResult src, TxStatus status, bool isReplay)
+        internal static StoredResult CloneStored(StoredResult src, TxStatus status, bool isReplay)
         {
             StoredResult r = new StoredResult();
             r.Op = src.Op;
@@ -2714,7 +2777,7 @@ namespace BestAutoSort.Tx
         /// (see WriteFloor), never a refusal cap. An absent txId at/below
         /// high-water is indeterminate.
         /// </summary>
-        private static void AdvanceFloor(ChestState state, long txId)
+        internal static void AdvanceFloor(ChestState state, long txId)
         {
             long peer = TxIdGen.PeerOf(txId);
             uint ctr = TxIdGen.CounterOf(txId);
@@ -2730,7 +2793,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static bool IsFloorStale(ChestState state, long txId)
+        internal static bool IsFloorStale(ChestState state, long txId)
         {
             if (state.Processed.ContainsKey(txId))
                 return false;
@@ -2807,7 +2870,7 @@ namespace BestAutoSort.Tx
         /// Returns true when the entry was freshly seeded (callers use it to evict
         /// a seed whose persistence failed — see TryPersistReject).
         /// </summary>
-        private static bool SeedReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
+        internal static bool SeedReject(ChestState state, long txId, TxOp op, long storedSender, bool advanceFloor)
         {
             if (state.Processed.ContainsKey(txId))
                 return false;
@@ -3030,7 +3093,7 @@ namespace BestAutoSort.Tx
         /// a non-durable answer. Never touches committed outcomes: callers only evict
         /// txIds they just seeded (and only when the seed was fresh — see SeedReject).
         /// </summary>
-        private static void EvictSeededReject(ChestState state, long txId)
+        internal static void EvictSeededReject(ChestState state, long txId)
         {
             state.Processed.Remove(txId);
             try
@@ -3808,7 +3871,7 @@ namespace BestAutoSort.Tx
         /// live stack. Anything uncapturable (oversize, uncapturable, misaligned)
         /// yields null = inexact: the entry restores totals-only, never fabricated.
         /// </summary>
-        private static List<TakePayload> BuildRingTakePayloads(StoredResult r)
+        internal static List<TakePayload> BuildRingTakePayloads(StoredResult r)
         {
             if (r.Op != TxOp.Take && r.Op != TxOp.TakeBatch)
                 return null;
@@ -3891,7 +3954,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void SeedFromRing(ChestState state, RingData data)
+        internal static void SeedFromRing(ChestState state, RingData data)
         {
             SeedFromRing(state, data, null);
         }
@@ -3933,7 +3996,7 @@ namespace BestAutoSort.Tx
         /// the next successful commit rebuilds (and heals) the ring. Ring corrupt
         /// with no trustworthy floor = full fail-closed (both flags).
         /// </summary>
-        private static void SeedFromRing(ChestState state, RingData data, FloorData floor)
+        internal static void SeedFromRing(ChestState state, RingData data, FloorData floor)
         {
             // True reset of the idempotency state, then restore. v2/v3 entries keep
             // their ORIGINAL status with exact payloads when available; legacy

@@ -1,4 +1,12 @@
-# Changelog
+﻿# Changelog
+
+## 0.6.3 (unreleased: option-B server manager, slices 1-3)
+
+- Slice 1 (transport): instance-independent global RPCs `BestAutoSort_TxServerRequest/Response` (ZDOID.None dispatch, Hello precedent); client ping every 60s, first pong logged unconditionally. Zero GameObjects needed.
+- Slice 2 (sessions + codec): ZDO-keyed `ServerChestSession` (dims from prefab Container, quarantine-first); decode/encode via vanilla `Inventory.Load/Save` (byte-identical by construction); `zdo.Set` auto-bumps revision; restart recovery via durable ring/floor reseed.
+- Slice 3 (manager): ZDO-only Take/Add(+Batch) through the SHARED `ExecuteCall` (rule/reserve ZDO overloads, `ExecZdo` context); shared idempotency (Processed/ProcOrder/Floor), durable ring/floor, quarantine matrix, spoof/binding gates mirrored; access mirrors `ChestAuthority.CanUse` (ZDO/prefab sources); new sessions HOLD 8s (rev-re-armed) with deferred answers; unsupported ops -> persisted Rejected; legacy chests never answered (silent drop).
+- Residuals: Move/Sort/Upgrade/SetRule on dedicated stay Rejected; ward-opted chests fail closed; slice-4 freshness barrier pending (settle narrows, does not close, the proven ClaimOwnership race); m_privacy read from prefab.
+
 
 ## 0.6.2 (unreleased: Awake-independent authority discovery sweep)
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BestAutoSort.Core;
 using BestAutoSort.Runtime;
@@ -47,7 +47,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static ZPackage EncodeResultBody(TxOpCall call, StoredResult r)
+        internal static ZPackage EncodeResultBody(TxOpCall call, StoredResult r)
         {
             ZPackage body = new ZPackage();
             switch (call.Op)
@@ -166,7 +166,7 @@ namespace BestAutoSort.Tx
             Respond(container, sender, txId, TxStatus.UnknownTx, CurrentRevision(container), new ZPackage(), true, TxOp.Query);
         }
 
-        private static ZPackage EncodeCachedBody(StoredResult cached)
+        internal static ZPackage EncodeCachedBody(StoredResult cached)
         {
             ZPackage body = new ZPackage();
             if (cached.TotalsOnly)
@@ -188,6 +188,69 @@ namespace BestAutoSort.Tx
         }
 
         // ============================ client: responses ============================
+
+        /// <summary>
+        /// Instance-independent server answers (option-B): resolve the chest +
+        /// pending entry, then run the UNCHANGED response completion.
+        /// </summary>
+        internal static void HandleServerTxResponse(long sender, ZDOID chestId, ZPackage inner)
+        {
+            try
+            {
+                if (!Plugin.IsActive || inner == null || chestId.IsNone())
+                    return;
+                long txId = 0L;
+                try
+                {
+                    ZPackage probe = new ZPackage(inner.GetArray());
+                    long t = 0L;
+                    TxStatus st = TxStatus.UnknownTx;
+                    uint rev = 0u;
+                    bool to = false;
+                    if (TxCodec.ReadResponseHeader(probe, out t, out st, out rev, out to))
+                        txId = t;
+                }
+                catch { }
+                if (txId == 0L)
+                    return;
+                PendingTx pending = null;
+                bool hit = false;
+                try { hit = Pending.TryGetValue(txId, out pending); } catch { hit = false; }
+                Container container = null;
+                try { container = (hit && pending != null) ? pending.Container : FindContainerByZdo(chestId); }
+                catch { container = null; }
+                if ((Object)container == (Object)null)
+                    return;
+                try { inner.SetPos(0); } catch { return; }
+                try { OnTxResponse(container, sender, inner); } catch { }
+            }
+            catch
+            {
+            }
+        }
+
+        private static Container FindContainerByZdo(ZDOID chestId)
+        {
+            try
+            {
+                foreach (System.Collections.Generic.KeyValuePair<int, ChestState> kv in States)
+                {
+                    ChestState st = kv.Value;
+                    if (st == null || (Object)st.Container == (Object)null)
+                        continue;
+                    try
+                    {
+                        if (st.ZdoId == chestId)
+                            return st.Container;
+                    }
+                    catch { }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
 
         private static void OnTxResponse(Container container, long sender, ZPackage pkg)
         {
@@ -1340,7 +1403,7 @@ namespace BestAutoSort.Tx
         // read is UNAVAILABLE (never empty) and skips the refresh above, so no
         // path can wipe the viewer's last-good view with a fabricated empty.
 
-        private static bool SameBytes(byte[] a, byte[] b)
+        internal static bool SameBytes(byte[] a, byte[] b)
         {
             if (a == null || b == null)
                 return a == b;
@@ -1623,8 +1686,10 @@ namespace BestAutoSort.Tx
             if (!Plugin.IsActive)
                 return;
             TxNet.PumpHello();
+            ServerChestDirector.PumpPing();
             PumpAuthoritySweep();
             PumpManagerSlow();
+            ServerChestManager.Pump();
             PumpPending();
             PumpViewerRefresh();
         }

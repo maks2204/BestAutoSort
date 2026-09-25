@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using BestAutoSort.Core;
@@ -28,6 +28,52 @@ internal static class ChestReserveStore
 			obj = "";
 		}
 		return (string)obj;
+	}
+
+	/// <summary>
+	/// ZDO-first overload for the option-B server manager (no Container).
+	/// Identical semantics: reserves decode from the same ZDO key.
+	/// </summary>
+	internal static string ReadRaw(ZDO zdo)
+	{
+		try
+		{
+			if (zdo == null)
+				return "";
+			string raw = zdo.GetString("BestAutoSort.StorageReserves.v1", "");
+			return raw != null ? raw : "";
+		}
+		catch
+		{
+			return "";
+		}
+	}
+
+	/// <summary>
+	/// ZDO-first reserve check (option-B server manager): same decode, counts
+	/// from the given inventory (production passes the live one).
+	/// </summary>
+	internal static int Available(ZDO zdo, Inventory inv, ItemData item)
+	{
+		try
+		{
+			if (inv == null || item == null)
+				return 0;
+			Dictionary<string, int> dictionary = StorageReserves.Decode(ReadRaw(zdo));
+			string prefab = ValheimItemCategoryClassifier.PrefabName(item);
+			if (!dictionary.TryGetValue(prefab, out var value))
+			{
+				return item.m_stack;
+			}
+			int total = (from candidate in inv.GetAllItems()
+				where string.Equals(ValheimItemCategoryClassifier.PrefabName(candidate), prefab, StringComparison.OrdinalIgnoreCase)
+				select candidate).Sum((ItemData candidate) => candidate.m_stack);
+			return Math.Min(item.m_stack, StorageReserves.Available(total, value));
+		}
+		catch (Exception)
+		{
+			return 0;
+		}
 	}
 
 	internal static int Available(Container container, ItemData item)

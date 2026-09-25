@@ -52,6 +52,9 @@ namespace BestAutoSort.Tx
                 _registeredRpc = instance;
                 CompatiblePeers.Clear();
                 instance.Register<ZPackage>(TxFlights.FlightsRpc, TxFlights.OnFlightPacket);
+                // Option-B slice 1: instance-independent server transport
+                // (works with zero server-side GameObjects).
+                ServerChestDirector.RegisterGlobal(instance);
                 instance.Register<string>(HelloRpc, delegate (long sender, string version)
                 {
                     if (Plugin.IsActive)

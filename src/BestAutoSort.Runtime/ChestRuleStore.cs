@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using BestAutoSort.Core;
 using UnityEngine;
 
@@ -25,6 +25,25 @@ internal static class ChestRuleStore
 			return rule;
 		}
 		Plugin.LogInstance.LogWarning((object)("Ignored an invalid BestAutoSort storage rule on " + ((Object)container).name + "."));
+		return ChestStorageRule.Automatic();
+	}
+
+	/// <summary>
+	/// ZDO-first overload for the option-B server manager (no Container).
+	/// Identical semantics: same ZDO key, invalid -> Automatic (fail open to
+	/// vanilla stacking, exactly like the Container path).
+	/// </summary>
+	internal static ChestStorageRule Read(ZDO zdo)
+	{
+		if (zdo == null)
+		{
+			return ChestStorageRule.Automatic();
+		}
+		if (ChestStorageRuleCodec.TryDeserialize(zdo.GetString("BestAutoSort.StorageRule", string.Empty), out ChestStorageRule rule))
+		{
+			return rule;
+		}
+		try { Plugin.LogInstance.LogWarning((object)("Ignored an invalid BestAutoSort storage rule on ZDO.")); } catch { }
 		return ChestStorageRule.Automatic();
 	}
 

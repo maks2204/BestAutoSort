@@ -1,5 +1,26 @@
 ﻿# Changelog
 
+## 0.6.6 (Move/Sort served, settle removed)
+
+- Server manager serves Move/Sort (pure-inventory shared Execute paths).
+- Settle-HOLD fully removed: requests execute immediately (strict parity with
+  the production Takeover path; the live-owner gate already excludes
+  concurrent writers before execution). Zero open-delay by construction.
+- Single-writer owner gate (code shipped in 0.6.3, documented here): serve
+  only owner==0/self/dead-peer, else ephemeral Rejected; ownership never mutated.
+
+## 0.6.5 (ZDO-level ward evaluation)
+
+- Server access gate evaluates wards from ZDO data (sector scan, s_enabled,
+  prefab m_radius, s_creator + pu_id list); no covering ward allows exactly
+  like vanilla. Ward-opted fail-closed removed.
+
+## 0.6.4 (server transport framing fix)
+
+- KindTx byte on server request/response outer frames (was misparsed as kind,
+  all tx traffic silently dropped; ping/pong unaffected).
+
+
 ## 0.6.3 (unreleased: option-B server manager, slices 1-3)
 
 - Slice 1 (transport): instance-independent global RPCs `BestAutoSort_TxServerRequest/Response` (ZDOID.None dispatch, Hello precedent); client ping every 60s, first pong logged unconditionally. Zero GameObjects needed.

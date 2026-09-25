@@ -19,8 +19,8 @@ namespace BestAutoSort.Tx
     /// execute-throw recovery is trivial: discard the detached copy, the fence
     /// stays, answer UnknownTx).
     ///
-    /// Scope: Add/AddBatch/Take/TakeBatch. Every other op answers persisted
-    /// Rejected (deterministic, known-not-committed) — Move/Sort/Upgrade/
+    /// Scope: Add/AddBatch/Take/TakeBatch/Move/Sort. Upgrade/SetRule answer
+    /// persisted Rejected (structural/ZDO-rule writes need dedicated slices) — Move/Sort/Upgrade/
     /// SetRule follow in a later slice. Legacy (unmanaged) chests are NEVER
     /// answered here (silent drop — their owner-client manager, if any,
     /// answers authoritatively; a server UnknownTx could contradict it).
@@ -28,20 +28,22 @@ namespace BestAutoSort.Tx
     /// Access mirrors ChestAuthority.CanUse leg-for-leg against ZDO/prefab
     /// sources (same ZDO keys, prefab m_privacy/m_checkGuardStone, ZDO creator,
     /// ZDO position, EffectiveAccessRange). Two documented divergences:
-    /// (1) ward-opted chests (prefab m_checkGuardStone) fail closed until a
-    /// ZDO-level ward scan exists — PrivateAreas have no server-side objects;
+    /// (1) wards evaluate ZDO-level (ServerWards: sector scan, s_enabled,
+    /// prefab m_radius, s_creator + pu_id list); no covering ward allows
+    /// exactly like vanilla — PrivateAreas have no server-side objects;
     /// (2) m_privacy is read from the prefab (nothing in vanilla or this mod
     /// ever mutates the instance field; a third-party mutator is unsupported).
     /// Both diverge toward refusal, never toward grant.
     ///
-    /// Freshness (slice-3 residual, slice-4 barrier): new sessions HOLD
-    /// requests (answered post-settle) instead of serving possibly-unflushed
-    /// state; the window re-arms while DataRevision moves. This narrows but
-    /// does not close the proven ClaimOwnership race.
+    /// Freshness (slice-4 barrier pending): requests serve immediately,
+    /// exactly like the production Takeover path (no settle hold anywhere).
+    /// The live-owner gate (CheckOwnerGate) already excludes concurrent
+    /// writers before execution; the residual in-flight-flush race matches
+    /// production's profile and is closed only by the fenced handshake.
     /// </summary>
     internal static class ServerChestManager
     {
-        internal const float SettleSeconds = 8f;
+
 
         internal static void Pump()
         {
@@ -61,9 +63,7 @@ namespace BestAutoSort.Tx
                 try { authority = ServerAuthority.IsAuthorityMode(); } catch { authority = false; }
                 if (!authority)
                     return;
-                float now = Time.realtimeSinceStartup;
                 ServerChestSessions.Prune();
-                ProcessDueHeld(now);
             }
             catch
             {
@@ -239,116 +239,7 @@ namespace BestAutoSort.Tx
                     return;
                 }
 
-                float now = Time.realtimeSinceStartup;
-                if (session.SettleUntil == 0f)
-                {
-                    session.SettleUntil = now + SettleSeconds;
-                    try { session.SettleRev = zdo.DataRevision; } catch { session.SettleRev = 0u; }
-                    TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " settle armed until=" + session.SettleUntil);
-                }
-                else if (now < session.SettleUntil)
-                {
-                    uint curRev = 0u;
-                    try { curRev = zdo.DataRevision; } catch { curRev = 0u; }
-                    if (curRev != session.SettleRev)
-                    {
-                        session.SettleUntil = now + SettleSeconds;
-                        session.SettleRev = curRev;
-                        TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " settle re-armed (rev moved)");
-                    }
-                }
-                if (now < session.SettleUntil)
-                {
-                    HeldRequest held = new HeldRequest();
-                    held.Sender = sender;
-                    held.TxId = txId;
-                    held.Call = call;
-                    held.BaseRev = baseRev;
-                    held.PlayerId = playerId;
-                    held.ActorPos = actorPos;
-                    held.ReceivedAt = now;
-                    bool dup = false;
-                    try
-                    {
-                        foreach (HeldRequest h in session.Held)
-                        {
-                            if (h.TxId == txId) { dup = true; break; }
-                        }
-                        if (!dup)
-                            session.Held.Add(held);
-                    }
-                    catch { }
-                    TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " HELD until settle (no answer yet, at-most-once preserved)");
-                    return;
-                }
-
                 ProcessRequest(session, zdo, sender, txId, call, baseRev, playerId, actorPos, nowRev);
-            }
-            catch
-            {
-            }
-        }
-
-        private static void ProcessDueHeld(float now)
-        {
-            try
-            {
-                List<ServerChestSession> all = ServerChestSessions.Snapshot();
-                if (all == null)
-                    return;
-                ZDOMan man = null;
-                try { man = ZDOMan.instance; } catch { man = null; }
-                if (man == null)
-                    return;
-                foreach (ServerChestSession session in all)
-                {
-                    List<HeldRequest> due = null;
-                    try
-                    {
-                        if (session == null || session.Held.Count == 0)
-                            continue;
-                        if (now < session.SettleUntil)
-                            continue;
-                        due = new List<HeldRequest>(session.Held);
-                        session.Held.Clear();
-                    }
-                    catch { continue; }
-                    ZDO zdo = null;
-                    try { zdo = man.GetZDO(session.ZdoId); } catch { zdo = null; }
-                    bool valid = false;
-                    try { valid = zdo != null && zdo.IsValid(); } catch { valid = false; }
-                    uint nowRev = 0u;
-                    try { nowRev = valid ? zdo.DataRevision : 0u; } catch { nowRev = 0u; }
-                    try
-                    {
-                        due.Sort(delegate (HeldRequest a, HeldRequest b)
-                        {
-                            if (a == null || b == null)
-                                return 0;
-                            return a.ReceivedAt.CompareTo(b.ReceivedAt);
-                        });
-                    }
-                    catch { }
-                    foreach (HeldRequest h in due)
-                    {
-                        try
-                        {
-                            if (h == null || h.Call == null)
-                                continue;
-                            if (CheckReplayOrStale(session, zdo, h.Sender, h.TxId, h.Call, nowRev))
-                                continue;
-                            if (!CheckOwnerGate(session, zdo, h.Sender, h.TxId, h.Call.Op, nowRev))
-                                continue;
-                            if (!valid)
-                            {
-                                Answer(h.Sender, session, zdo, h.TxId, TxStatus.UnknownTx, 0u, new ZPackage(), true, h.Call.Op);
-                                continue;
-                            }
-                            ProcessRequest(session, zdo, h.Sender, h.TxId, h.Call, h.BaseRev, h.PlayerId, h.ActorPos, nowRev);
-                        }
-                        catch { }
-                    }
-                }
             }
             catch
             {
@@ -440,7 +331,12 @@ namespace BestAutoSort.Tx
 
         internal static bool IsSupportedOp(TxOp op)
         {
-            return op == TxOp.Add || op == TxOp.AddBatch || op == TxOp.Take || op == TxOp.TakeBatch;
+            // Add/Take families move stock; Move/Sort rearrange in place (both
+            // pure-inventory Execute paths, no Container needed). Upgrade/
+            // SetRule stay persisted-Rejected (structural/ZDO-rule writes need
+            // dedicated slices).
+            return op == TxOp.Add || op == TxOp.AddBatch || op == TxOp.Take || op == TxOp.TakeBatch
+                || op == TxOp.Move || op == TxOp.Sort;
         }
 
         private static bool TryRespondCached(ServerChestSession session, ZDO zdo, long sender, long txId, TxOp op)
@@ -515,9 +411,7 @@ namespace BestAutoSort.Tx
 
         /// <summary>
         /// Shared replay/transient/floor gate (production order: replay, then
-        /// transient map, then floor-stale). Used by OnRequest AND per held item
-        /// at due time, so UDP reorder inside the settle window cannot execute
-        /// below the peer high-water. Returns true when answered.
+        /// transient map, then floor-stale). Returns true when answered.
         /// </summary>
         private static bool CheckReplayOrStale(ServerChestSession session, ZDO zdo, long sender, long txId, TxOpCall call, uint nowRev)
         {

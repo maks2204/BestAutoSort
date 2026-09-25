@@ -24,17 +24,6 @@ namespace BestAutoSort.Tx
     /// null/invalid s_items -> quarantined session (never presumed empty,
     /// never served). No manager decisions here (slice 3).
     /// </summary>
-    internal sealed class HeldRequest
-    {
-        internal long Sender;
-        internal long TxId;
-        internal TxOpCall Call;
-        internal uint BaseRev;
-        internal long PlayerId;
-        internal UnityEngine.Vector3 ActorPos;
-        internal float ReceivedAt;
-    }
-
     internal sealed class ServerChestSession
     {
         internal ZDOID ZdoId;
@@ -52,12 +41,9 @@ namespace BestAutoSort.Tx
         /// RAM map stay unused (synchronous per-request processing).
         /// </summary>
         internal readonly ChestState State = new ChestState();
-        /// <summary>Settle window (slice-3 freshness residual, slice 4 barrier): new
-        /// sessions HOLD requests (deferred, answered post-settle) instead of
-        /// serving possibly-unflushed state. Re-armed while DataRevision moves.</summary>
-        internal float SettleUntil;
-        internal uint SettleRev;
-        internal readonly List<HeldRequest> Held = new List<HeldRequest>();
+        /// <summary>Both-copies-failed txIds (production TransientRefusals map
+        /// equivalent, session-scoped RAM): retained same-tx retries instead of
+        /// terminal forget. Dropped with the session (restart/prune).</summary>
         internal readonly HashSet<long> Transient = new HashSet<long>();
     }
 

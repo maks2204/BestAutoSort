@@ -45,6 +45,15 @@ namespace BestAutoSort.Tx
         private const float RefreshPoll = 0.25f;
         private const float SlowPump = 0.5f;
         private const int DrainPerFrame = 64;
+        // Wave-1 fix: Awake-independent authority discovery sweep (server-only,
+        // throttled). Everything server-side (States registration, pump
+        // Takeover, EnsureServerOwnership) keys off OnContainerAwake; if that
+        // edge never fires for a live chest (late zone activation, missed hook,
+        // transient failure at Awake), the chest stays invisible: never adopted,
+        // every op Indeterminate. The sweep re-runs the exact Awake
+        // registration for live managed Containers that have no state yet.
+        private const float AuthoritySweepInterval = 15f;
+        private const float AuthoritySweepHeartbeat = 300f;
 
         internal const string RingKey = "BestAutoSort_TxRing";
         internal const string FloorKey = "BestAutoSort_TxFloor";
@@ -67,6 +76,8 @@ namespace BestAutoSort.Tx
         private const uint CounterReserveBlock = 4096;
         private static float _nextSlowPump;
         private static float _nextRefreshPoll;
+        private static float _nextAuthoritySweep;
+        private static float _nextAuthoritySweepHeartbeat;
         private static int _openInstanceId;
         private static float _nextPresenceAt;
 
@@ -82,11 +93,18 @@ namespace BestAutoSort.Tx
             LoadReservedCounter();
             _nextSlowPump = 0f;
             _nextRefreshPoll = 0f;
+            _nextAuthoritySweep = 0f;
+            _nextAuthoritySweepHeartbeat = 0f;
             _openInstanceId = 0;
             _nextPresenceAt = 0f;
         }
 
         internal static void OnContainerAwake(Container container)
+        {
+            OnContainerAwake(container, false);
+        }
+
+        internal static void OnContainerAwake(Container container, bool fromSweep)
         {
             try
             {
@@ -127,10 +145,94 @@ namespace BestAutoSort.Tx
             }
             AutoFeedService.Attach(container);
             // Wave-1 server authority: attach/discovery repair (server-only inside).
-            ServerAuthority.EnsureOnAwake(container);
+            // fromSweep marks the timer-driven discovery sweep: registration and
+            // repair run, but the verified-init materialization stays
+            // genuine-Awake-only (timer paths NEVER materialize).
+            ServerAuthority.EnsureOnAwake(container, fromSweep);
             // 0.6.x upgrade sweep: resume persisted op snapshots, quarantine
             // (never destroy) ghosts with an incomplete reverse link and no op.
             TxRemoteUpgradeOnAwake(container);
+        }
+
+        /// <summary>
+        /// Awake-independent authority discovery sweep (server-only, called from
+        /// Pump; self-throttled). Enumerates LIVE Container components directly
+        /// instead of relying on the Awake edge: any managed chest without a
+        /// state entry gets the exact Awake registration (RPCs + state +
+        /// EnsureOnAwake adoption). Narrow by construction: server-only,
+        /// managed chests only, skips already-known states (no double
+        /// registration), never mutates inventory (the sweep path skips the
+        /// verified-init materialization; adoption stays metadata-only
+        /// + quarantine-first inside EnsureServerOwnership/EnsureOnAwake).
+        /// Diagnostics: unconditional log line on change (registered &gt; 0) plus a
+        /// periodic heartbeat, so a silent server is distinguishable from a
+        /// server with nothing to adopt.
+        /// </summary>
+        private static void PumpAuthoritySweep()
+        {
+            try
+            {
+                if (!Plugin.IsActive)
+                    return;
+                float now = Time.realtimeSinceStartup;
+                if (now < _nextAuthoritySweep)
+                    return;
+                _nextAuthoritySweep = now + AuthoritySweepInterval;
+                bool server = false;
+                try
+                {
+                    ZNet net = ZNet.instance;
+                    server = (Object)net != (Object)null && net.IsServer();
+                }
+                catch { server = false; }
+                if (!server)
+                    return;
+                bool authority = false;
+                try { authority = ServerAuthority.IsAuthorityMode(); }
+                catch { authority = false; }
+                if (!authority)
+                    return;
+                Container[] all = null;
+                try { all = Object.FindObjectsOfType<Container>(); }
+                catch { all = null; }
+                if (all == null)
+                    return;
+                int found = all.Length;
+                int managed = 0;
+                int registered = 0;
+                foreach (Container c in all)
+                {
+                    try
+                    {
+                        if ((Object)c == (Object)null)
+                            continue;
+                        if (!ServerAuthority.IsServerManagedContainer(c))
+                            continue;
+                        managed++;
+                        if (GetState(c) != null)
+                            continue;
+                        OnContainerAwake(c, true);
+                        if (GetState(c) != null)
+                            registered++;
+                    }
+                    catch { }
+                }
+                bool heartbeat = false;
+                if (now >= _nextAuthoritySweepHeartbeat)
+                {
+                    _nextAuthoritySweepHeartbeat = now + AuthoritySweepHeartbeat;
+                    heartbeat = true;
+                }
+                if (registered > 0 || heartbeat)
+                {
+                    try
+                    {
+                        Plugin.LogInstance.LogInfo((object)("[ChestTX] server-authority: discovery sweep found=" + found + " managed=" + managed + " registered=" + registered + " known=" + States.Count));
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         /// <summary>

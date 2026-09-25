@@ -641,13 +641,16 @@ internal static class ServerAuthority
     }
 
     /// <summary>
+    /// <summary>
     /// Awake/discovery path (server-only). Same repair as EnsureServerOwnership,
     /// PLUS the single verified-init exception: a NEW server-created chest
     /// (self-owned at awake, s_items absent, live RAM provably empty) may
     /// materialize the empty s_items blob via SaveContainer. Timer-based paths
-    /// NEVER materialize (fail closed there).
+    /// NEVER materialize (fail closed there): fromSweep=true runs registration
+    /// and repair only, skipping the materialization even if its predicate
+    /// would hold.
     /// </summary>
-    internal static void EnsureOnAwake(Container container)
+    internal static void EnsureOnAwake(Container container, bool fromSweep)
     {
         try
         {
@@ -655,6 +658,7 @@ internal static class ServerAuthority
             try { verbose = ModConfig.TxVerbose.Value; } catch { verbose = false; }
             if (verbose)
                 Plugin.LogInstance.LogInfo((object)"[ChestTX] authority awake probe");
+            string ctx = fromSweep ? "sweep" : "awake";
             if (!IsAuthorityMode())
                 return;
             ZNet net = ZNet.instance;
@@ -742,10 +746,10 @@ internal static class ServerAuthority
                 // empty over it. Fail closed via the repair path below.
                 Plugin.LogInstance.LogWarning((object)("[ChestTX] server-authority: init s_items read failed"
                     + " chest=" + DescribeZdo(zdo) + ", taking repair path (never presume empty)"));
-                EnsureServerOwnership(container, "awake-read-failed");
+                EnsureServerOwnership(container, ctx + "-read-failed");
                 return;
             }
-            if (TxNullEscape.InitMaterializeAllowed(authorityMode, managed, owner == me, items == null, ramEmpty))
+            if (!fromSweep && TxNullEscape.InitMaterializeAllowed(authorityMode, managed, owner == me, items == null, ramEmpty))
             {
                 try
                 {
@@ -756,7 +760,7 @@ internal static class ServerAuthority
                     OwnershipRepairFailures++;
                     Plugin.LogInstance.LogWarning((object)("[ChestTX] server-authority: init materialize save failed"
                         + " chest=" + DescribeZdo(zdo) + ": " + ex.Message));
-                    EnsureServerOwnership(container, "awake-init-save-failed");
+                    EnsureServerOwnership(container, ctx + "-init-save-failed");
                     return;
                 }
                 byte[] healed = null;
@@ -781,7 +785,7 @@ internal static class ServerAuthority
                     + " chest=" + DescribeZdo(zdo)
                     + " reason=" + healReason));
             }
-            EnsureServerOwnership(container, "awake");
+            EnsureServerOwnership(container, ctx);
         }
         catch
         {

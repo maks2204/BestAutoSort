@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 (unreleased: Awake-independent authority discovery sweep)
+
+- Server-only discovery sweep every 15s (`PumpAuthoritySweep`): live managed chests missing from `States` (Awake edge never fired — late zone activation on dedicated servers) get the exact Awake registration (RPCs + state + `EnsureOnAwake` adoption). Adoption stays metadata-only + quarantine-first; the sweep path skips the verified-init materialization (`fromSweep`, timer paths NEVER materialize holds literally); unconditional log on change + 5-min heartbeat (`discovery sweep found=/managed=/registered=`).
+- Known residual (proven by decompilation, fix deferred): `ClaimOwnership` is a local flag flip with no flush handshake — the server is not guaranteed the ex-owner's latest state at adoption. Mitigations active: quarantine on null/invalid, owner-gated writes, `SetOwnerInternal` guard; freshness handshake (ForceSendZDO + DataRevision compare) is the planned second stage.
+
 ## 0.6.2-DIAG (temporary dedicated-server silence diagnostics, revert after diagnosis)
 
 - Temporary verbose probes only, no behavior change: `[ChestTX] config:` startup dump (TxVerbose/mode/effective), `authority awake probe` at EnsureOnAwake entry, `container awake: <name>` at OnContainerAwake entry. Purpose: prove whether Container.Awake/adoption runs at all on the dedicated server (live symptom: client SENDs, zero server ChestTX lines, every op Indeterminate). Revert before any release.

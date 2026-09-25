@@ -1623,6 +1623,7 @@ namespace BestAutoSort.Tx
             if (!Plugin.IsActive)
                 return;
             TxNet.PumpHello();
+            PumpAuthoritySweep();
             PumpManagerSlow();
             PumpPending();
             PumpViewerRefresh();

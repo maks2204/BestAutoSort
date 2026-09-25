@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using BestAutoSort.TxCore;
 using UnityEngine;
 
@@ -17,9 +17,9 @@ namespace BestAutoSort.Runtime
     /// - actor resolution, paths, range: shared ChestAuthority helpers.
     ///
     /// Documented divergences (both toward refusal):
-    /// - ward-opted chests (prefab m_checkGuardStone) are denied: PrivateAreas
-    ///   have no server-side objects, so wards are unverifiable. ZDO-level ward
-    ///   scan is a later slice; vanilla chests do not opt in.
+    /// - wards evaluate ZDO-level (ServerWards: sector scan, s_enabled,
+    ///   prefab m_radius, s_creator + pu_id{i}); no-ward-covered allows
+    ///   exactly like vanilla. Prefab-field trust as below.
     /// - prefab m_privacy is trusted (see above); a hypothetical third-party
     ///   runtime mutator of the instance field is unsupported.
     /// </summary>
@@ -91,8 +91,15 @@ namespace BestAutoSort.Runtime
                     }
                     if (wardOptIn)
                     {
-                        why = "ward-unverifiable";
-                        return false;
+                        string wwhy = "ok";
+                        bool allowed = false;
+                        try { allowed = ServerWards.WardAllows(chestPos, creator, out wwhy); }
+                        catch { allowed = false; wwhy = "fault"; }
+                        if (!allowed)
+                        {
+                            why = "ward";
+                            return false;
+                        }
                     }
                     return true;
                 }
@@ -119,8 +126,15 @@ namespace BestAutoSort.Runtime
                 }
                 if (wardOptIn)
                 {
-                    why = "ward-unverifiable";
-                    return false;
+                    string wwhy = "ok";
+                    bool allowed = false;
+                    try { allowed = ServerWards.WardAllows(chestPos, playerId, out wwhy); }
+                    catch { allowed = false; wwhy = "fault"; }
+                    if (!allowed)
+                    {
+                        why = "ward";
+                        return false;
+                    }
                 }
                 return true;
             }

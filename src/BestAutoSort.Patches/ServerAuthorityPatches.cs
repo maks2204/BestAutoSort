@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection.Emit;
 using BestAutoSort;
@@ -72,6 +72,12 @@ namespace BestAutoSort.Patches
                     return false;
                 if (uid == auth)
                     return true;
+                try
+                {
+                    if (__instance.GetOwner() == uid)
+                        return true;
+                }
+                catch { }
                 ServerAuthority.NoteUnexpectedClientOwnership(__instance, uid, "SetOwner");
                 return false;
             }
@@ -98,6 +104,12 @@ namespace BestAutoSort.Patches
                     return false;
                 if (uid == auth)
                     return true;
+                try
+                {
+                    if (__instance.GetOwner() == uid)
+                        return true;
+                }
+                catch { }
                 ServerAuthority.NoteUnexpectedClientOwnership(__instance, uid, "SetOwnerInternal");
                 return false;
             }

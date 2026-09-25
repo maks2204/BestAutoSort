@@ -365,7 +365,16 @@ namespace BestAutoSort.Tx
             }
             if (!totalsOnly && !IsTakeOp(pending.Op) && pending.ExpectedItems >= 0 && !AddBodyMatchesArity(pkg, pending.ExpectedItems))
             {
-                TxLog.Warn("tx=" + txId + " add body corrupt: re-querying instead of misattributing");
+                int bodyLen = -1;
+                int bodyFirst = -2147483647;
+                try
+                {
+                    ZPackage diag = new ZPackage(pkg.GetArray());
+                    bodyLen = diag.GetArray().Length;
+                    try { bodyFirst = diag.ReadInt(); } catch { }
+                }
+                catch { }
+                TxLog.Warn("tx=" + txId + " add body corrupt: expected=" + pending.ExpectedItems + " bodyLen=" + bodyLen + " bodyFirst=" + bodyFirst + ", re-querying instead of misattributing");
                 RefreshNow(pending.Container);
                 if (!ForceRefetch(txId))
                     FinalizeUnknownTx(txId);

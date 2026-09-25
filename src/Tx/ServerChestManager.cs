@@ -665,6 +665,17 @@ namespace BestAutoSort.Tx
                 if (!state.FloorCorrupt && ringOk && floorOk)
                     state.RingCorrupt = false;
                 ForceSend(session);
+                try
+                {
+                    if (mutated && result.AcceptedTotal() > 0 && job.Call != null
+                        && (job.Call.Op == TxOp.Add || job.Call.Op == TxOp.AddBatch || job.Call.Op == TxOp.TakeBatch))
+                    {
+                        Vector3 chestPos = Vector3.zero;
+                        try { chestPos = zdo.GetPosition(); } catch { chestPos = Vector3.zero; }
+                        TxFlights.BroadcastFlightsServer(session.ZdoId, chestPos, job, result);
+                    }
+                }
+                catch { }
                 TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + job.TxId + " peer=" + job.Sender
                     + " op=" + job.Call.Op + " accepted=" + result.AcceptedTotal() + " revision=" + result.Revision);
                 return ringOk && floorOk;
@@ -777,7 +788,16 @@ namespace BestAutoSort.Tx
                 if (rpc == null)
                     return;
                 try { rpc.InvokeRoutedRPC(sender, ServerChestDirector.ServerResponseRpc, new object[1] { outer }); } catch { }
-                TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " response status=" + status + " rev=" + revision + " to=" + sender);
+                int accTotal = -1;
+                try
+                {
+                    ZPackage diag = new ZPackage(body.GetArray());
+                    int n = diag.ReadInt();
+                    accTotal = 0;
+                    for (int i = 0; i < n; i++) { try { accTotal += diag.ReadInt(); } catch { break; } }
+                }
+                catch { }
+                TxLog.Info("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " op=" + op + " response status=" + status + " rev=" + revision + " acceptedTotal=" + accTotal + " to=" + sender);
             }
             catch
             {

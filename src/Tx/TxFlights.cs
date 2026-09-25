@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
@@ -54,6 +54,55 @@ namespace BestAutoSort.Tx
                 // InvokeRoutedRPC(name, params) без target шлёт ТОЛЬКО серверу!
                 rpc.InvokeRoutedRPC(0L, FlightsRpc, pkg);
                 TxLog.Info("container=" + TxLog.Zid(netView.GetZDO().m_uid) + " tx=" + job.TxId + " flights broadcast entries=" + written);
+            }
+            catch (Exception ex)
+            {
+                TxLog.Warn("flights broadcast failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Option-B server variant (no Container): same packet, sourced from the
+        /// chest ZDOID + ZDO position. Called by the server manager after commit
+        /// for Add/AddBatch/TakeBatch with accepted stock (mirrors the Drain
+        /// call-site scope). Watchers render via the unchanged OnFlightPacket;
+        /// the server's own loopback finds no instance and skips harmlessly.
+        /// </summary>
+        internal static void BroadcastFlightsServer(ZDOID chestId, Vector3 chestPos, TxJob job, StoredResult result)
+        {
+            try
+            {
+                if (chestId.IsNone() || job == null || job.Call == null || result == null)
+                    return;
+                if (result.AcceptedTotal() <= 0)
+                    return;
+                ZRoutedRpc rpc = ZRoutedRpc.instance;
+                if (rpc == null)
+                    return;
+                Vector3 from = (job.ActorPos.sqrMagnitude > 0.01f) ? job.ActorPos : chestPos;
+                ZPackage pkg = new ZPackage();
+                pkg.Write(job.TxId);
+                pkg.Write(chestId);
+                pkg.Write(job.Call.Op == TxOp.TakeBatch);
+                pkg.Write(from);
+                int count = 0;
+                for (int i = 0; i < job.Call.Items.Count && i < result.Accepted.Count; i++)
+                {
+                    if (result.Accepted[i] > 0 && count < MaxEntries)
+                        count++;
+                }
+                pkg.Write(count);
+                int written = 0;
+                for (int i = 0; i < job.Call.Items.Count && i < result.Accepted.Count && written < MaxEntries; i++)
+                {
+                    if (result.Accepted[i] <= 0)
+                        continue;
+                    pkg.Write(job.Call.Items[i].PrefabHash);
+                    pkg.Write(result.Accepted[i]);
+                    written++;
+                }
+                rpc.InvokeRoutedRPC(0L, FlightsRpc, pkg);
+                TxLog.Info("container=" + TxLog.Zid(chestId) + " tx=" + job.TxId + " flights broadcast entries=" + written);
             }
             catch (Exception ex)
             {

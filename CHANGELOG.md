@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 0.6.7 (remote flow visuals, guard no-op quiet, arity diagnostics)
+
+- Server broadcasts TxFlights after Add/AddBatch/TakeBatch commits: watchers
+  see other players' quick-stack icons (same packet, ZDO-sourced).
+- Ownership guards pass through no-op changes (owner==requested) silently;
+  real changes still blocked + counted.
+- Arity diagnostics: client logs expected/bodyLen/bodyFirst on add-body
+  mismatch; server logs op/acceptedTotal per response (open AddBatch case).
+
+
 ## 0.6.6 (Move/Sort served, settle removed)
 
 - Server manager serves Move/Sort (pure-inventory shared Execute paths).

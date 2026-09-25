@@ -50,6 +50,7 @@ namespace BestAutoSort.Tx
                 ZPackage outer = new ZPackage();
                 try
                 {
+                    outer.Write(KindTx);
                     outer.Write(chestId);
                     outer.Write(request);
                 }

@@ -875,6 +875,7 @@ namespace BestAutoSort.Tx
                 TxCodec.WriteResponseHeader(pkg, txId, status, revision, totalsOnly);
                 pkg.Write(body != null ? body : new ZPackage());
                 ZPackage outer = new ZPackage();
+                outer.Write(ServerChestDirector.KindTx);
                 outer.Write(session.ZdoId);
                 outer.Write(pkg);
                 ZRoutedRpc rpc = null;

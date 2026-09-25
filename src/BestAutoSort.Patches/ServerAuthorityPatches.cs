@@ -78,6 +78,13 @@ namespace BestAutoSort.Patches
                         return true;
                 }
                 catch { }
+                // Relinquish (owner -> 0) is always safe and never a takeover:
+                // nobody gains, vanilla open-routing (broadcast on 0) keeps
+                // working, and managed chests converge to the servable state.
+                // Required so virgin-clear and peer-disconnect releases (plus
+                // every peer adopting them) are not stuck behind this guard.
+                if (uid == 0L)
+                    return true;
                 ServerAuthority.NoteUnexpectedClientOwnership(__instance, uid, "SetOwner");
                 return false;
             }
@@ -110,6 +117,8 @@ namespace BestAutoSort.Patches
                         return true;
                 }
                 catch { }
+                if (uid == 0L)
+                    return true;
                 ServerAuthority.NoteUnexpectedClientOwnership(__instance, uid, "SetOwnerInternal");
                 return false;
             }

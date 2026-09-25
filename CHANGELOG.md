@@ -1,12 +1,22 @@
 ﻿# Changelog
 
+## 0.6.11 (virgin clear-to-0, content-hash revalidation)
+
+- Virgin birth converges ownership to 0 (verified by read-back): new chests
+  servable immediately, broadcast open-routing intact, no reassignment.
+  Ownership guards allow uid==0 everywhere (relinquish is never a takeover).
+- Content-hash (FNV-1a-64) revalidation replaces revision compare: benign
+  bumps (lid toggles) pass, real s_items divergence quarantines. Baselines
+  stamped on every server save + at session creation.
+- Removed: virgin-born pin/bypass fields, ServerZdoSet choke, VirginRev.
+
+
 ## 0.6.10 (virgin-born owner bypass + continuous revalidation)
 
-- Virgin attempt runs before the owner gate (live-owned new chests arm the
-  bypass instead of dying at the gate).
-- Bounded trust: every server ZDO write flows through ServerZdoSet (stamps
-  VirginRev); virgin-born requests serve only while no foreign write landed
-  (else bypass dropped, quarantine, UnknownTx). No production code touched.
+- Virgin attempt runs before the owner gate (superseded in 0.6.11 by
+  clear-to-0: bypass fields removed).
+- Bounded trust via content hash (supersedes the revision-stamp scheme:
+  ServerZdoSet/VirginRev removed in 0.6.11).
 
 
 ## 0.6.9 (virgin veto refinement)

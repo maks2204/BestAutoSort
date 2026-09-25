@@ -1,6 +1,6 @@
 ﻿{
   "name": "BestAutoSort",
-  "version_number": "0.6.10",
+  "version_number": "0.6.11",
   "website_url": "https://github.com/maks2204/BestAutoSort",
   "description": "Standalone storage mod: shared chests, quick-stack, restock, rules, crafting from chests, autofeed, upgrades, sort.",
   "dependencies": [

@@ -45,18 +45,11 @@ namespace BestAutoSort.Tx
         /// equivalent, session-scoped RAM): retained same-tx retries instead of
         /// terminal forget. Dropped with the session (restart/prune).</summary>
         internal readonly HashSet<long> Transient = new HashSet<long>();
-        /// <summary>DataRevision right after our last ZDO write on this session
-        /// (every server Set flows through ServerChestManager.ServerZdoSet).
-        /// The virgin-born continuous revalidation serves only while the live
-        /// revision still equals this (any foreign write fails closed).</summary>
-        internal uint VirginRev;
-        /// <summary>Owner pinned at virgin materialization (may be live).
-        /// While the owner is unchanged, the single-writer gate is bypassed:
-        /// a virgin-born chest has no competing writer by construction (empty
-        /// RAM at birth, every content flow thereafter goes through this
-        /// manager). Any ownership change re-arms the gate.</summary>
-        internal long BirthOwner;
-        internal bool VirginBorn;
+        /// <summary>FNV-1a 64 of the last OUR s_items bytes on this session
+        /// (stamped on every server save; ring/floor keys never touch s_items).
+        /// Revalidation serves only while live bytes still hash equal.</summary>
+        internal ulong SItemsHash;
+        internal bool HasSItemsHash;
     }
 
     internal static class ServerChestSessions
@@ -182,6 +175,16 @@ namespace BestAutoSort.Tx
                     }
                 }
                 try { created.LastSeenRev = zdo.DataRevision; } catch { created.LastSeenRev = 0u; }
+                try
+                {
+                    byte[] cur = zdo.GetByteArray(ZDOVars.s_items);
+                    if (cur != null)
+                    {
+                        created.SItemsHash = Fnv1a64(cur);
+                        created.HasSItemsHash = true;
+                    }
+                }
+                catch { }
                 created.State.ZdoId = id;
                 // Restart/handoff recovery: rebuild idempotency state from the
                 // durable ring + independent floor copies (shared SeedFromRing —
@@ -357,13 +360,15 @@ namespace BestAutoSort.Tx
                     why = "save produced null";
                     return false;
                 }
-                if (!ServerChestManager.ServerZdoSet(session, zdo, ZDOVars.s_items, bytes))
+                try { zdo.Set(ZDOVars.s_items, bytes); }
+                catch (Exception ex)
                 {
-                    why = "zdo set failed";
+                    why = "zdo set failed: " + ex.Message;
                     return false;
                 }
                 try { newRev = zdo.DataRevision; } catch { newRev = 0u; }
                 try { session.LastSeenRev = newRev; } catch { }
+                try { session.SItemsHash = Fnv1a64(bytes); session.HasSItemsHash = true; } catch { }
                 try
                 {
                     if (ZDOMan.instance != null)
@@ -378,6 +383,20 @@ namespace BestAutoSort.Tx
                 why = "fault";
                 return false;
             }
+        }
+
+        internal static ulong Fnv1a64(byte[] bytes)
+        {
+            ulong h = 14695981039346656037UL;
+            if (bytes != null)
+            {
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    h ^= bytes[i];
+                    h *= 1099511628211UL;
+                }
+            }
+            return h;
         }
 
         internal static void Prune()

@@ -306,6 +306,26 @@ namespace BestAutoSort.Tx
             return state;
         }
 
+        /// <summary>
+        /// Read-only scan: true when any in-flight tx targets this container.
+        /// Never mutates Pending.
+        /// </summary>
+        internal static bool HasPendingFor(Container container)
+        {
+            try
+            {
+                if ((Object)container == (Object)null)
+                    return false;
+                foreach (PendingTx p in Pending.Values)
+                {
+                    try { if (p != null && p.Container == container) return true; }
+                    catch { }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         // ============================ public API: GUI/automation ============================
 
         internal static void RequestAdd(Container container, Inventory srcInv, ItemData item, int amount, int wantX, int wantY, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
@@ -818,7 +838,7 @@ namespace BestAutoSort.Tx
         /// guard (a same-UID reset counter hits the high-water and answers
         /// Indeterminate — never double-applies). Counter wrap fails closed loudly.
         /// </summary>
-        private static long IssueTxId()
+        internal static long IssueTxId()
         {
             if (!ReserveTxCounter())
                 return 0L;

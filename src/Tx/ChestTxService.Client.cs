@@ -1696,6 +1696,7 @@ namespace BestAutoSort.Tx
                 return;
             TxNet.PumpHello();
             ServerChestDirector.PumpPing();
+            TxDestroy.Pump();
             PumpAuthoritySweep();
             PumpManagerSlow();
             ServerChestManager.Pump();

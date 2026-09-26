@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BestAutoSort.Runtime;
 using BestAutoSort.TxCore;
@@ -55,6 +55,7 @@ namespace BestAutoSort.Tx
                 // Option-B slice 1: instance-independent server transport
                 // (works with zero server-side GameObjects).
                 ServerChestDirector.RegisterGlobal(instance);
+                TxDestroy.RegisterGlobal(instance);
                 instance.Register<string>(HelloRpc, delegate (long sender, string version)
                 {
                     if (Plugin.IsActive)

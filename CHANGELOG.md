@@ -1,5 +1,19 @@
 ﻿# Changelog
 
+## 0.6.13 (server-mediated chest destroy)
+
+- Hammer-remove of managed chests goes through the server: spill from
+  server truth (Take-shaped bodies, zero new codec), ZDO delete,
+  session drop, txId-keyed tombstone replays, idempotent gone-handling.
+- Guards: eligibility, decode, m_canBeRemoved, privacy+nonempty, full
+  access (range+slack/wards/creator), sender binding + compat, claim-
+  verified delete. Deny/timeout keep the chest with a message.
+- No-dupe discipline: stale-txId drop, refund-once set, session reset on
+  UID/world change, fault directions fail-closed.
+- Residuals: damage-destroy path, no-build/station gates, cross-client
+  in-flight races (Indeterminate), restart-wiped tombs.
+
+
 ## 0.6.12 (review-loop hardening: gate order, auth, fault directions)
 
 - OnRequest gate order mirrors production (binding, replay, transient,

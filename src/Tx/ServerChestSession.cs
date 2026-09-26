@@ -257,6 +257,18 @@ namespace BestAutoSort.Tx
             }
         }
 
+        internal static void Remove(ZDOID id)
+        {
+            try
+            {
+                Sessions.Remove(id);
+                BestAutoSort.Plugin.LogInstance.LogInfo((object)("[ChestTX] container=" + TxLog.Zid(id) + " session dropped (destroyed)"));
+            }
+            catch
+            {
+            }
+        }
+
         internal static bool TryGet(ZDOID id, out ServerChestSession session)
         {
             session = null;

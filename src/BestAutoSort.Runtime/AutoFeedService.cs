@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -273,7 +273,8 @@ internal static class AutoFeedService
 			return;
 		// Feeder identity must match the CanUse server branch: any server
 		// (dedicated or host) stamps the chest creator; pure clients stamp self.
-		// Stamped position is the ANIMAL's (matches the range check semantics).
+		// The hungry animal's ZDO (FeederId) plus its position travel with the
+		// request so the server anchors range at the animal, never the player.
 		long feederId;
 		if (ZNet.instance.IsServer())
 			feederId = Creator(container);
@@ -357,7 +358,7 @@ internal static class AutoFeedService
 				back2.m_stack = got.Accepted;
 				ChestTxService.CompensateTakeBackItem(container, got.PrefabHash, back2);
 			}
-		}, 0L, animalPos);
+		}, 0L, animalPos, animalId);
 	}
 
 	private static void TrackContainer(Container container)

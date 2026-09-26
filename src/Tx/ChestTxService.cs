@@ -1442,6 +1442,7 @@ namespace BestAutoSort.Tx
                 case TxOp.ViewerClose:
                     break;
             }
+            try { pkg.Write(call.FeederId); } catch { }
             return pkg;
         }
 
@@ -1890,6 +1891,7 @@ namespace BestAutoSort.Tx
                 // v3 frame fails closed to unflagged (reminded TransientUnavailable,
                 // safe Indeterminate — never executes), never to a misframed body.
                 call.IsTransientRetry = false;
+                call.FeederId = ZDOID.None;
                 if (version == TxCodec.ProtoVersion)
                 {
                     try { call.IsTransientRetry = payload.ReadBool(); }
@@ -1947,6 +1949,7 @@ namespace BestAutoSort.Tx
                     default:
                         return false;
                 }
+                try { call.FeederId = payload.ReadZDOID(); } catch { call.FeederId = ZDOID.None; }
                 return true;
             }
             catch (Exception)

@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using BestAutoSort.TxCore;
 
 namespace BestAutoSort.Tx
@@ -51,6 +51,12 @@ namespace BestAutoSort.Tx
         /// UnknownTx). Never set on a first attempt.
         /// </summary>
         public bool IsTransientRetry;
+        /// <summary>
+        /// Automation feeder: the hungry animal's ZDO (server-verifiable anchor
+        /// for range instead of the player's position). None for manual ops.
+        /// Tolerant trailing field (absent on old frames).
+        /// </summary>
+        public ZDOID FeederId;
     }
 
     internal sealed class TxOpItem

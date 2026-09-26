@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 0.6.14 (feeder-anchored range)
+
+- Range enforced against the server-resolved actor position (+15m lag
+  slack); client-stamped position drives visuals only (fixes autofeed
+  pos-mismatch storm while moving).
+- Feeder Takes carry the hungry animal ZDO (FeederId, tolerant trailing
+  wire field); range anchors at the server-verified animal
+  (Tameable prefab + AutoFeedRange), player position irrelevant for AfK
+  farms. Identity/privacy/wards unchanged.
+
+
 ## 0.6.13 (server-mediated chest destroy)
 
 - Hammer-remove of managed chests goes through the server: spill from

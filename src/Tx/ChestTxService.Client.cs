@@ -893,7 +893,7 @@ namespace BestAutoSort.Tx
         /// already have been debited. A null/corrupt body never converts an
         /// Indeterminate outcome into a Rejected one.
         /// </summary>
-        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null)
+        internal static void RequestTakeCustom(Container container, List<TxOpItem> items, bool respectReserves, Action<List<DecodedTake>, TxStatus, uint, TxCompletionKind> onDone, long playerId = 0L, Vector3? actorPos = null, ZDOID feederId = default(ZDOID))
         {
             if (items == null || items.Count == 0)
                 return;
@@ -901,6 +901,7 @@ namespace BestAutoSort.Tx
             call.Op = TxOp.TakeBatch;
             call.Items.AddRange(items);
             call.RespectReserves = respectReserves;
+            call.FeederId = feederId;
             if (IsManager(container))
             {
                 // Manager fast path (wave-2 authority-routed: host/server-local

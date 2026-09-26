@@ -26,14 +26,21 @@ namespace BestAutoSort.Runtime
     internal static class ServerAccess
     {
         /// <summary>
-        /// Slack between the client-stamped actor position and the
-        /// server-resolved actor position (replication-lag tolerance).
-        /// Denials keep distinct reasons: "too-far" (chest vs claim) vs
-        /// "pos-mismatch" (claim vs server-resolved actor).
+        /// Lag slack added to the range check against the server-resolved
+        /// actor position (replication-lag tolerance). The client-stamped
+        /// position drives visuals only. Denials report "too-far".
         /// </summary>
-        private const float RangeSlackMeters = 8f;
+        private const float RangeSlackMeters = 15f;
 
         internal static bool CanUse(ZDO zdo, long sender, long claimedPlayerId, Vector3 claimedPos, out string why)
+        {
+            return CanUse(zdo, sender, claimedPlayerId, claimedPos, ZDOID.None, out why);
+        }
+
+        /// <summary>Feeder-aware overload: automation stamps the hungry animal's
+        /// ZDO (TxOpCall.FeederId); range is then anchored at the animal
+        /// (server-verified below), never at the player.</summary>
+        internal static bool CanUse(ZDO zdo, long sender, long claimedPlayerId, Vector3 claimedPos, ZDOID feederId, out string why)
         {
             why = "ok";
             try
@@ -122,14 +129,18 @@ namespace BestAutoSort.Runtime
                     why = "player-mismatch";
                     return false;
                 }
-                if (!InRange(chestPos, claimedPos, range))
+                // Range: automation with a verified animal anchors at the animal
+                // (server-verified ZDO below) — the player's position is
+                // irrelevant when feeding (AfK farms) and unspoofable anyway.
+                // Otherwise range anchors at the server-resolved player.
+                bool feederOk = false;
+                if (!feederId.IsNone())
+                {
+                    try { feederOk = VerifyFeeder(feederId, chestPos); } catch { feederOk = false; }
+                }
+                if (!feederOk && !InRange(chestPos, resolvedPos, range + RangeSlackMeters))
                 {
                     why = "too-far";
-                    return false;
-                }
-                if (!InRange(claimedPos, resolvedPos, RangeSlackMeters))
-                {
-                    why = "pos-mismatch";
                     return false;
                 }
                 if (!VanillaAccess(privacyPublic, creator, playerId))
@@ -154,6 +165,58 @@ namespace BestAutoSort.Runtime
             catch
             {
                 why = "fault";
+                return false;
+            }
+        }
+
+        private const float FeederSlackMeters = 5f;
+
+        /// <summary>
+        /// Feeder anchor verification (headless): the ZDO exists, its prefab
+        /// carries Tameable (exactly the population our feeder feeds — a
+        /// creature without it can never be a legitimate feeder source), and it
+        /// stands within AutoFeedRange of the chest. Hunger itself is verified
+        /// client-side (no AI state headless); identity/privacy/wards still
+        /// gate the request.
+        /// </summary>
+        private static bool VerifyFeeder(ZDOID feederId, Vector3 chestPos)
+        {
+            try
+            {
+                if (feederId.IsNone())
+                    return false;
+                ZDOMan man = null;
+                ZNetScene scene = null;
+                try { man = ZDOMan.instance; } catch { man = null; }
+                try { scene = ZNetScene.instance; } catch { scene = null; }
+                if (man == null || scene == null)
+                    return false;
+                ZDO z = null;
+                try { z = man.GetZDO(feederId); } catch { z = null; }
+                if (z == null)
+                    return false;
+                bool valid = false;
+                try { valid = z.IsValid(); } catch { valid = false; }
+                if (!valid)
+                    return false;
+                GameObject prefab = null;
+                try { prefab = scene.GetPrefab(z.GetPrefab()); } catch { prefab = null; }
+                if ((UnityEngine.Object)prefab == (UnityEngine.Object)null)
+                    return false;
+                Tameable tame = null;
+                try { tame = prefab.GetComponent<Tameable>(); } catch { tame = null; }
+                if ((UnityEngine.Object)tame == (UnityEngine.Object)null)
+                    return false;
+                Vector3 ap = Vector3.zero;
+                try { ap = z.GetPosition(); } catch { return false; }
+                float range = 25f;
+                try { range = ModConfig.AutoFeedRange.Value; } catch { range = 25f; }
+                Vector3 d = ap - chestPos;
+                float r = range + FeederSlackMeters;
+                return d.sqrMagnitude <= r * r;
+            }
+            catch
+            {
                 return false;
             }
         }

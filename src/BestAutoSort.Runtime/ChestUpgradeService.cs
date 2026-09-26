@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -208,6 +208,22 @@ internal static class ChestUpgradeService
 			Inventory inv = source.GetInventory();
 			if (inv == null)
 				return DescribeRequirements(piece);
+			int totalStacks = 0;
+			try
+			{
+				System.Collections.Generic.List<ItemData> all = inv.GetAllItems();
+				if (all != null)
+					totalStacks = all.Count;
+			}
+			catch { totalStacks = -1; }
+			string zid = "?";
+			try
+			{
+				ZNetView nv = ((Component)source).GetComponent<ZNetView>();
+				if (nv != null)
+					zid = BestAutoSort.Tx.TxLog.Zid(nv.GetZDO().m_uid);
+			}
+			catch { zid = "?"; }
 			List<string> missing = new List<string>();
 			foreach (Piece.Requirement requirement in piece.m_resources)
 			{
@@ -224,6 +240,7 @@ internal static class ChestUpgradeService
 				{
 					string display = ((Localization.instance != null) ? Localization.instance.Localize(name) : name);
 					missing.Add((requirement.m_amount - have) + " " + display);
+					try { Plugin.LogInstance.LogInfo((object)("[ChestTX] upgrade-missing chest=" + zid + " need=" + name + "x" + requirement.m_amount + " have=" + have + " invStacks=" + totalStacks)); } catch { }
 				}
 			}
 				return string.Join(", ", missing);

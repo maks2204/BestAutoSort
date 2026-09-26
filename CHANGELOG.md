@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## 0.6.15 (upgrade-missing diagnostics)
+
+- Upgrade missing-resources check logs need/have/invStacks per requirement
+  (diagnoses stale-viewer vs genuinely-short materials).
+
+
 ## 0.6.14 (feeder-anchored range)
 
 - Range enforced against the server-resolved actor position (+15m lag

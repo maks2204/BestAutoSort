@@ -546,11 +546,12 @@ internal static class ChestUpgradeService
 		}
 		else if (BestAutoSort.Core.ChestUpgradePath.PrefabMatchesTier(prefabName, num))
 		{
-			if (!TryGetTierComponents(Tiers[0], out Container container3, out piece) || (Object)(object)container3 == (Object)null)
+			if (!TryGetTierComponents(Tiers[num], out Container container3, out piece) || (Object)(object)container3 == (Object)null)
 			{
 				return;
 			}
-			flag = TryApplyCompactVisual(container, container3, chestUpgradeVisualState);
+			ApplyContainerDefinition(container, container3, prefabName, markerTier);
+			flag = true;
 		}
 		else
 		{

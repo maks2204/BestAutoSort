@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.22 (keep native colliders on tier-matching chests)
+
+- Prefab/tier-matching chests no longer get a visual overlay (native look,
+  dims and colliders are already correct) — fixes upgraded chests becoming
+  unopenable (no hover prompt).
+
+
 ## 0.6.21 (upgrade look for non-wood chests)
 
 - In-place upgraded non-wood chests take the target-tier look via the

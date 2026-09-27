@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.19 (upgrade diagnostics)
+
+- Upgrade visual pipeline fully instrumented (all silent failure exits +
+  install scale sanity); submit logs prefab/marker/dims/tier/costs for
+  old-chest upgrade diagnosis.
+
+
 ## 0.6.18 (upgrade staging keep)
 
 - Mediated upgrade gather registers staged mats (NoteUpgradeStaged) so

@@ -231,6 +231,42 @@ namespace BestAutoSort.Tx
             catch
             {
             }
+            try
+            {
+                string cbPrefab = "?";
+                int cbMarker = -1;
+                string cbDims = "?";
+                try
+                {
+                    ZNetView cbnv = TxReflect.GetNetView(container);
+                    if ((UnityEngine.Object)cbnv != (UnityEngine.Object)null)
+                    {
+                        ZDO cbzdo = null;
+                        try { cbzdo = cbnv.GetZDO(); } catch { cbzdo = null; }
+                        if (cbzdo != null)
+                        {
+                            try
+                            {
+                                GameObject cbprefab = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(cbzdo.GetPrefab()) : null;
+                                if ((UnityEngine.Object)cbprefab != (UnityEngine.Object)null)
+                                    cbPrefab = cbprefab.name;
+                            }
+                            catch { }
+                            try { cbMarker = cbzdo.GetInt("BestAutoSort.ChestTier", 0); } catch { cbMarker = -1; }
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    Inventory cbinv = container != null ? container.GetInventory() : null;
+                    if (cbinv != null)
+                        cbDims = cbinv.GetWidth() + "x" + cbinv.GetHeight();
+                }
+                catch { }
+                Plugin.LogInstance.LogInfo((object)("[ChestTX] upgrade submit chest prefab=" + cbPrefab + " marker=" + cbMarker + " dims=" + cbDims + " targetTier=" + tier + " playerCosts=" + (playerCosts != null ? playerCosts.Count : 0)));
+            }
+            catch { }
             TellPlayer("Upgrade requested — the server is rebuilding the chest. Wait for the receipt.");
             SubmitPreIssued(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {

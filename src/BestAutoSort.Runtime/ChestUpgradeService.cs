@@ -963,6 +963,7 @@ internal static class ChestUpgradeService
 	{
 		if ((Object)(object)source.m_closed == (Object)null || (Object)(object)source.m_open == (Object)null || (Object)(object)target.m_closed == (Object)null || (Object)(object)target.m_open == (Object)null)
 		{
+			try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual legacy parts missing"); } catch { }
 			return false;
 		}
 		if (!state.HasBaseBounds)
@@ -972,6 +973,7 @@ internal static class ChestUpgradeService
 			Transform val = FindCommonAncestor(((Component)target).transform, state.OriginalClosed.transform, state.OriginalOpen.transform);
 			if ((Object)(object)val == (Object)null || !TryCalculateBounds(((Component)target).transform, ((Component)val).gameObject, state.OriginalOpen.transform, out var bounds))
 			{
+				try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual legacy base-bounds failed"); } catch { }
 				return false;
 			}
 			state.OriginalVisualRoot = ((Component)val).gameObject;
@@ -986,6 +988,7 @@ internal static class ChestUpgradeService
 	{
 		if ((Object)(object)target.m_closed == (Object)null || (Object)(object)target.m_open == (Object)null || (Object)(object)woodenTemplate.m_closed == (Object)null || (Object)(object)woodenTemplate.m_open == (Object)null)
 		{
+			try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual compact parts missing"); } catch { }
 			return false;
 		}
 		if (!state.HasBaseBounds)
@@ -994,6 +997,7 @@ internal static class ChestUpgradeService
 			Transform val2 = FindCommonAncestor(((Component)target).transform, target.m_closed.transform, target.m_open.transform);
 			if ((Object)(object)val == (Object)null || (Object)(object)val2 == (Object)null || !TryCalculateBounds(((Component)woodenTemplate).transform, ((Component)val).gameObject, woodenTemplate.m_open.transform, out var bounds))
 			{
+				try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual compact base-bounds failed"); } catch { }
 				return false;
 			}
 			state.OriginalClosed = target.m_closed;
@@ -1024,11 +1028,13 @@ internal static class ChestUpgradeService
 		if (!TryCloneVisualHierarchy(visualSource, val.transform, out GameObject hierarchy, out GameObject closed, out GameObject open) || (Object)(object)hierarchy == (Object)null || (Object)(object)closed == (Object)null || (Object)(object)open == (Object)null)
 		{
 			Object.Destroy((Object)(object)val);
+			try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual clone failed"); } catch { }
 			return false;
 		}
 		if (!TryCalculateBounds(((Component)target).transform, hierarchy, open.transform, out var bounds))
 		{
 			Object.Destroy((Object)(object)val);
+			try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual fitted-bounds failed"); } catch { }
 			return false;
 		}
 		Transform transform = val.transform;
@@ -1051,6 +1057,7 @@ internal static class ChestUpgradeService
 			if ((Object)(object)colliderSource == (Object)null || !TryCloneColliders(colliderSource, target, out collisionRoot))
 			{
 				Object.Destroy((Object)(object)val);
+				try { Plugin.LogInstance.LogWarning((object)"[ChestTX] upgrade-visual colliders failed"); } catch { }
 				return false;
 			}
 			Collider[] originalColliders = state.OriginalColliders;
@@ -1072,6 +1079,13 @@ internal static class ChestUpgradeService
 		}
 		target.m_closed = closed;
 		target.m_open = open;
+		try
+		{
+			Vector3 sc = val.transform.localScale;
+			bool bad = float.IsNaN(sc.x) || float.IsNaN(sc.y) || float.IsNaN(sc.z) || float.IsInfinity(sc.x) || float.IsInfinity(sc.y) || float.IsInfinity(sc.z);
+			Plugin.LogInstance.LogInfo((object)("[ChestTX] upgrade-visual installed scale=" + sc + (bad ? " BAD" : "")));
+		}
+		catch { }
 		state.VisualRoot = val;
 		state.CollisionRoot = collisionRoot;
 		bool flag = target.IsInUse();

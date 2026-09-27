@@ -76,6 +76,41 @@ namespace BestAutoSort.Tx
         /// A quarantined session is still returned (quarantine is a state, not
         /// an absence) with session.Quarantined == true.
         /// </summary>
+        internal static void ApplyMarkerDims(ServerChestSession session, ZDO zdo)
+        {
+            if (session == null || zdo == null)
+                return;
+            int marker = 0;
+            try { marker = zdo.GetInt("BestAutoSort.ChestTier", 0); }
+            catch { return; }
+            if (marker < 1 || marker > 3)
+                return;
+            string tierPrefab = null;
+            try { tierPrefab = BestAutoSort.Core.ChestUpgradePath.PrefabForTier(marker); }
+            catch { return; }
+            if (string.IsNullOrEmpty(tierPrefab))
+                return;
+            try
+            {
+                ZNetScene scene = ZNetScene.instance;
+                GameObject prefab = scene != null ? scene.GetPrefab(tierPrefab.GetStableHashCode()) : null;
+                if ((UnityEngine.Object)prefab == (UnityEngine.Object)null)
+                    return;
+                Container preset = prefab.GetComponent<Container>();
+                if ((UnityEngine.Object)preset == (UnityEngine.Object)null)
+                    return;
+                int tw = preset.m_width;
+                int th = preset.m_height;
+                if (tw < 1 || th < 1 || tw > 24 || th > 24 || tw * th > 480)
+                    return;
+                if (tw > session.W)
+                    session.W = tw;
+                if (th > session.H)
+                    session.H = th;
+            }
+            catch { }
+        }
+
         internal static bool TryGetOrCreate(ZDO zdo, out ServerChestSession session, out string why)
         {
             session = null;
@@ -141,6 +176,7 @@ namespace BestAutoSort.Tx
                 created.PrefabName = prefabName;
                 created.W = w;
                 created.H = h;
+                try { ApplyMarkerDims(created, zdo); } catch { }
                 long owner = 0L;
                 try { owner = zdo.GetOwner(); } catch { owner = 0L; }
                 byte[] items = null;

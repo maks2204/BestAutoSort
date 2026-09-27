@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.23 (server dims follow chest tier)
+
+- Server chest sessions grow their working inventory from the tier prefab
+  when a tier marker is present — moves/adds into upgrade-added slots are
+  accepted instead of rejected.
+
+
 ## 0.6.22 (keep native colliders on tier-matching chests)
 
 - Prefab/tier-matching chests no longer get a visual overlay (native look,

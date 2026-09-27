@@ -1008,6 +1008,7 @@ namespace BestAutoSort.Tx
                 result.Accepted.Add(0);
                 return result;
             }
+            try { ServerChestSessions.ApplyMarkerDims(session, zdo); } catch { }
             result.Status = TxStatus.Accepted;
             result.Accepted.Add(1);
             try { result.Receipt = zdo.m_uid.ToString(); } catch { result.Receipt = string.Empty; }

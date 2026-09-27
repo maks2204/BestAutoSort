@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace ChestTx.Tests
 {
@@ -38,6 +38,7 @@ namespace ChestTx.Tests
             TxPropagationTests.RunAll();
             TxAuthorityPolicyTests.RunAll();
             TxUpgradeOpTests.RunAll();
+            TxTierTableTests.RunAll();
             Console.WriteLine(Check.Failures == 0 ? "ALL TESTS PASSED" : Check.Failures + " FAILURES");
             return Check.Failures == 0 ? 0 : 1;
         }

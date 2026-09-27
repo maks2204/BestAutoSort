@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 0.6.20 (natural chest tiers)
+
+- Tier resolution: explicit marker always wins; unmarked chests resolve by
+  prefab (natural reinforced/blackmetal/grausten are tiers 1/2/3) — upgrade
+  buttons and server validation work for them.
+- ApplyState skips unmarked chests (vanilla look/dims preserved); tier
+  template dims/name applied on upgrade (never shrinks).
+- Tier-table unit tests pinned in the harness.
+
+
 ## 0.6.19 (upgrade diagnostics)
 
 - Upgrade visual pipeline fully instrumented (all silent failure exits +

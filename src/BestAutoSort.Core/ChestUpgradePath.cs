@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace BestAutoSort.Core;
 
@@ -20,25 +20,32 @@ internal static class ChestUpgradePath
 
 	internal const string GraustenPrefab = "piece_chest_grausten";
 
+	/// <summary>
+	/// Effective managed tier. An explicit marker (1..3, stamped by our own
+	/// upgrade flows) always wins: the prefab never changes in place, so a
+	/// marker necessarily describes this object. Unmarked (0/absent) chests
+	/// resolve by prefab (naturally built reinforced/blackmetal/grausten are
+	/// tiers 1/2/3, not -1). Unknown prefabs without a marker fail closed.
+	/// </summary>
 	internal static int ResolveManagedTier(string prefabName, int markerTier)
 	{
-		if (string.Equals(prefabName, "piece_chest_wood", StringComparison.OrdinalIgnoreCase))
+		if (markerTier >= 1 && markerTier <= 3)
 		{
-			if (markerTier < 0 || markerTier > 2)
-			{
-				return -1;
-			}
 			return markerTier;
 		}
-		if (markerTier == 1 && string.Equals(prefabName, "piece_chest", StringComparison.OrdinalIgnoreCase))
+		if (string.Equals(prefabName, "piece_chest_wood", StringComparison.OrdinalIgnoreCase))
+		{
+			return 0;
+		}
+		if (string.Equals(prefabName, "piece_chest", StringComparison.OrdinalIgnoreCase))
 		{
 			return 1;
 		}
-		if (markerTier == 2 && string.Equals(prefabName, "piece_chest_blackmetal", StringComparison.OrdinalIgnoreCase))
+		if (string.Equals(prefabName, "piece_chest_blackmetal", StringComparison.OrdinalIgnoreCase))
 		{
 			return 2;
 		}
-		if (markerTier == 3 && string.Equals(prefabName, "piece_chest_grausten", StringComparison.OrdinalIgnoreCase))
+		if (string.Equals(prefabName, "piece_chest_grausten", StringComparison.OrdinalIgnoreCase))
 		{
 			return 3;
 		}

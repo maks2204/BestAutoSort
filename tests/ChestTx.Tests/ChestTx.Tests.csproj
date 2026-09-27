@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <!-- Стресс/юнит-харнес протокола ChestTX. Офлайн, без внешних пакетов:
        dotnet run -c Release. Ненулевой exit code при любом провале. -->
   <PropertyGroup>
@@ -19,5 +19,6 @@
        can regress issue #8 without pulling the net472 game assembly. -->
   <ItemGroup>
     <Compile Include="../../src/BestAutoSort.Core/ChestUpgradeDimensions.cs" Link="ChestUpgradeDimensions.cs" />
+    <Compile Include="../../src/BestAutoSort.Core/ChestUpgradePath.cs" Link="ChestUpgradePath.cs" />
   </ItemGroup>
 </Project>

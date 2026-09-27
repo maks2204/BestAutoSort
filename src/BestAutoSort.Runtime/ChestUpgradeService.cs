@@ -407,7 +407,7 @@ internal static class ChestUpgradeService
 		int num = ManagedTier(val);
 		if (num < 0)
 		{
-			ShowMessage("Only a standard wooden chest or BestAutoSort compact chest can be upgraded in place.");
+			ShowMessage("This chest cannot be upgraded in place.");
 			return;
 		}
 		if (!ChestUpgradePath.CanUpgrade(num, targetTier))
@@ -522,7 +522,7 @@ internal static class ChestUpgradeService
 		string prefabName = PrefabName(container);
 		int markerTier = ReadTierMarker(container);
 		int num = ChestUpgradePath.ResolveManagedTier(prefabName, markerTier);
-		if (num <= 0)
+		if (num <= 0 || markerTier <= 0)
 		{
 			return;
 		}
@@ -549,6 +549,10 @@ internal static class ChestUpgradeService
 			if (!TryGetTierComponents(Tiers[0], out Container container3, out piece) || (Object)(object)container3 == (Object)null)
 			{
 				return;
+			}
+			if (TryGetTierComponents(Tiers[num], out Container tierTemplate, out Piece _) && (Object)(object)tierTemplate != (Object)null)
+			{
+				ApplyContainerDefinition(container, tierTemplate, prefabName, markerTier);
 			}
 			flag = TryApplyCompactVisual(container, container3, chestUpgradeVisualState);
 		}

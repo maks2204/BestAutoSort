@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.18 (upgrade staging keep)
+
+- Mediated upgrade gather registers staged mats (NoteUpgradeStaged) so
+  the ahead-stage ledger holds them for the second press instead of
+  returning them immediately (fetch-return loop fixed).
+
+
 ## 0.6.17 (server marker upgrade + split costs)
 
 - Server executes UpgradeRequest in place: pure tier-path check, costs

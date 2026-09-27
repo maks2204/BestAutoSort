@@ -278,6 +278,7 @@ internal static class ChestUpgradeService
 			if (stillShort.Count > 0)
 			{
 				try { NearbyResourceService.StageMissingForPiece(localPlayer, piece); } catch { }
+				try { NearbyResourceService.NoteUpgradeStaged(piece); } catch { }
 				string miss = "";
 				try { NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out miss); } catch { }
 				ShowMessage("Gathering " + (string.IsNullOrEmpty(miss) ? string.Join(", ", stillShort.ToArray()) : miss) + " from nearby chests. Press Upgrade again.");

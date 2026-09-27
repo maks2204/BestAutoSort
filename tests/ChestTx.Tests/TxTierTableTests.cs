@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using BestAutoSort.Core;
 
 namespace ChestTx.Tests
@@ -36,6 +36,17 @@ namespace ChestTx.Tests
             Check(ChestUpgradePath.ResolveManagedTier("piece_cart", 0), -1, "unknown+0");
             Check(ChestUpgradePath.ResolveManagedTier("piece_cart", 2), 2, "unknown+2");
             Check(ChestUpgradePath.ResolveManagedTier("piece_chest_wood", 9), 0, "wood+garbage-marker");
+            Console.WriteLine("TIER_PrefabMatch");
+            if (!ChestUpgradePath.PrefabMatchesTier("piece_chest", 1))
+                throw new InvalidOperationException("match: reinforced tier 1");
+            if (!ChestUpgradePath.PrefabMatchesTier("piece_chest_blackmetal", 2))
+                throw new InvalidOperationException("match: blackmetal tier 2");
+            if (ChestUpgradePath.PrefabMatchesTier("piece_chest", 2))
+                throw new InvalidOperationException("match: reinforced is not tier 2");
+            if (ChestUpgradePath.PrefabMatchesTier("piece_chest_wood", 2))
+                throw new InvalidOperationException("match: wood is not tier 2");
+            if (ChestUpgradePath.PrefabMatchesTier("piece_chest", 9))
+                throw new InvalidOperationException("match: bad tier must fail");
             Console.WriteLine("TIER_Paths");
             if (!ChestUpgradePath.CanUpgrade(1, 2))
                 throw new InvalidOperationException("tier path: 1->2 must hold");

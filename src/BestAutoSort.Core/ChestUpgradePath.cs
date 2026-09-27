@@ -70,6 +70,22 @@ internal static class ChestUpgradePath
 		return false;
 	}
 
+	internal static bool PrefabMatchesTier(string prefabName, int tier)
+	{
+		if (tier < 0 || tier > 3)
+		{
+			return false;
+		}
+	 try
+		{
+			return string.Equals(prefabName, PrefabForTier(tier), StringComparison.OrdinalIgnoreCase);
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
 	internal static string PrefabForTier(int tier)
 	{
 		return tier switch

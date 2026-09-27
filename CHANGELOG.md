@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.21 (upgrade look for non-wood chests)
+
+- In-place upgraded non-wood chests take the target-tier look via the
+  legacy-visual path (prefab/marker mismatch branch); prefab-matching
+  chests keep the compact path byte-identical.
+
+
 ## 0.6.20 (natural chest tiers)
 
 - Tier resolution: explicit marker always wins; unmarked chests resolve by

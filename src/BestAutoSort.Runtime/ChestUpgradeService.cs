@@ -544,17 +544,22 @@ internal static class ChestUpgradeService
 			ApplyContainerDefinition(container, container2, prefabName, markerTier);
 			flag = TryApplyLegacyVisual(container, container2, chestUpgradeVisualState);
 		}
-		else
+		else if (BestAutoSort.Core.ChestUpgradePath.PrefabMatchesTier(prefabName, num))
 		{
 			if (!TryGetTierComponents(Tiers[0], out Container container3, out piece) || (Object)(object)container3 == (Object)null)
 			{
 				return;
 			}
-			if (TryGetTierComponents(Tiers[num], out Container tierTemplate, out Piece _) && (Object)(object)tierTemplate != (Object)null)
-			{
-				ApplyContainerDefinition(container, tierTemplate, prefabName, markerTier);
-			}
 			flag = TryApplyCompactVisual(container, container3, chestUpgradeVisualState);
+		}
+		else
+		{
+			if (!TryGetTierComponents(Tiers[num], out Container tierTemplate, out piece) || (Object)(object)tierTemplate == (Object)null)
+			{
+				return;
+			}
+			ApplyContainerDefinition(container, tierTemplate, prefabName, markerTier);
+			flag = TryApplyLegacyVisual(container, tierTemplate, chestUpgradeVisualState);
 		}
 		if (flag)
 		{
@@ -934,8 +939,9 @@ internal static class ChestUpgradeService
 		}
 	}
 
-	// Legacy-only path (issue #8): the only caller is the IsLegacy branch of
-	// ApplyState. Never shrink a larger runtime inventory already applied by
+	// Shared legacy/max-semantics path (issue #8): callers are the IsLegacy branch
+	// of ApplyState and the non-wood mismatch branch (in-place upgraded chest
+	// whose prefab predates its marker). Never shrink a larger runtime inventory already applied by
 	// another mod: final = max(current, template). Since final >= current,
 	// existing item positions stay valid and nothing is lost or relocated.
 	private static void ApplyContainerDefinition(Container target, Container source, string prefabName, int markerTier)

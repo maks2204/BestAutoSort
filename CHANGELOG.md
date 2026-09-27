@@ -1,5 +1,18 @@
 ﻿# Changelog
 
+## 0.6.17 (server marker upgrade + split costs)
+
+- Server executes UpgradeRequest in place: pure tier-path check, costs
+  verified + deducted from chest, marker key set, receipt=self. No
+  structural replace on dedicated; ghost path kept for host/legacy.
+- Split costs: player covers shortfalls via claimed snapshots (shared
+  Add-claim dedup, removed only on terminal Accept); server deducts the
+  remainder strictly. Full chests upgrade without deposit space.
+- UpgradeRequest carries player-cost items (tolerant trailing wire field);
+  host deposits first, then ghost as before.
+- Client applies marker + resize + effects on self-receipt.
+
+
 ## 0.6.16 (feed flight visuals)
 
 - Autofeed renders local flight visuals (chest to animal mouth) on

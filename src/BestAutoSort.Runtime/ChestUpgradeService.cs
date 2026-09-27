@@ -185,20 +185,163 @@ internal static class ChestUpgradeService
 			string missing = MissingInSource(source, piece);
 			if (!string.IsNullOrEmpty(missing))
 			{
-				ShowMessage("Place " + missing + " inside the chest first — the upgrade consumes from the chest, never your inventory.");
+				if (!TryGatherAndUpgrade(source, targetTier, piece, localPlayer))
+					ShowMessage("Place " + missing + " inside the chest first — the upgrade consumes from the chest, never your inventory.");
 				return;
 			}
 		}
-		ShowMessage("Upgrade requested — the server is rebuilding the chest. Wait for the receipt.");
-		if (BestAutoSort.Tx.ChestTxService.IsManager(source))
+		SubmitUpgrade(source, targetTier);
+	}
+
+	/// <summary>
+	/// Legacy gather behavior for the mediated path: pull what's short in the
+	/// source from the player inventory (plus async staging from nearby chests
+	/// via the shared staging), deposit into the source, then submit — all in
+	/// one press when stock is reachable. The server re-validates costs
+	/// authoritatively, so gather bugs can only cause a safe Rejected, never
+	/// an overcharge. Returns true when the gather chain started (the upgrade
+	/// submits on deposit completion) or was unnecessary.
+	/// </summary>
+	private static bool TryGatherAndUpgrade(Container source, int targetTier, Piece piece, Player localPlayer)
+	{
+		try
 		{
-			// Host-local path through the SAME queue (same op machine, same receipt).
-			BestAutoSort.Tx.ChestTxService.RequestUpgradeLocal(source, targetTier, null);
+			if ((Object)(object)source == (Object)null || (Object)(object)localPlayer == (Object)null || piece == null)
+				return false;
+			Inventory playerInv = ((Humanoid)localPlayer).GetInventory();
+			Inventory chestInv = source.GetInventory();
+			if (playerInv == null || chestInv == null)
+				return false;
+			System.Collections.Generic.List<BestAutoSort.Tx.TxOpItem> playerCosts = new System.Collections.Generic.List<BestAutoSort.Tx.TxOpItem>();
+			System.Collections.Generic.List<string> stillShort = new System.Collections.Generic.List<string>();
+			foreach (Piece.Requirement requirement in piece.m_resources)
+			{
+				if (requirement == null || requirement.m_amount <= 0)
+					continue;
+				string need = null;
+				try
+				{
+					if (requirement.m_resItem != null && requirement.m_resItem.m_itemData != null && requirement.m_resItem.m_itemData.m_shared != null)
+						need = requirement.m_resItem.m_itemData.m_shared.m_name;
+				}
+				catch { need = null; }
+				if (need == null)
+					continue;
+				int srcHave = 0;
+				try
+				{
+					foreach (ItemData stack in chestInv.GetAllItems())
+					{
+						if (stack != null && stack.m_shared != null && string.Equals(stack.m_shared.m_name, need, StringComparison.Ordinal))
+							srcHave += Math.Max(0, stack.m_stack);
+					}
+				}
+				catch { srcHave = 0; }
+				int deficit = requirement.m_amount - srcHave;
+				if (deficit <= 0)
+					continue;
+				int playerHave = 0;
+				try { playerHave = NearbyResourceService.CountAvailable(localPlayer, need, -1, ((Component)localPlayer).transform.position, true); }
+				catch { playerHave = 0; }
+				if (playerHave < deficit)
+				{
+					stillShort.Add(need);
+					continue;
+				}
+			 int remaining = deficit;
+				try
+				{
+					foreach (ItemData stack in playerInv.GetAllItems())
+					{
+						if (remaining <= 0)
+							break;
+						if (stack == null || stack.m_shared == null || !string.Equals(stack.m_shared.m_name, need, StringComparison.Ordinal))
+							continue;
+						if (BestAutoSort.Tx.ChestTxService.IsAddInFlight(stack))
+							continue;
+						int take = remaining < stack.m_stack ? remaining : stack.m_stack;
+						BestAutoSort.Tx.TxOpItem op = BestAutoSort.Tx.ChestTxService.SnapshotAuto(stack, take);
+						if (op != null)
+						{
+							playerCosts.Add(op);
+							remaining -= take;
+						}
+					}
+				}
+				catch { }
+				if (remaining > 0)
+				{
+					stillShort.Add(need);
+					continue;
+				}
+			}
+			if (stillShort.Count > 0)
+			{
+				try { NearbyResourceService.StageMissingForPiece(localPlayer, piece); } catch { }
+				string miss = "";
+				try { NearbyResourceService.HasStagedMatsForPiece(localPlayer, piece, out miss); } catch { }
+				ShowMessage("Gathering " + (string.IsNullOrEmpty(miss) ? string.Join(", ", stillShort.ToArray()) : miss) + " from nearby chests. Press Upgrade again.");
+				return true;
+			}
+			if (playerCosts.Count == 0)
+				return false;
+			SubmitUpgrade(source, targetTier, playerCosts);
+			return true;
 		}
-		else
+		catch
 		{
-			BestAutoSort.Tx.ChestTxService.RequestUpgradeRemote(source, targetTier, null);
+			return false;
 		}
+	}
+
+	private static void SubmitUpgrade(Container source, int targetTier)
+	{
+		SubmitUpgrade(source, targetTier, null);
+	}
+
+	private static void SubmitUpgrade(Container source, int targetTier, System.Collections.Generic.List<BestAutoSort.Tx.TxOpItem> playerCosts)
+	{
+		try
+		{
+			ShowMessage("Upgrade requested — the server is rebuilding the chest. Wait for the receipt.");
+			if (BestAutoSort.Tx.ChestTxService.IsManager(source))
+			{
+				// Host-local path through the SAME queue (same op machine, same receipt).
+				// The ghost consumes from the CHEST only, so player-sourced costs
+				// must be deposited first (local fast path); then the legacy ghost
+				// flow runs unchanged. Empty costs skip straight to it.
+				if (playerCosts == null || playerCosts.Count == 0)
+				{
+					BestAutoSort.Tx.ChestTxService.RequestUpgradeLocal(source, targetTier, null);
+					return;
+				}
+				Player lp = Player.m_localPlayer;
+				Inventory pinv = lp != null ? ((Humanoid)lp).GetInventory() : null;
+				if (pinv == null)
+				{
+					ShowMessage("Upgrade unavailable: player inventory missing.");
+					return;
+				}
+				BestAutoSort.Tx.ChestTxService.RequestAddBatch(source, pinv, playerCosts, delegate (ZPackage pkg, BestAutoSort.TxCore.TxStatus status, uint rev, BestAutoSort.TxCore.TxCompletionKind disp)
+				{
+					try
+					{
+						if (disp == BestAutoSort.TxCore.TxCompletionKind.Indeterminate || disp == BestAutoSort.TxCore.TxCompletionKind.CommittedMultiAddDetailsUnavailable || (status != BestAutoSort.TxCore.TxStatus.Accepted && status != BestAutoSort.TxCore.TxStatus.Partial && status != BestAutoSort.TxCore.TxStatus.Duplicate))
+						{
+							ShowMessage("Deposit uncertain — check the chest before retrying upgrade.");
+							return;
+						}
+						BestAutoSort.Tx.ChestTxService.RequestUpgradeLocal(source, targetTier, null);
+					}
+					catch { }
+				});
+			}
+			else
+			{
+				BestAutoSort.Tx.ChestTxService.RequestUpgradeRemote(source, targetTier, playerCosts, null);
+			}
+		}
+		catch { }
 	}
 
 	private static string MissingInSource(Container source, Piece piece)
@@ -1259,7 +1402,7 @@ internal static class ChestUpgradeService
 		return 0;
 	}
 
-	private static void PlayUpgradeEffect(int tier, Container container)
+	internal static void PlayUpgradeEffect(int tier, Container container)
 	{
 		if (TryGetTierComponents(Tiers[tier], out Container _, out Piece piece) && !((Object)(object)piece == (Object)null))
 		{

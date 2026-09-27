@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BestAutoSort.Core;
 using BestAutoSort.Runtime;
@@ -189,6 +189,20 @@ namespace BestAutoSort.Tx
         /// </summary>
         internal static void RequestUpgradeRemote(Container container, int tier, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
         {
+            RequestUpgradeRemote(container, tier, null, onDone);
+        }
+
+        /// <summary>
+        /// Upgrade with player-sourced costs: playerCosts snapshots are claimed
+        /// (in-flight dedup via the shared Add-claim path) and removed from the
+        /// player inventory ONLY on terminal Accepted (mirroring Add removal;
+        /// no chest compensation on short-removal — the chest was charged only
+        /// its verified share). Rejected/UnknownTx remove nothing (claims
+        /// released by the shared machinery). Empty playerCosts submits
+        /// chest-funded (claims trivially pass).
+        /// </summary>
+        internal static void RequestUpgradeRemote(Container container, int tier, System.Collections.Generic.List<TxOpItem> playerCosts, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
+        {
             long txId = IssueTxId();
             if (txId == 0L)
             {
@@ -201,6 +215,14 @@ namespace BestAutoSort.Tx
             call.Tier = tier;
             call.UpgradeNonce = TxIdGen.CounterOf(txId);
             call.UpgradeFree = false;
+            if (playerCosts != null)
+            {
+                foreach (TxOpItem ci in playerCosts)
+                {
+                    if (ci != null)
+                        call.Items.Add(ci);
+                }
+            }
             try
             {
                 if ((UnityEngine.Object)InventoryGui.instance != (UnityEngine.Object)null)
@@ -212,7 +234,31 @@ namespace BestAutoSort.Tx
             TellPlayer("Upgrade requested — the server is rebuilding the chest. Wait for the receipt.");
             SubmitPreIssued(container, call, delegate (ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp)
             {
-                CompleteUpgradeResponse(container, pkg, status, rev, disp, onDone);
+                if ((status == TxStatus.Accepted || status == TxStatus.Partial || status == TxStatus.Duplicate) && disp == TxCompletionKind.Normal)
+                {
+                    try
+                    {
+                        Player p2 = Player.m_localPlayer;
+                        Inventory pinv = p2 != null ? ((Humanoid)p2).GetInventory() : null;
+                        if (pinv != null && call.Items != null)
+                        {
+                            foreach (TxOpItem ci in call.Items)
+                            {
+                                try
+                                {
+                                    if (ci == null || ci.Snapshot == null || ci.Snapshot.m_shared == null || ci.Amount <= 0)
+                                        continue;
+                                    string cname = ci.Snapshot.m_shared.m_name;
+                                    int removed = TxInventory.RemoveForTake(pinv, ci.SourceRef, cname, ci.Snapshot.m_quality, ci.Amount, ci.Snapshot.m_variant, ci.Snapshot.m_worldLevel);
+                                    TxLog.Info("upgrade cost removed " + cname + " x" + removed + "/" + ci.Amount);
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                CompleteUpgradeResponse(container, pkg, status, rev, disp, onDone, tier);
             }, txId);
         }
 
@@ -273,7 +319,7 @@ namespace BestAutoSort.Tx
             }
         }
 
-        private static void CompleteUpgradeResponse(Container container, ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone)
+        private static void CompleteUpgradeResponse(Container container, ZPackage pkg, TxStatus status, uint rev, TxCompletionKind disp, Action<ZPackage, TxStatus, uint, TxCompletionKind> onDone, int requestedTier)
         {
             RefreshNow(container);
             try
@@ -282,7 +328,11 @@ namespace BestAutoSort.Tx
                 {
                     string receipt = ReadUpgradeReceipt(pkg);
                     if (!string.IsNullOrEmpty(receipt))
+                    {
+                        if (TryApplyInPlaceUpgrade(container, receipt, requestedTier))
+                            TxLog.Info("upgrade in-place applied tier=" + requestedTier);
                         TellPlayer("Chest upgraded. Reopen it to continue.");
+                    }
                     else
                         TellPlayer("Chest upgrade applied but the new chest is unknown. Check the chest before retrying.");
                 }
@@ -314,6 +364,44 @@ namespace BestAutoSort.Tx
                 {
                     TxLog.Warn("upgrade onDone failed: " + ex.Message);
                 }
+            }
+        }
+
+        /// <summary>
+        /// In-place marker upgrade (option-B server): the receipt is the SOURCE
+        /// chest id (same object, tier bumped). Mirror the marker locally for
+        /// immediacy (server already set the same value; sync precedence keeps
+        /// the server authoritative), then resize + restyle + effects.
+        /// Returns false when anything is off (caller falls back to messaging).
+        /// </summary>
+        private static bool TryApplyInPlaceUpgrade(Container container, string receipt, int requestedTier)
+        {
+            try
+            {
+                if ((UnityEngine.Object)container == (UnityEngine.Object)null)
+                    return false;
+                if (requestedTier < 0 || requestedTier > 3)
+                    return false;
+                ZNetView netView = TxReflect.GetNetView(container);
+                if ((UnityEngine.Object)netView == (UnityEngine.Object)null || !netView.IsValid())
+                    return false;
+                ZDO zdo = null;
+                try { zdo = netView.GetZDO(); } catch { zdo = null; }
+                if (zdo == null)
+                    return false;
+                string selfId = string.Empty;
+                try { selfId = zdo.m_uid.ToString(); } catch { selfId = string.Empty; }
+                if (string.IsNullOrEmpty(selfId) || !string.Equals(receipt, selfId, StringComparison.Ordinal))
+                    return false;
+                try { zdo.Set("BestAutoSort.ChestTier", requestedTier); } catch { return false; }
+                try { BestAutoSort.Runtime.ChestUpgradeService.ApplyState(container); } catch { }
+                try { BestAutoSort.Runtime.ChestUpgradeService.PlayUpgradeEffect(requestedTier, container); } catch { }
+                try { RefreshNow(container); } catch { }
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 

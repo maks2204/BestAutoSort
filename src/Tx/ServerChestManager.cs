@@ -346,7 +346,10 @@ namespace BestAutoSort.Tx
                 bool execOk = false;
                 try
                 {
-                    applied = ChestTxService.ExecuteCall(state, job, inv);
+                    if (job.Call != null && job.Call.Op == TxOp.UpgradeRequest)
+                        applied = ExecuteUpgradeMarker(session, zdo, state, job, inv);
+                    else
+                        applied = ChestTxService.ExecuteCall(state, job, inv);
                     execOk = applied != null;
                 }
                 catch (Exception ex)
@@ -375,11 +378,11 @@ namespace BestAutoSort.Tx
         internal static bool IsSupportedOp(TxOp op)
         {
             // Add/Take families move stock; Move/Sort rearrange in place (both
-            // pure-inventory Execute paths, no Container needed). Upgrade/
-            // SetRule stay persisted-Rejected (structural/ZDO-rule writes need
-            // dedicated slices).
+            // pure-inventory Execute paths, no Container needed); UpgradeRequest
+            // runs the marker flow (in-place tier bump, no structural replace).
+            // SetRule stays persisted-Rejected (ZDO-rule writes need a slice).
             return op == TxOp.Add || op == TxOp.AddBatch || op == TxOp.Take || op == TxOp.TakeBatch
-                || op == TxOp.Move || op == TxOp.Sort;
+                || op == TxOp.Move || op == TxOp.Sort || op == TxOp.UpgradeRequest;
         }
 
         private static bool TryRespondCached(ServerChestSession session, ZDO zdo, long sender, long txId, TxOp op)
@@ -831,6 +834,248 @@ namespace BestAutoSort.Tx
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Server-side marker upgrade (option-B): in-place tier bump without any
+        /// structural object replacement (dedicated has no GameObjects to ghost
+        /// with). Validates the pure tier path from the ZDO marker, charges
+        /// costs from the detached inventory (UpgradeFree honored ONLY for
+        /// manager-local senders — dedicated remotes always pay), sets the
+        /// marker key; clients resize + restyle from the marker via ApplyState
+        /// on receipt. Same fence/commit/idempotency as every op; the txId (not
+        /// the ghost nonce/op snapshots) is the idempotency identity because
+        /// nothing hands over. UpgradeRequest frames that fail validation are
+        /// deterministic Rejected (persisted, replayable).
+        /// </summary>
+        private static StoredResult ExecuteUpgradeMarker(ServerChestSession session, ZDO zdo, ChestState state, TxJob job, Inventory inv)
+        {
+            StoredResult result = new StoredResult();
+            result.Op = TxOp.UpgradeRequest;
+            int tier = job.Call != null ? job.Call.Tier : -1;
+            if (tier < 0 || tier > 3)
+            {
+                TxLog.Warn("op=UPGRADEREQ REJECT bad tier=" + tier);
+                result.Status = TxStatus.Rejected;
+                result.Accepted.Add(0);
+                return result;
+            }
+            string prefabName = "?";
+            int marker = 0;
+            try
+            {
+                ZNetScene scene = ZNetScene.instance;
+                GameObject prefab = scene != null ? scene.GetPrefab(zdo.GetPrefab()) : null;
+                if ((UnityEngine.Object)prefab != (UnityEngine.Object)null)
+                    prefabName = prefab.name;
+                marker = zdo.GetInt("BestAutoSort.ChestTier", 0);
+            }
+            catch
+            {
+                TxLog.Warn("op=UPGRADEREQ REJECT prefab/marker unreadable");
+                result.Status = TxStatus.Rejected;
+                result.Accepted.Add(0);
+                return result;
+            }
+            int current = -1;
+            try { current = BestAutoSort.Core.ChestUpgradePath.ResolveManagedTier(prefabName, marker); }
+            catch { current = -1; }
+            bool pathOk = false;
+            try { pathOk = BestAutoSort.Core.ChestUpgradePath.CanUpgrade(current, tier); }
+            catch { pathOk = false; }
+            if (!pathOk)
+            {
+                TxLog.Warn("op=UPGRADEREQ REJECT bad tier path current=" + current + " target=" + tier);
+                result.Status = TxStatus.Rejected;
+                result.Accepted.Add(0);
+                return result;
+            }
+            bool free = false;
+            try
+            {
+                bool selfSender = job.Sender != 0L && ChestAuthority.IsServerSenderOrSelf(job.Sender);
+                free = job.Call != null && job.Call.UpgradeFree && selfSender;
+            }
+            catch { free = false; }
+            if (!free)
+            {
+                Piece piece = null;
+                try
+                {
+                    string targetPrefab = BestAutoSort.Core.ChestUpgradePath.PrefabForTier(tier);
+                    ZNetScene scene2 = ZNetScene.instance;
+                    GameObject tp = scene2 != null ? scene2.GetPrefab(targetPrefab) : null;
+                    if ((UnityEngine.Object)tp != (UnityEngine.Object)null)
+                        piece = tp.GetComponent<Piece>();
+                }
+                catch { piece = null; }
+                if ((UnityEngine.Object)piece == (UnityEngine.Object)null)
+                {
+                    TxLog.Warn("op=UPGRADEREQ REJECT tier assets unavailable tier=" + tier);
+                    result.Status = TxStatus.Rejected;
+                    result.Accepted.Add(0);
+                    return result;
+                }
+                bool freeBuild = false;
+                try { freeBuild = ZoneSystem.instance != null && ZoneSystem.instance.GetGlobalKey(piece.FreeBuildKey()); }
+                catch { freeBuild = false; }
+                if (!freeBuild)
+                {
+                    List<Piece.Requirement> reqs = null;
+                    try { reqs = new List<Piece.Requirement>(piece.m_resources); } catch { reqs = null; }
+                    if (reqs == null)
+                    {
+                        TxLog.Warn("op=UPGRADEREQ REJECT requirements unreadable");
+                        result.Status = TxStatus.Rejected;
+                        result.Accepted.Add(0);
+                        return result;
+                    }
+                    Dictionary<string, int> playerCovered = PlayerCostCover(job);
+                    foreach (Piece.Requirement requirement in reqs)
+                    {
+                        if (requirement == null || requirement.m_amount <= 0)
+                            continue;
+                        string need = RequirementName(requirement);
+                        if (need == null)
+                            continue;
+                        int pc = 0;
+                        try { playerCovered.TryGetValue(need, out pc); } catch { pc = 0; }
+                        int chestNeed = requirement.m_amount - Math.Max(0, pc);
+                        if (chestNeed < 0)
+                            chestNeed = 0;
+                        int have = CountInInventory(inv, need);
+                        if (have < chestNeed)
+                        {
+                            TxLog.Warn("op=UPGRADEREQ REJECT short need=" + need + "x" + requirement.m_amount + " playerCovered=" + pc + " chestHave=" + have);
+                            result.Status = TxStatus.Rejected;
+                            result.Accepted.Add(0);
+                            return result;
+                        }
+                    }
+                    foreach (Piece.Requirement requirement in reqs)
+                    {
+                        if (requirement == null || requirement.m_amount <= 0)
+                            continue;
+                        string need = RequirementName(requirement);
+                        if (need == null)
+                            continue;
+                        int pc = 0;
+                        try { playerCovered.TryGetValue(need, out pc); } catch { pc = 0; }
+                        int remaining = requirement.m_amount - Math.Max(0, pc);
+                        if (remaining <= 0)
+                            continue;
+                        List<ItemData> stacks = new List<ItemData>();
+                        try
+                        {
+                            foreach (ItemData stack in inv.GetAllItems())
+                            {
+                                if (stack != null && stack.m_shared != null && string.Equals(stack.m_shared.m_name, need, StringComparison.Ordinal))
+                                    stacks.Add(stack);
+                            }
+                        }
+                        catch { stacks = null; }
+                        if (stacks == null)
+                        {
+                            TxLog.Warn("op=UPGRADEREQ REJECT spend resolve failed need=" + need);
+                            result.Status = TxStatus.Rejected;
+                            result.Accepted.Add(0);
+                            return result;
+                        }
+                        foreach (ItemData stack in stacks)
+                        {
+                            if (remaining <= 0)
+                                break;
+                            int n = remaining < stack.m_stack ? remaining : stack.m_stack;
+                            int got = 0;
+                            try { got = TxInventory.RemoveExact(inv, stack, n); } catch { got = 0; }
+                            remaining -= got;
+                        }
+                        if (remaining > 0)
+                        {
+                            TxLog.Warn("op=UPGRADEREQ REJECT spend shortfall need=" + need);
+                            result.Status = TxStatus.Rejected;
+                            result.Accepted.Add(0);
+                            return result;
+                        }
+                    }
+                }
+            }
+            try { zdo.Set("BestAutoSort.ChestTier", tier); }
+            catch (Exception ex)
+            {
+                TxLog.Warn("op=UPGRADEREQ REJECT marker write failed: " + ex.Message);
+                result.Status = TxStatus.Rejected;
+                result.Accepted.Add(0);
+                return result;
+            }
+            result.Status = TxStatus.Accepted;
+            result.Accepted.Add(1);
+            try { result.Receipt = zdo.m_uid.ToString(); } catch { result.Receipt = string.Empty; }
+            TxLog.Info("op=UPGRADEREQ ACCEPTED tier=" + tier + " (in-place marker, receipt=self)");
+            return result;
+        }
+
+        /// <summary>
+        /// Player-sourced cost claims (split upgrade): sums call.Items by item
+        /// name. The client claimed-removed these at submit (shared Add-claim
+        /// path) and removes them on Accepted; the amounts are trusted claims
+        /// (vanilla-equivalent trust: building consumes client-side) while the
+        /// chest remainder is strictly verified above. Non-positive amounts and
+        /// nulls are ignored (never negative cover).
+        /// </summary>
+        private static Dictionary<string, int> PlayerCostCover(TxJob job)
+        {
+            Dictionary<string, int> cover = new Dictionary<string, int>();
+            try
+            {
+                if (job == null || job.Call == null || job.Call.Items == null)
+                    return cover;
+                foreach (TxOpItem it in job.Call.Items)
+                {
+                    try
+                    {
+                        if (it == null || it.Amount <= 0 || it.Snapshot == null || it.Snapshot.m_shared == null)
+                            continue;
+                        string name = it.Snapshot.m_shared.m_name;
+                        if (string.IsNullOrEmpty(name))
+                            continue;
+                        int cur = 0;
+                        cover.TryGetValue(name, out cur);
+                        cover[name] = cur + it.Amount;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return cover;
+        }
+
+        private static string RequirementName(Piece.Requirement requirement)
+        {
+            try
+            {
+                if (requirement != null && requirement.m_resItem != null && requirement.m_resItem.m_itemData != null && requirement.m_resItem.m_itemData.m_shared != null)
+                    return requirement.m_resItem.m_itemData.m_shared.m_name;
+            }
+            catch { }
+            return null;
+        }
+
+        private static int CountInInventory(Inventory inv, string name)
+        {
+            int have = 0;
+            try
+            {
+                if (inv == null || name == null)
+                    return 0;
+                foreach (ItemData stack in inv.GetAllItems())
+                {
+                    if (stack != null && stack.m_shared != null && string.Equals(stack.m_shared.m_name, name, StringComparison.Ordinal))
+                        have += Math.Max(0, stack.m_stack);
+                }
+            }
+            catch { }
+            return have;
         }
 
         private static bool WriteRingTo(ServerChestSession session, ZDO zdo)

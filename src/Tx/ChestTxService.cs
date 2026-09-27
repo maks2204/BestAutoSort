@@ -1122,7 +1122,9 @@ namespace BestAutoSort.Tx
         private static bool TryClaimAddItems(TxOpCall call, out System.Collections.Generic.List<ItemDrop.ItemData> claimed)
         {
             claimed = null;
-            if (call == null || (call.Op != TxOp.Add && call.Op != TxOp.AddBatch))
+            if (call == null || (call.Op != TxOp.Add && call.Op != TxOp.AddBatch && call.Op != TxOp.UpgradeRequest))
+                return true;
+            if (call.Op == TxOp.UpgradeRequest && call.Items.Count == 0)
                 return true;
             int pruned = 0;
             for (int i = call.Items.Count - 1; i >= 0; i--)
@@ -1434,6 +1436,9 @@ namespace BestAutoSort.Tx
                     pkg.Write(call.Tier);
                     pkg.Write(call.UpgradeNonce);
                     pkg.Write(call.UpgradeFree);
+                    pkg.Write(call.Items.Count);
+                    for (int i = 0; i < call.Items.Count; i++)
+                        WriteOpItem(pkg, call.Items[i]);
                     break;
                 case TxOp.SetRule:
                     pkg.Write(call.Rule ?? string.Empty);
@@ -1938,6 +1943,20 @@ namespace BestAutoSort.Tx
                         call.UpgradeNonce = payload.ReadUInt();
                         try { call.UpgradeFree = payload.ReadBool(); }
                         catch { call.UpgradeFree = false; }
+                        int upgradeCount = -1;
+                        try { upgradeCount = payload.ReadInt(); } catch { upgradeCount = -1; }
+                        if (upgradeCount >= 0)
+                        {
+                            if (upgradeCount > 64)
+                                return false;
+                            for (int ui = 0; ui < upgradeCount; ui++)
+                            {
+                                TxOpItem uitem;
+                                if (!ReadOpItem(payload, out uitem))
+                                    return false;
+                                call.Items.Add(uitem);
+                            }
+                        }
                         break;
                     case TxOp.SetRule:
                         call.Rule = payload.ReadString();

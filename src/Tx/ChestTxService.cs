@@ -2805,6 +2805,16 @@ namespace BestAutoSort.Tx
             r.Sender = src.Sender;
             r.IsReplay = isReplay;
             r.Receipt = src.Receipt;
+            try
+            {
+                r.RefundPrefabs = src.RefundPrefabs != null ? new List<int>(src.RefundPrefabs) : new List<int>();
+                r.RefundAmounts = src.RefundAmounts != null ? new List<int>(src.RefundAmounts) : new List<int>();
+            }
+            catch
+            {
+                r.RefundPrefabs = new List<int>();
+                r.RefundAmounts = new List<int>();
+            }
             return r;
         }
 

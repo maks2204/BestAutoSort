@@ -45,6 +45,13 @@ namespace BestAutoSort.Tx
             new Dictionary<string, Container>(StringComparer.Ordinal);
 
         private const string UpOpKey = "BestAutoSort.UpgradeOp";
+        private static readonly HashSet<string> AppliedUpgradeRefunds = new HashSet<string>(StringComparer.Ordinal);
+        private const int UpgradeRefundCap = 256;
+
+        internal static void ResetUpgradeRefunds()
+        {
+            try { AppliedUpgradeRefunds.Clear(); } catch { }
+        }
         private const string UpPhaseKey = "BestAutoSort.UpgradePhase";
         private const string UpGhostKey = "BestAutoSort.UpgradeGhost";
         private const string UpCountKey = "BestAutoSort.UpgradeCount";
@@ -371,6 +378,8 @@ namespace BestAutoSort.Tx
                     }
                     else
                         TellPlayer("Chest upgrade applied but the new chest is unknown. Check the chest before retrying.");
+                    try { ApplyUpgradeRefund(container, pkg, requestedTier); }
+                    catch (Exception ex) { TxLog.Warn("upgrade refund failed: " + ex.Message); }
                 }
                 else if (disp == TxCompletionKind.FailedNotCommitted)
                 {
@@ -438,6 +447,149 @@ namespace BestAutoSort.Tx
             catch
             {
                 return false;
+            }
+        }
+
+        private static void ApplyUpgradeRefund(Container container, ZPackage pkg, int requestedTier)
+        {
+            if ((UnityEngine.Object)container == (UnityEngine.Object)null || pkg == null)
+                return;
+            List<KeyValuePair<int, int>> refunds = new List<KeyValuePair<int, int>>();
+            bool sectionPresent = false;
+            bool receiptPresent = false;
+            try
+            {
+                pkg.SetPos(0);
+                int n = pkg.ReadInt();
+                for (int i = 0; i < n; i++)
+                    pkg.ReadInt();
+                string receipt = pkg.ReadString();
+                receiptPresent = !string.IsNullOrEmpty(receipt);
+                int rn = pkg.ReadInt();
+                if (rn < 0 || rn > 64)
+                    return;
+                sectionPresent = true;
+                for (int i = 0; i < rn; i++)
+                {
+                    int phash = pkg.ReadInt();
+                    int amount = pkg.ReadInt();
+                    if (phash != 0 && amount > 0)
+                        refunds.Add(new KeyValuePair<int, int>(phash, amount));
+                }
+            }
+            catch
+            {
+                if (receiptPresent)
+                {
+                    TxLog.Warn("upgrade refund unreadable (version skew?): no pocket refund applied");
+                    try { TellPlayer("Chest upgraded, but the refund could not be read (version skew?). Check the chest."); } catch { }
+                }
+                return;
+            }
+            if (!sectionPresent || refunds.Count == 0)
+                return;
+            string chestKey = "?";
+            try
+            {
+                ZNetView nv = ((Component)container).GetComponent<ZNetView>();
+                if ((UnityEngine.Object)nv != (UnityEngine.Object)null && nv.IsValid())
+                    chestKey = nv.GetZDO().m_uid.ToString();
+            }
+            catch { chestKey = "?"; }
+            string guardKey = chestKey + "#up" + requestedTier;
+            try
+            {
+                if (!AppliedUpgradeRefunds.Add(guardKey))
+                {
+                    TxLog.Info("upgrade refund already applied, skipping duplicate");
+                    return;
+                }
+                while (AppliedUpgradeRefunds.Count > UpgradeRefundCap)
+                {
+                    string oldest = null;
+                    foreach (string k in AppliedUpgradeRefunds) { oldest = k; break; }
+                    if (oldest == null)
+                        break;
+                    try { AppliedUpgradeRefunds.Remove(oldest); } catch { break; }
+                }
+            }
+            catch { }
+            Player player = null;
+            try { player = Player.m_localPlayer; } catch { player = null; }
+            if ((UnityEngine.Object)player == (UnityEngine.Object)null)
+            {
+                TxLog.Warn("upgrade refund lost (no local player): report version skew");
+                return;
+            }
+            Inventory playerInv = null;
+            try { playerInv = ((Humanoid)player).GetInventory(); } catch { playerInv = null; }
+            if (playerInv == null)
+            {
+                TxLog.Warn("upgrade refund lost (no player inventory)");
+                return;
+            }
+            Vector3 feet = Vector3.zero;
+            try { feet = ((Component)player).transform.position; } catch { }
+            List<string> summary = new List<string>();
+            foreach (KeyValuePair<int, int> rf in refunds)
+            {
+                try
+                {
+                    ObjectDB db = ObjectDB.instance;
+                    if ((UnityEngine.Object)db == (UnityEngine.Object)null)
+                        continue;
+                    GameObject prefab = db.GetItemPrefab(rf.Key);
+                    if ((UnityEngine.Object)prefab == (UnityEngine.Object)null)
+                        continue;
+                    ItemDrop drop = prefab.GetComponent<ItemDrop>();
+                    if ((UnityEngine.Object)drop == (UnityEngine.Object)null || drop.m_itemData == null || drop.m_itemData.m_shared == null)
+                        continue;
+                    int maxStack = drop.m_itemData.m_shared.m_maxStackSize;
+                    if (maxStack < 1)
+                        maxStack = 1;
+                    string sharedName = drop.m_itemData.m_shared.m_name;
+                    int left = rf.Value;
+                    int pocketed = 0;
+                    int dropped = 0;
+                    while (left > 0)
+                    {
+                        int n2 = left < maxStack ? left : maxStack;
+                        ItemDrop.ItemData item = drop.m_itemData.Clone();
+                        item.m_stack = n2;
+                        if ((UnityEngine.Object)item.m_dropPrefab == (UnityEngine.Object)null)
+                            item.m_dropPrefab = prefab;
+                        bool added = false;
+                        try { added = playerInv.AddItem(item); } catch { added = false; }
+                        if (added)
+                        {
+                            pocketed += n2;
+                            left -= n2;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                Vector3 at = feet + Vector3.up * 0.5f;
+                                ItemDrop.DropItem(item, n2, at, Quaternion.identity);
+                                dropped += n2;
+                                left -= n2;
+                            }
+                            catch { break; }
+                        }
+                    }
+                    string display = sharedName;
+                    try { if (Localization.instance != null) display = Localization.instance.Localize(sharedName); } catch { }
+                    if (pocketed > 0 || dropped > 0)
+                    {
+                        summary.Add((pocketed + dropped) + " " + display + (dropped > 0 ? " (" + dropped + " on the ground)" : ""));
+                        TxLog.Info("upgrade-refund applied " + sharedName + "x" + (pocketed + dropped) + " pockets=" + pocketed + " ground=" + dropped);
+                    }
+                }
+                catch { }
+            }
+            if (summary.Count > 0)
+            {
+                try { TellPlayer("Upgrade refund: " + string.Join(", ", summary.ToArray())); } catch { }
             }
         }
 

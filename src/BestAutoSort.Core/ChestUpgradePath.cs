@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace BestAutoSort.Core;
 
@@ -84,6 +85,40 @@ internal static class ChestUpgradePath
 		{
 			return false;
 		}
+	}
+
+	internal static Dictionary<string, int> DeltaCosts(IDictionary<string, int> target, IDictionary<string, int> current)
+	{
+		Dictionary<string, int> delta = new Dictionary<string, int>(StringComparer.Ordinal);
+		if (target == null)
+		{
+			return delta;
+		}
+		foreach (KeyValuePair<string, int> kv in target)
+		{
+			if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0)
+			{
+				continue;
+			}
+			int already = 0;
+			try
+			{
+				if (current != null)
+				{
+					current.TryGetValue(kv.Key, out already);
+				}
+			}
+			catch
+			{
+				already = 0;
+			}
+			int d = kv.Value - Math.Max(0, already);
+			if (d > 0)
+			{
+				delta[kv.Key] = d;
+			}
+		}
+		return delta;
 	}
 
 	internal static string PrefabForTier(int tier)

@@ -105,6 +105,9 @@ namespace BestAutoSort.Tx
         /// Accepted means "completed but new chest unknown, check manually".
         /// </summary>
         public string Receipt;
+        /// <summary>UpgradeRequest pocket-refund payload (parallel arrays): item prefab name hashes + amounts, previous-tier-unique mats minted back to the upgrader. Empty = none due. Never survives as a re-mint: replays carry the same payload and the client refund-once guard drops duplicates.</summary>
+        public List<int> RefundPrefabs = new List<int>();
+        public List<int> RefundAmounts = new List<int>();
         /// <summary>True when the entry was restored without exact payloads (legacy ring or inexact Take metadata).</summary>
         public bool TotalsOnly;
         /// <summary>Authenticated sender peer key recorded at commit (TxIdGen.PeerOf(txId)).</summary>

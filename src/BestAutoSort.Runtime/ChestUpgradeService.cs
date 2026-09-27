@@ -182,10 +182,11 @@ internal static class ChestUpgradeService
 		}
 		if (!freeBuild && !localCheat)
 		{
-			string missing = MissingInSource(source, piece);
+			System.Collections.Generic.Dictionary<string, int> deltaCosts = DeltaAmountsForUpgrade(currentTier, piece);
+			string missing = MissingInSource(source, piece, deltaCosts);
 			if (!string.IsNullOrEmpty(missing))
 			{
-				if (!TryGatherAndUpgrade(source, targetTier, piece, localPlayer))
+				if (!TryGatherAndUpgrade(source, targetTier, piece, localPlayer, deltaCosts))
 					ShowMessage("Place " + missing + " inside the chest first — the upgrade consumes from the chest, never your inventory.");
 				return;
 			}
@@ -202,7 +203,7 @@ internal static class ChestUpgradeService
 	/// an overcharge. Returns true when the gather chain started (the upgrade
 	/// submits on deposit completion) or was unnecessary.
 	/// </summary>
-	private static bool TryGatherAndUpgrade(Container source, int targetTier, Piece piece, Player localPlayer)
+	private static bool TryGatherAndUpgrade(Container source, int targetTier, Piece piece, Player localPlayer, System.Collections.Generic.Dictionary<string, int> deltaCosts)
 	{
 		try
 		{
@@ -214,18 +215,14 @@ internal static class ChestUpgradeService
 				return false;
 			System.Collections.Generic.List<BestAutoSort.Tx.TxOpItem> playerCosts = new System.Collections.Generic.List<BestAutoSort.Tx.TxOpItem>();
 			System.Collections.Generic.List<string> stillShort = new System.Collections.Generic.List<string>();
-			foreach (Piece.Requirement requirement in piece.m_resources)
+			System.Collections.Generic.Dictionary<string, int> needs = deltaCosts;
+			if (needs == null)
+				needs = DeltaAmountsForUpgrade(ManagedTier(source), piece);
+			foreach (System.Collections.Generic.KeyValuePair<string, int> dc in needs)
 			{
-				if (requirement == null || requirement.m_amount <= 0)
-					continue;
-				string need = null;
-				try
-				{
-					if (requirement.m_resItem != null && requirement.m_resItem.m_itemData != null && requirement.m_resItem.m_itemData.m_shared != null)
-						need = requirement.m_resItem.m_itemData.m_shared.m_name;
-				}
-				catch { need = null; }
-				if (need == null)
+				string need = dc.Key;
+				int needAmount = dc.Value;
+				if (string.IsNullOrEmpty(need) || needAmount <= 0)
 					continue;
 				int srcHave = 0;
 				try
@@ -237,7 +234,7 @@ internal static class ChestUpgradeService
 					}
 				}
 				catch { srcHave = 0; }
-				int deficit = requirement.m_amount - srcHave;
+				int deficit = needAmount - srcHave;
 				if (deficit <= 0)
 					continue;
 				int playerHave = 0;
@@ -345,7 +342,64 @@ internal static class ChestUpgradeService
 		catch { }
 	}
 
-	private static string MissingInSource(Container source, Piece piece)
+	private static System.Collections.Generic.Dictionary<string, int> DeltaAmountsForUpgrade(int currentTier, Piece targetPiece)
+	{
+		System.Collections.Generic.Dictionary<string, int> target = new System.Collections.Generic.Dictionary<string, int>(StringComparer.Ordinal);
+		try
+		{
+			if (targetPiece != null && targetPiece.m_resources != null)
+			{
+				foreach (Piece.Requirement requirement in targetPiece.m_resources)
+				{
+					if (requirement == null || requirement.m_amount <= 0)
+						continue;
+					string need = null;
+					try
+					{
+						if (requirement.m_resItem != null && requirement.m_resItem.m_itemData != null && requirement.m_resItem.m_itemData.m_shared != null)
+							need = requirement.m_resItem.m_itemData.m_shared.m_name;
+					}
+					catch { need = null; }
+					if (need == null)
+						continue;
+					int prev = 0;
+					try { target.TryGetValue(need, out prev); } catch { prev = 0; }
+					try { target[need] = Math.Max(0, prev) + requirement.m_amount; } catch { }
+				}
+			}
+		}
+		catch { }
+		System.Collections.Generic.Dictionary<string, int> current = null;
+		try
+		{
+			if (currentTier >= 0 && currentTier < Tiers.Length && TryGetTierComponents(Tiers[currentTier], out Container _, out Piece currentPiece) && (Object)(object)currentPiece != (Object)null && currentPiece.m_resources != null)
+			{
+				current = new System.Collections.Generic.Dictionary<string, int>(StringComparer.Ordinal);
+				foreach (Piece.Requirement cr in currentPiece.m_resources)
+				{
+					if (cr == null || cr.m_amount <= 0)
+						continue;
+					string cneed = null;
+					try
+					{
+						if (cr.m_resItem != null && cr.m_resItem.m_itemData != null && cr.m_resItem.m_itemData.m_shared != null)
+							cneed = cr.m_resItem.m_itemData.m_shared.m_name;
+					}
+					catch { cneed = null; }
+					if (cneed == null)
+						continue;
+					int cprev = 0;
+					try { current.TryGetValue(cneed, out cprev); } catch { cprev = 0; }
+					try { current[cneed] = Math.Max(0, cprev) + cr.m_amount; } catch { }
+				}
+			}
+		}
+		catch { current = null; }
+		try { return BestAutoSort.Core.ChestUpgradePath.DeltaCosts(target, current); }
+		catch { return target; }
+	}
+
+	private static string MissingInSource(Container source, Piece piece, System.Collections.Generic.Dictionary<string, int> deltaCosts)
 	{
 		try
 		{
@@ -369,22 +423,26 @@ internal static class ChestUpgradeService
 			}
 			catch { zid = "?"; }
 			List<string> missing = new List<string>();
-			foreach (Piece.Requirement requirement in piece.m_resources)
+			System.Collections.Generic.Dictionary<string, int> needs = deltaCosts;
+			if (needs == null)
+				needs = DeltaAmountsForUpgrade(ManagedTier(source), piece);
+			foreach (System.Collections.Generic.KeyValuePair<string, int> dc in needs)
 			{
-				if (requirement == null || requirement.m_amount <= 0 || requirement.m_resItem?.m_itemData?.m_shared == null)
+				string name = dc.Key;
+				int needAmount = dc.Value;
+				if (string.IsNullOrEmpty(name) || needAmount <= 0)
 					continue;
-				string name = requirement.m_resItem.m_itemData.m_shared.m_name;
 				int have = 0;
 				foreach (ItemData item in inv.GetAllItems())
 				{
 					if (item != null && item.m_shared != null && string.Equals(item.m_shared.m_name, name, StringComparison.Ordinal))
 						have += Math.Max(0, item.m_stack);
 				}
-				if (have < requirement.m_amount)
+				if (have < needAmount)
 				{
 					string display = ((Localization.instance != null) ? Localization.instance.Localize(name) : name);
-					missing.Add((requirement.m_amount - have) + " " + display);
-					try { Plugin.LogInstance.LogInfo((object)("[ChestTX] upgrade-missing chest=" + zid + " need=" + name + "x" + requirement.m_amount + " have=" + have + " invStacks=" + totalStacks)); } catch { }
+					missing.Add((needAmount - have) + " " + display);
+					try { Plugin.LogInstance.LogInfo((object)("[ChestTX] upgrade-missing chest=" + zid + " need=" + name + "x" + needAmount + " have=" + have + " invStacks=" + totalStacks)); } catch { }
 				}
 			}
 				return string.Join(", ", missing);

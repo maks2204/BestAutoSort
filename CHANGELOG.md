@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 0.6.24 (delta pricing + pocket refund)
+
+- Upgrades charge target-minus-current per resource (no double-paying
+  overlap); unreadable current recipe degrades to full price, never free.
+- Previous-tier-unique mats (e.g. iron for reinforced-to-blackmetal) are
+  refunded to the upgrader's pockets in the upgrade response (refund-once
+  guarded, ground fallback when full).
+
+
 ## 0.6.23 (server dims follow chest tier)
 
 - Server chest sessions grow their working inventory from the tier prefab

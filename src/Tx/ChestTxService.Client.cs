@@ -72,6 +72,25 @@ namespace BestAutoSort.Tx
                     // EncodeCachedBody): receipt-less Accepted is "completed
                     // but new chest unknown".
                     body.Write(r.Receipt ?? string.Empty);
+                    try
+                    {
+                        int rn = 0;
+                        try
+                        {
+                            if (r.RefundPrefabs != null && r.RefundAmounts != null)
+                                rn = Math.Min(r.RefundPrefabs.Count, r.RefundAmounts.Count);
+                        }
+                        catch { rn = 0; }
+                        if (rn < 0)
+                            rn = 0;
+                        body.Write(rn);
+                        for (int i = 0; i < rn; i++)
+                        {
+                            body.Write(r.RefundPrefabs[i]);
+                            body.Write(r.RefundAmounts[i]);
+                        }
+                    }
+                    catch { }
                     break;
                 case TxOp.Take:
                 case TxOp.TakeBatch:

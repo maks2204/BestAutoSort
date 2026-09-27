@@ -848,6 +848,7 @@ namespace BestAutoSort.Tx
         /// nothing hands over. UpgradeRequest frames that fail validation are
         /// deterministic Rejected (persisted, replayable).
         /// </summary>
+
         private static StoredResult ExecuteUpgradeMarker(ServerChestSession session, ZDO zdo, ChestState state, TxJob job, Inventory inv)
         {
             StoredResult result = new StoredResult();
@@ -931,6 +932,7 @@ namespace BestAutoSort.Tx
                         return result;
                     }
                     Dictionary<string, int> playerCovered = PlayerCostCover(job);
+                    Dictionary<string, int> targetAmounts = new Dictionary<string, int>(StringComparer.Ordinal);
                     foreach (Piece.Requirement requirement in reqs)
                     {
                         if (requirement == null || requirement.m_amount <= 0)
@@ -938,30 +940,76 @@ namespace BestAutoSort.Tx
                         string need = RequirementName(requirement);
                         if (need == null)
                             continue;
+                        int prev = 0;
+                        try { targetAmounts.TryGetValue(need, out prev); } catch { prev = 0; }
+                        try { targetAmounts[need] = Math.Max(0, prev) + requirement.m_amount; } catch { }
+                    }
+                    Dictionary<string, int> currentAmounts = null;
+                    Dictionary<string, ItemDrop> currentPrefabs = null;
+                    try
+                    {
+                        string currentPrefab = BestAutoSort.Core.ChestUpgradePath.PrefabForTier(current);
+                        ZNetScene scene3 = ZNetScene.instance;
+                        GameObject cp = scene3 != null ? scene3.GetPrefab(currentPrefab) : null;
+                        Piece currentPiece = (UnityEngine.Object)cp != (UnityEngine.Object)null ? cp.GetComponent<Piece>() : null;
+                        if ((UnityEngine.Object)currentPiece != (UnityEngine.Object)null && currentPiece.m_resources != null)
+                        {
+                            currentAmounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                            currentPrefabs = new Dictionary<string, ItemDrop>(StringComparer.Ordinal);
+                            foreach (Piece.Requirement cr in currentPiece.m_resources)
+                            {
+                                if (cr == null || cr.m_amount <= 0)
+                                    continue;
+                                string cneed = RequirementName(cr);
+                                if (cneed == null)
+                                    continue;
+                                try
+                                {
+                                    if (cr.m_resItem != null && !currentPrefabs.ContainsKey(cneed))
+                                        currentPrefabs[cneed] = cr.m_resItem;
+                                }
+                                catch { }
+                                int cprev = 0;
+                                try { currentAmounts.TryGetValue(cneed, out cprev); } catch { cprev = 0; }
+                                try { currentAmounts[cneed] = Math.Max(0, cprev) + cr.m_amount; } catch { }
+                            }
+                        }
+                    }
+                    catch { currentAmounts = null; }
+                    Dictionary<string, int> deltaCosts;
+                    try { deltaCosts = BestAutoSort.Core.ChestUpgradePath.DeltaCosts(targetAmounts, currentAmounts); }
+                    catch { deltaCosts = targetAmounts; }
+                    if (deltaCosts == null)
+                        deltaCosts = targetAmounts;
+                    foreach (KeyValuePair<string, int> dc in deltaCosts)
+                    {
+                        string need = dc.Key;
+                        int needAmount = dc.Value;
+                        if (need == null || needAmount <= 0)
+                            continue;
                         int pc = 0;
                         try { playerCovered.TryGetValue(need, out pc); } catch { pc = 0; }
-                        int chestNeed = requirement.m_amount - Math.Max(0, pc);
+                        int chestNeed = needAmount - Math.Max(0, pc);
                         if (chestNeed < 0)
                             chestNeed = 0;
                         int have = CountInInventory(inv, need);
                         if (have < chestNeed)
                         {
-                            TxLog.Warn("op=UPGRADEREQ REJECT short need=" + need + "x" + requirement.m_amount + " playerCovered=" + pc + " chestHave=" + have);
+                            TxLog.Warn("op=UPGRADEREQ REJECT short need=" + need + "x" + needAmount + " playerCovered=" + pc + " chestHave=" + have);
                             result.Status = TxStatus.Rejected;
                             result.Accepted.Add(0);
                             return result;
                         }
                     }
-                    foreach (Piece.Requirement requirement in reqs)
+                    foreach (KeyValuePair<string, int> dc2 in deltaCosts)
                     {
-                        if (requirement == null || requirement.m_amount <= 0)
-                            continue;
-                        string need = RequirementName(requirement);
-                        if (need == null)
+                        string need = dc2.Key;
+                        int needAmount = dc2.Value;
+                        if (need == null || needAmount <= 0)
                             continue;
                         int pc = 0;
                         try { playerCovered.TryGetValue(need, out pc); } catch { pc = 0; }
-                        int remaining = requirement.m_amount - Math.Max(0, pc);
+                        int remaining = needAmount - Math.Max(0, pc);
                         if (remaining <= 0)
                             continue;
                         List<ItemData> stacks = new List<ItemData>();
@@ -996,6 +1044,49 @@ namespace BestAutoSort.Tx
                             result.Status = TxStatus.Rejected;
                             result.Accepted.Add(0);
                             return result;
+                        }
+                    }
+                    Dictionary<string, int> refundCosts = null;
+                    try { refundCosts = BestAutoSort.Core.ChestUpgradePath.DeltaCosts(currentAmounts, targetAmounts); }
+                    catch { refundCosts = null; }
+                    if (refundCosts != null)
+                    {
+                        foreach (KeyValuePair<string, int> rc in refundCosts)
+                        {
+                            string rneed = rc.Key;
+                            int ramount = rc.Value;
+                            if (string.IsNullOrEmpty(rneed) || ramount <= 0)
+                                continue;
+                            ItemDrop rprefab = null;
+                            try
+                            {
+                                if (currentPrefabs != null)
+                                    currentPrefabs.TryGetValue(rneed, out rprefab);
+                            }
+                            catch { rprefab = null; }
+                            if ((UnityEngine.Object)rprefab == (UnityEngine.Object)null)
+                            {
+                                TxLog.Warn("op=UPGRADEREQ refund skipped (no prefab) need=" + rneed + "x" + ramount);
+                                continue;
+                            }
+                            int phash = 0;
+                            try { phash = ((Component)rprefab).gameObject.name.GetStableHashCode(); } catch { phash = 0; }
+                            if (phash == 0)
+                            {
+                                TxLog.Warn("op=UPGRADEREQ refund skipped (no hash) need=" + rneed + "x" + ramount);
+                                continue;
+                            }
+                            try
+                            {
+                                if (result.RefundPrefabs == null)
+                                    result.RefundPrefabs = new List<int>();
+                                if (result.RefundAmounts == null)
+                                    result.RefundAmounts = new List<int>();
+                                result.RefundPrefabs.Add(phash);
+                                result.RefundAmounts.Add(ramount);
+                            }
+                            catch { }
+                            TxLog.Info("op=UPGRADEREQ refund-queued " + rneed + "x" + ramount);
                         }
                     }
                 }

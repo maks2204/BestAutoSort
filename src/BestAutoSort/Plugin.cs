@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.6.23";
+	internal const string PluginVersion = "0.6.24";
 
 
 	private Harmony? _harmony;
@@ -311,6 +311,7 @@ public sealed class Plugin : BaseUnityPlugin
 		QuickStackService?.Reset();
 		ChestTxService.Reset();
 		TxDestroy.Reset();
+		ChestTxService.ResetUpgradeRefunds();
 		TxNet.Reset();
 		AutoFeedService.Reset();
 		InventoryButtons.Detach();

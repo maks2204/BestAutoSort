@@ -190,7 +190,7 @@ namespace BestAutoSort.Tx
                 // writes (virgin empty-write, owner-clear, ring/floor writes),
                 // so an early access verdict can never be invalidated by them.
                 string accessWhy = "ok";
-                if (!ServerAccess.CanUse(zdo, sender, playerId, actorPos, out accessWhy))
+                if (!ServerAccess.CanUse(zdo, sender, playerId, actorPos, call.FeederId, out accessWhy))
                 {
                     TxLog.Warn("container=" + TxLog.Zid(session.ZdoId) + " tx=" + txId + " REJECT access (" + accessWhy + ")");
                     TxStatus arej;

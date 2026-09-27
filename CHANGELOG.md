@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## 0.6.16 (feed flight visuals)
+
+- Autofeed renders local flight visuals (chest to animal mouth) on
+  successful feed; watchers already covered by server broadcast.
+
+
 ## 0.6.15 (upgrade-missing diagnostics)
 
 - Upgrade missing-resources check logs need/have/invStacks per requirement

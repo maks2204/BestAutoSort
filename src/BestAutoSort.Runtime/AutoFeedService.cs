@@ -351,6 +351,16 @@ internal static class AutoFeedService
 			{
 				ConsumedItemMethod.Invoke(live, new object[1] { prefab });
 				LogProductionDiagnostic(tameable, "Fed " + got.Item.m_shared.m_name + " to " + ((Object)live).name + " via tx.", warning: false);
+				try
+				{
+					if (got.Accepted > 0 && got.Item.m_shared != null)
+					{
+						System.Collections.Generic.List<TransferRecord> records = new System.Collections.Generic.List<TransferRecord>();
+						records.Add(new TransferRecord(got.Item.m_shared.m_name, got.Item.GetIcon(), got.Accepted, got.Item.m_shared.m_maxStackSize));
+						TransferVisuals.PlayFrom(records, container, true, animalPos);
+					}
+				}
+				catch { }
 			}
 			else
 			{

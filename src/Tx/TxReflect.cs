@@ -1,7 +1,6 @@
 using System;
 using System.Reflection;
 using BestAutoSort.Runtime;
-using BestAutoSort.TxCore;
 using HarmonyLib;
 
 namespace BestAutoSort.Tx
@@ -56,35 +55,6 @@ namespace BestAutoSort.Tx
         internal static void SaveContainer(Container container)
         {
             SaveMethod.Invoke(container, Array.Empty<object>());
-            // Every direct save re-anchors the session content hash (when a
-            // session exists): host-side loans/sorts/trash/restock mutate RAM
-            // and save outside any Tx commit, and without this the next remote
-            // job would read our own save as a foreign write. Never touches
-            // quarantine flags; failures leave the hash as-was.
-            try
-            {
-                ZNetView nv = GetNetView(container);
-                ZDO zdo = null;
-                try { zdo = (Object)nv != (Object)null && nv.IsValid() ? nv.GetZDO() : null; } catch { zdo = null; }
-                if (zdo != null)
-                {
-                    ServerChestSession session = null;
-                    string why = "?";
-                    bool have = false;
-                    try { have = ServerChestSessions.TryGetOrCreate(zdo, out session, out why); } catch { have = false; }
-                    if (have && session != null)
-                    {
-                        byte[] cur = null;
-                        try { cur = TxSItemsGuard.CloneBytes(zdo.GetByteArray(ZDOVars.s_items)); } catch { cur = null; }
-                        if (cur != null)
-                        {
-                            try { session.SItemsHash = ServerChestSessions.Fnv1a64(cur); session.HasSItemsHash = true; } catch { }
-                            try { session.LastSeenRev = zdo.DataRevision; } catch { }
-                        }
-                    }
-                }
-            }
-            catch { }
         }
 
         internal static bool LoadContainer(Container container)

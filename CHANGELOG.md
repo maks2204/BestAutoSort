@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## 0.6.28 (hash anchor on every save)
+
+- A postfix on vanilla Container.Save re-anchors the session content
+  hash after every save, covering host-side vanilla drags, in-chest
+  moves, loans and sorts that persist outside any Tx commit (proven by
+  decompilation: inventory.m_onChanged auto-saves for the owner).
+
+
 ## 0.6.27 (save-anchored session hash)
 
 - Every direct container save re-anchors the session content hash, so

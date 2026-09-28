@@ -20,14 +20,18 @@ Notes:
 - Console command: `bestautosort`.
 - All players + server must run the same version (exact-match hello gate).
 
-> **0.6.x experimental:** the `0.6.x-Dedicated-Test` line migrates chests to
-> server authority (server/host permanently owns eligible chests; remote
-> clients are viewers/requesters only). The server-authority invariant is
-> **not yet claimed** pending live multi-peer verification. Mode/hello gate:
-> peers must match on `version` AND `auth` mode (`version;auth=N`); mismatched
-> peers are rejected. Vanilla (mod-less) clients are **unsupported** for
-> managed chests (view-only grant at best; local vanilla takes fork ghost
-> items). Remote chest upgrade runs only via the server-mediated
+> **0.6.x server authority:** the `0.6.x-Dedicated-Test` line makes the
+> server/host the permanent owner of eligible chests (option-B ZDO manager:
+> Take / Add / Move / Sort / UpgradeRequest / Destroy served server-side —
+> validate → apply → Save() → revision → respond; upgrades charge
+> target-minus-current with pocket refunds). Live-verified single-peer
+> (Accepted end-to-end, incl. upgrades with marker/dims/look). The
+> multi-peer invariant is **not yet claimed** (2-player flow, hammer
+> destroy on the run, autofeed soak pending). Mode/hello gate: peers must
+> match on `version` AND `auth` mode (`version;auth=N`); mismatched peers
+> are rejected. Vanilla (mod-less) clients are **unsupported** for managed
+> chests (view-only grant at best; local vanilla takes fork ghost items).
+> Remote chest upgrade runs only via the server-mediated
 > `TxOp.UpgradeRequest` contract (legacy direct-upgrade frames refused);
 > see `docs/remote-upgrade-mediated.md` including its 4 documented residuals.
 
@@ -36,7 +40,7 @@ Notes:
 ```
 +----------------+
 |   ONE CHEST    |
-|   ONE OWNER    |  <- ZDO owner = manager, never ping-ponged
+|   ONE OWNER    |  <- ZDO owner = SERVER, permanent, never migrates
 |   ONE TX       |  <- validate -> apply -> Save() -> revision -> respond
 |   AT A TIME    |     (per-chest serial queue, main thread)
 +----------------+
@@ -51,7 +55,7 @@ Details: `docs/CHEST_TX.md`.
 |  CLIENT  | -----------> |  CHEST ZNetView      | -----------> |  CLIENT  |
 | (any peer|  (no target: |  (engine routes the  |  (targeted   | (same     |
 |  incl.   |  straight to |   packet to the ZDO  |   at the     |  peer)    |
-|  server) |  the owner)  |   owner = MANAGER)   |   requester) |          |
+|  server) |  the owner)  |   owner = SERVER)    |   requester) |          |
 +----------+              +----------------------+              +----------+
    TxFlights (target 0 = broadcast, loopback included) ----------> EVERYBODY
    MultiUserHello (version string, exact match) -----------------> EVERYBODY

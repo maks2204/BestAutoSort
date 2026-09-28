@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.27 (save-anchored session hash)
+
+- Every direct container save re-anchors the session content hash, so
+  host-side crafting loans, sorts, trash and restocks no longer trip
+  FOREIGN-WRITE quarantine on the next remote op.
+
+
 ## 0.6.26 (live-commit hash re-anchor)
 
 - Host live commits re-anchor the session content hash after saving, so

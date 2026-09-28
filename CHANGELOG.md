@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.26 (live-commit hash re-anchor)
+
+- Host live commits re-anchor the session content hash after saving, so
+  the next remote job no longer reads our own save as a foreign write
+  (fixes FOREIGN-WRITE quarantine bricking host-mode chests).
+
+
 ## 0.6.25 (host viewer refresh)
 
 - Hosts holding a managed chest open now poll-refresh like remote

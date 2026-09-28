@@ -2739,6 +2739,33 @@ namespace BestAutoSort.Tx
                 // the pre-execution fence is durable — the same txId stays Indeterminate
                 // forever, never re-executes. The floor NEVER rolls back.
                 TxReflect.SaveContainer(state.Container);
+                // Host live commits bypass the session save path: re-anchor the
+                // content hash so the next remote job doesn't read our own save
+                // as a foreign write (host-local + remote jobs share one gate).
+                try
+                {
+                    ZNetView liveNv = TxReflect.GetNetView(state.Container);
+                    ZDO liveZdo = null;
+                    try { liveZdo = (Object)liveNv != (Object)null && liveNv.IsValid() ? liveNv.GetZDO() : null; } catch { liveZdo = null; }
+                    if (liveZdo != null)
+                    {
+                        ServerChestSession liveSession = null;
+                        string liveWhy = "?";
+                        bool haveSession = false;
+                        try { haveSession = ServerChestSessions.TryGetOrCreate(liveZdo, out liveSession, out liveWhy); } catch { haveSession = false; }
+                        if (haveSession && liveSession != null)
+                        {
+                            byte[] cur = null;
+                            try { cur = TxSItemsGuard.CloneBytes(liveZdo.GetByteArray(ZDOVars.s_items)); } catch { cur = null; }
+                            if (cur != null)
+                            {
+                                try { liveSession.SItemsHash = ServerChestSessions.Fnv1a64(cur); liveSession.HasSItemsHash = true; } catch { }
+                                try { liveSession.LastSeenRev = liveZdo.DataRevision; } catch { }
+                            }
+                        }
+                    }
+                }
+                catch { }
                 }
             }
             // Post-inventory-save commit checkpoint: captured BEFORE the ring

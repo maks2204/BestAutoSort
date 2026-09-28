@@ -24,7 +24,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	internal const string PluginName = "BestAutoSort";
 
-	internal const string PluginVersion = "0.6.25";
+	internal const string PluginVersion = "0.6.26";
 
 
 	private Harmony? _harmony;

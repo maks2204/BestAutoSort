@@ -1343,8 +1343,13 @@ namespace BestAutoSort.Tx
                     _nextPresenceAt = Time.realtimeSinceStartup + PresenceHeartbeat;
                 }
             }
-            if ((Object)open == (Object)null || IsManager(open))
+            if ((Object)open == (Object)null)
                 return;
+            // Host managers keep a live GUI: their RAM goes stale on remote
+            // commits (remote execution mutates session/ZDO, not live RAM),
+            // so they poll-refresh exactly like remote viewers (dedicated has
+            // no GUI and returns above; revision gating makes this a no-op
+            // when ZDO matches RAM).
             if (!IsShared(open))
                 return;
             if (Time.realtimeSinceStartup >= _nextPresenceAt)

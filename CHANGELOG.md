@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 0.6.25 (host viewer refresh)
+
+- Hosts holding a managed chest open now poll-refresh like remote
+  viewers (the manager skip assumed RAM==truth, false when remotes
+  commit via session/ZDO). Dedicated/single-player unaffected.
+
+
 ## 0.6.24 (delta pricing + pocket refund)
 
 - Upgrades charge target-minus-current per resource (no double-paying

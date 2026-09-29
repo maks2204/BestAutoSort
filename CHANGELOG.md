@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 ## 0.6.28 (hash anchor on every save)
 

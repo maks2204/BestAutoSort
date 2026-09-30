@@ -31,6 +31,11 @@ Notes:
 > match on `version` AND `auth` mode (`version;auth=N`); mismatched peers
 > are rejected. Vanilla (mod-less) clients are **unsupported** for managed
 > chests (view-only grant at best; local vanilla takes fork ghost items).
+> Legacy fallback (deprecated): `ChestAuthorityMode = LegacyDistributed`
+> in `dev.maks2204.bestautosort.cfg` (`[Multiplayer]`) restores pre-0.6
+> distributed ownership (e.g. for mods that resize chests or pull directly).
+> All peers must use the same mode; it re-opens the old dupe/race windows
+> and may be removed in a future version.
 > Remote chest upgrade runs only via the server-mediated
 > `TxOp.UpgradeRequest` contract (legacy direct-upgrade frames refused);
 > see `docs/remote-upgrade-mediated.md` including its 4 documented residuals.
